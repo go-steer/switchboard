@@ -1,0 +1,10 @@
+# Keep the Docker build context down to what the Go build needs:
+# go.mod/go.sum + source. Everything below can't affect the binary.
+.git
+.github
+.claude
+.dockerignore
+Dockerfile
+docs/
+*.md
+LICENSE

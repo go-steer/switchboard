@@ -1,0 +1,17 @@
+# Personal agent-session context — intentionally not checked in (AGENTS.md is the shared one).
+CLAUDE.md
+.claude/
+
+# Go build artifacts
+/switchboard
+bin/
+dist/
+*.test
+*.out
+coverage.*
+
+# Editor / OS noise
+.idea/
+.vscode/
+*.swp
+.DS_Store
