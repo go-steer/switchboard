@@ -217,7 +217,8 @@ func (a *Adapter) Send(ctx context.Context, r chat.Reply) error {
 	}
 
 	if a.richBlocks {
-		if blocks := sanitizeBlocks(renderBlocks(r.Text, toMrkdwn)); blocks != nil {
+		blocks := sanitizeBlocks(renderBlocks(r.Text, toMrkdwn))
+		if blocks != nil {
 			// The text fallback is for notifications/old clients only; clamp it
 			// so a very long turn does not bloat the payload (blocks carry the
 			// full content).
@@ -298,12 +299,19 @@ func (a *Adapter) resolveCaller(ctx context.Context, userID string) string {
 	return caller
 }
 
-var mentionRE = regexp.MustCompile(`<@[^>]+>`)
+// mentionRE matches Slack user-mention markup (<@U123>, <@U123|name>) plus any
+// spaces/tabs hugging it — but never newlines, so line breaks and leading
+// indentation survive the strip.
+var mentionRE = regexp.MustCompile(`[ \t]*<@[^>]+>[ \t]*`)
 
-// stripMentions removes Slack user-mention markup (<@U123>, <@U123|name>)
-// and normalizes surrounding whitespace, leaving the human-readable body.
+// stripMentions removes Slack user-mention markup and trims surrounding
+// whitespace, leaving the human-readable body. Each mention (with its adjacent
+// spaces) collapses to a single space so words never run together, but internal
+// newlines and indentation are preserved: markdown block structure (headers,
+// lists, tables, code fences) is newline-driven, so flattening all whitespace
+// would turn a multi-line turn into a single unrenderable line.
 func stripMentions(text string) string {
-	return strings.TrimSpace(strings.Join(strings.Fields(mentionRE.ReplaceAllString(text, " ")), " "))
+	return strings.TrimSpace(mentionRE.ReplaceAllString(text, " "))
 }
 
 // threadRoot returns the thread timestamp to key a conversation on: the

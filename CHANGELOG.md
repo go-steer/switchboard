@@ -35,6 +35,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `block_kit.py`; mrkdwn stays the default.
 
 ### Fixed
+- Slack mention stripping now preserves newlines and indentation: an inbound
+  turn's markdown block structure (headers, lists, tables, code fences) is
+  newline-driven, and the previous strip collapsed all whitespace, flattening a
+  multi-line message into a single unrenderable line.
 - `daemon.CreateSession` now reads the daemon's `sessionID` (camelCase) response
   field; it previously looked for `session_id` and always failed against a live
   daemon. Sessions are now addressed by the app-qualified route

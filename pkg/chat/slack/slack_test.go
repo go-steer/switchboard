@@ -23,9 +23,14 @@ func TestStripMentions(t *testing.T) {
 		{"<@U123> hello there", "hello there"},
 		{"<@U123|switchboard> deploy the thing", "deploy the thing"},
 		{"hey <@U123> can you <@U456> help", "hey can you help"},
-		{"   <@U123>   spaced   out   ", "spaced out"},
+		{"   <@U123>   spaced   out   ", "spaced   out"},
 		{"no mention here", "no mention here"},
 		{"<@U123>", ""},
+		// Multi-line turns keep their newlines and indentation so the
+		// markdown renderer still sees block structure (regression: a
+		// prior strip collapsed all whitespace and flattened the body).
+		{"<@U123>\n# Release Notes\n\n- alpha\n- beta", "# Release Notes\n\n- alpha\n- beta"},
+		{"<@U123> do this:\n- top\n    - nested", "do this:\n- top\n    - nested"},
 	}
 	for _, tc := range cases {
 		if got := stripMentions(tc.in); got != tc.want {
