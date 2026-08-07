@@ -18,6 +18,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   adapter, subsequent turns inject + wake. `serve` now boots the Slack adapter
   from `--slack-app-token-env` / `--slack-bot-token-env`.
 - `daemon.AgentText` helper to extract assistant text from `agent` SSE frames.
+- Slack mrkdwn rendering (`pkg/chat/slack`): replies now convert a model turn's
+  standard markdown into Slack mrkdwn before posting — bold/italic/strikethrough,
+  headers → bold, links → `<url|label>`, code spans/fences preserved (language
+  tag dropped), and broadcast mentions (`<!channel>` etc.) defused. Long turns
+  are split into multiple in-thread posts on paragraph boundaries, keeping code
+  fences balanced across the split. Ported from hermes-agent's Slack adapter.
 
 ### Fixed
 - `daemon.CreateSession` now reads the daemon's `sessionID` (camelCase) response

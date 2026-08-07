@@ -191,18 +191,29 @@ func (a *Adapter) handleMention(ctx context.Context, h chat.Handler, ev *slackev
 	}()
 }
 
-// Send posts a reply into its originating channel + thread.
+// Send renders the reply to Slack mrkdwn and posts it into its originating
+// channel + thread. A long turn is split into several ordered in-thread posts
+// so no single message is truncated. Text is passed with escape=false because
+// toMrkdwn has already escaped Slack control characters itself.
 func (a *Adapter) Send(ctx context.Context, r chat.Reply) error {
 	channel, thread, ok := splitConversation(r.Conversation)
 	if !ok {
 		return fmt.Errorf("slack: malformed conversation key %q", r.Conversation)
 	}
-	_, _, err := a.api.PostMessageContext(ctx, channel,
-		slack.MsgOptionText(r.Text, false),
-		slack.MsgOptionTS(thread),
-	)
-	if err != nil {
-		return fmt.Errorf("slack: post to %s: %w", r.Conversation, err)
+	rendered := toMrkdwn(r.Text)
+	if strings.TrimSpace(rendered) == "" {
+		return nil // nothing worth posting
+	}
+	for _, chunk := range chunkMessage(rendered, slackTextLimit) {
+		if strings.TrimSpace(chunk) == "" {
+			continue
+		}
+		if _, _, err := a.api.PostMessageContext(ctx, channel,
+			slack.MsgOptionText(chunk, false),
+			slack.MsgOptionTS(thread),
+		); err != nil {
+			return fmt.Errorf("slack: post to %s: %w", r.Conversation, err)
+		}
 	}
 	return nil
 }
