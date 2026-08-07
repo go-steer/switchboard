@@ -12,6 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# CI runs the exact same presubmit scripts as `dev/tools/ci` locally, so
+# a green local run is the green remote run. No paths-ignore: the Go
+# pipeline is fast and runs on every PR (docs-only PRs pass it too), so
+# no companion "docs stub" workflow is needed to satisfy branch
+# protection.
 name: ci
 on:
   push:
@@ -19,22 +24,12 @@ on:
   pull_request:
 
 jobs:
-  build-test:
+  ci:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - name: build
-        run: go build ./...
-      - name: vet
-        run: go vet ./...
-      - name: test
-        run: go test -race ./...
-      - name: gofmt
-        run: |
-          out=$(gofmt -l .)
-          if [ -n "$out" ]; then
-            echo "gofmt needed on:"; echo "$out"; exit 1
-          fi
+      - name: presubmits (dev/tools/ci)
+        run: dev/tools/ci

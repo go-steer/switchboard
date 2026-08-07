@@ -15,3 +15,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `Message` / `Reply` types.
 - `docs/DESIGN.md` — switchboard chat-gateway design (W1 of the Hermes
   replacement epic).
+- Contributor / agent guardrails ported from core-agent: `AGENTS.md` "How we
+  develop", `CONTRIBUTING.md` (DCO, Conventional Commits, no attribution),
+  `dev/ci/presubmits/*` + `dev/tools/ci`, the `review-gate` required CI check,
+  and the opt-in `dev/claude/settings-review-gate.json` hook sample.
