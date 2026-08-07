@@ -87,6 +87,8 @@ func runServe(args []string) error {
 		"how to derive X-Asserted-Caller from a Slack user: \"email\" (users.info) or \"id\" (raw user ID)")
 	richBlocks := fs.Bool("slack-rich-blocks", false,
 		"render replies as Slack Block Kit (headers, lists, tables, code); mrkdwn text is always sent as the fallback")
+	progressMode := fs.String("progress-mode", "indicator",
+		"long-turn feedback: \"indicator\" (post a placeholder while the agent works, cleared on reply) or \"off\"")
 	showVersion := fs.Bool("version", false, "print build identity and exit")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -102,6 +104,11 @@ func runServe(args []string) error {
 	}
 
 	callerMode, err := parseCallerMode(*callerID)
+	if err != nil {
+		return err
+	}
+
+	progress, err := parseProgressMode(*progressMode)
 	if err != nil {
 		return err
 	}
@@ -122,7 +129,7 @@ func runServe(args []string) error {
 	if err != nil {
 		return fmt.Errorf("slack adapter: %w (set $%s and $%s)", err, *appTokenEnv, *botTokenEnv)
 	}
-	router := NewRouter(dc, adapter, logf)
+	router := NewRouter(dc, adapter, progress, logf)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -145,6 +152,16 @@ func parseCallerMode(s string) (slack.CallerMode, error) {
 		return slack.CallerID, nil
 	default:
 		return "", fmt.Errorf("invalid --caller-id %q (want \"email\" or \"id\")", s)
+	}
+}
+
+// parseProgressMode validates the --progress-mode flag value.
+func parseProgressMode(s string) (ProgressMode, error) {
+	switch ProgressMode(s) {
+	case ProgressOff, ProgressIndicator:
+		return ProgressMode(s), nil
+	default:
+		return "", fmt.Errorf("invalid --progress-mode %q (want \"indicator\" or \"off\")", s)
 	}
 }
 

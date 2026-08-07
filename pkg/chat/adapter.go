@@ -21,7 +21,10 @@
 // follow (Phase 3) without touching the router.
 package chat
 
-import "context"
+import (
+	"context"
+	"errors"
+)
 
 // Message is one inbound turn from a chat platform, normalized across
 // providers.
@@ -52,6 +55,26 @@ type Reply struct {
 	Text string
 }
 
+// MessageRef identifies a reply already posted to a conversation so the
+// router can update or delete it later — the mechanism behind long-turn
+// progress indicators and in-place status edits. It is opaque to the
+// router; only the originating Adapter interprets ID (for Slack, the posted
+// message's timestamp). A zero MessageRef (empty ID) means "no message"
+// and is safe to pass to Update/Delete, which no-op on it.
+type MessageRef struct {
+	// Conversation echoes the Reply's conversation so the adapter can
+	// locate the message (Slack needs the channel to edit or delete).
+	Conversation string
+	// ID is the platform message identifier (Slack message ts).
+	ID string
+}
+
+// ErrUnsupported is returned by Update/Delete on a platform that cannot
+// edit or remove an already-posted message. The router treats it as
+// non-fatal and degrades to plain Send, so progress features never break a
+// platform that lacks them.
+var ErrUnsupported = errors.New("chat: operation not supported by this platform")
+
 // Handler receives normalized inbound messages. The router implements it;
 // an Adapter calls it once per inbound turn.
 type Handler interface {
@@ -72,6 +95,19 @@ type Adapter interface {
 	// returns when ctx is cancelled or the source fails unrecoverably.
 	Run(ctx context.Context, h Handler) error
 
-	// Send posts a reply into its originating conversation.
-	Send(ctx context.Context, r Reply) error
+	// Send posts a reply into its originating conversation and returns a
+	// ref to the posted message so it can later be updated or deleted. When
+	// a reply spans multiple platform messages, the ref identifies the
+	// first one.
+	Send(ctx context.Context, r Reply) (MessageRef, error)
+
+	// Update replaces the content of a previously posted message. It
+	// returns ErrUnsupported on platforms that cannot edit messages, and
+	// no-ops on a zero ref.
+	Update(ctx context.Context, ref MessageRef, r Reply) error
+
+	// Delete removes a previously posted message (e.g. a progress
+	// placeholder once the real reply is ready). It returns ErrUnsupported
+	// on platforms that cannot delete messages, and no-ops on a zero ref.
+	Delete(ctx context.Context, ref MessageRef) error
 }
