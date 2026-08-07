@@ -24,6 +24,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   tag dropped), and broadcast mentions (`<!channel>` etc.) defused. Long turns
   are split into multiple in-thread posts on paragraph boundaries, keeping code
   fences balanced across the split. Ported from hermes-agent's Slack adapter.
+- Slack Block Kit rendering (`pkg/chat/slack`, opt-in via `--slack-rich-blocks`):
+  replies can render as structured blocks — headers, dividers, nested
+  rich_text lists, native table blocks (monospace fallback when a table
+  exceeds Slack's limits), blockquotes, preformatted code, and mrkdwn section
+  paragraphs. The mrkdwn text is always sent alongside as the notification
+  fallback, the payload is clamped to Slack's block/section/header limits, and
+  a rejected payload (`invalid_blocks`) automatically retries as plain text so
+  a rich render can never lose a message. Ported from hermes-agent's
+  `block_kit.py`; mrkdwn stays the default.
 
 ### Fixed
 - `daemon.CreateSession` now reads the daemon's `sessionID` (camelCase) response
