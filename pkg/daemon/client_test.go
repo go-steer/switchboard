@@ -245,3 +245,55 @@ func TestAgentText(t *testing.T) {
 		})
 	}
 }
+
+func TestToolCalls(t *testing.T) {
+	cases := []struct {
+		name string
+		data string
+		want []string
+	}{
+		{
+			name: "single tool call",
+			data: `{"seq":13,"event":{"Content":{"parts":[{"functionCall":{"name":"lookup"}}],"role":"model"}}}`,
+			want: []string{"lookup"},
+		},
+		{
+			name: "multiple tool calls in order",
+			data: `{"seq":14,"event":{"Content":{"parts":[{"functionCall":{"name":"a"}},{"functionCall":{"name":"b"}}],"role":"model"}}}`,
+			want: []string{"a", "b"},
+		},
+		{
+			name: "text mixed with a tool call yields only the call",
+			data: `{"seq":15,"event":{"Content":{"parts":[{"text":"let me check"},{"functionCall":{"name":"lookup"}}],"role":"model"}}}`,
+			want: []string{"lookup"},
+		},
+		{
+			name: "plain model text has no tool calls",
+			data: `{"seq":12,"event":{"Content":{"parts":[{"text":"hello world"}],"role":"model"},"Partial":false}}`,
+			want: nil,
+		},
+		{
+			name: "user-authored event is ignored",
+			data: `{"seq":9,"event":{"Content":{"parts":[{"functionCall":{"name":"x"}}],"role":"user"}}}`,
+			want: nil,
+		},
+		{
+			name: "malformed json",
+			data: `not json`,
+			want: nil,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ToolCalls(tc.data)
+			if len(got) != len(tc.want) {
+				t.Fatalf("ToolCalls = %v, want %v", got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Fatalf("ToolCalls = %v, want %v", got, tc.want)
+				}
+			}
+		})
+	}
+}

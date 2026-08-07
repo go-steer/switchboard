@@ -176,7 +176,10 @@ type agentFrame struct {
 	Event *struct {
 		Content *struct {
 			Parts []struct {
-				Text string `json:"text"`
+				Text         string `json:"text"`
+				FunctionCall *struct {
+					Name string `json:"name"`
+				} `json:"functionCall"`
 			} `json:"parts"`
 			Role string `json:"role"`
 		} `json:"Content"`
@@ -228,6 +231,29 @@ func AgentText(data string) (r AgentReply, ok bool) {
 		return r, false
 	}
 	return r, true
+}
+
+// ToolCalls returns the names of the tool (function) calls carried by an
+// EventAgent payload, in the order they appear, and is empty for events that
+// carry none (plain model text, tool results, user turns, or a parse failure).
+// It pairs with AgentText: an agent event is either model text (AgentText ok)
+// or tool activity (ToolCalls non-empty), letting the gateway surface "the
+// agent is running <tool>" progress distinctly from the answer text.
+func ToolCalls(data string) []string {
+	var f agentFrame
+	if err := json.Unmarshal([]byte(data), &f); err != nil {
+		return nil
+	}
+	if f.Event == nil || f.Event.Content == nil || f.Event.Content.Role != "model" {
+		return nil
+	}
+	var names []string
+	for _, p := range f.Event.Content.Parts {
+		if p.FunctionCall != nil && p.FunctionCall.Name != "" {
+			names = append(names, p.FunctionCall.Name)
+		}
+	}
+	return names
 }
 
 // protocolVersion is the attach protocol switchboard speaks. The daemon

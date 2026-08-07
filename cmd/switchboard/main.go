@@ -88,7 +88,8 @@ func runServe(args []string) error {
 	richBlocks := fs.Bool("slack-rich-blocks", false,
 		"render replies as Slack Block Kit (headers, lists, tables, code); mrkdwn text is always sent as the fallback")
 	progressMode := fs.String("progress-mode", "indicator",
-		"long-turn feedback: \"indicator\" (post a placeholder while the agent works, cleared on reply) or \"off\"")
+		"long-turn feedback: \"indicator\" (placeholder cleared on reply), \"status\" "+
+			"(one message edited with the running tool), \"stream\" (a notice per tool + each turn), or \"off\"")
 	showVersion := fs.Bool("version", false, "print build identity and exit")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -158,10 +159,10 @@ func parseCallerMode(s string) (slack.CallerMode, error) {
 // parseProgressMode validates the --progress-mode flag value.
 func parseProgressMode(s string) (ProgressMode, error) {
 	switch ProgressMode(s) {
-	case ProgressOff, ProgressIndicator:
+	case ProgressOff, ProgressIndicator, ProgressStatus, ProgressStream:
 		return ProgressMode(s), nil
 	default:
-		return "", fmt.Errorf("invalid --progress-mode %q (want \"indicator\" or \"off\")", s)
+		return "", fmt.Errorf("invalid --progress-mode %q (want \"indicator\", \"status\", \"stream\", or \"off\")", s)
 	}
 }
 
