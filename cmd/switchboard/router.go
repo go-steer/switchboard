@@ -33,10 +33,28 @@ const (
 )
 
 // sender is the egress half of a chat.Adapter the router needs to relay
-// replies. Narrowed to one method so the router is testable with a fake.
+// replies and manage long-turn progress messages. Narrowed to the methods
+// the router uses so it stays testable with a fake.
 type sender interface {
-	Send(context.Context, chat.Reply) error
+	Send(context.Context, chat.Reply) (chat.MessageRef, error)
+	Update(context.Context, chat.MessageRef, chat.Reply) error
+	Delete(context.Context, chat.MessageRef) error
 }
+
+// ProgressMode selects how the router signals liveness while an agent turn
+// runs. off keeps today's behavior (nothing until the turn completes);
+// indicator posts a lightweight placeholder on wake and clears it when the
+// turn's reply arrives. (stream and status are later phases.)
+type ProgressMode string
+
+const (
+	ProgressOff       ProgressMode = "off"
+	ProgressIndicator ProgressMode = "indicator"
+)
+
+// indicatorText is the placeholder posted under ProgressIndicator while a
+// turn is in flight; it is deleted once the real reply is relayed.
+const indicatorText = "⏳ Working…"
 
 // Router maps chat conversations onto core-agent sessions and shuttles
 // turns across the daemon contract. It is the chat.Handler an adapter
@@ -46,9 +64,10 @@ type sender interface {
 // per-turn) is what keeps the daemon from replaying prior turns on every
 // message.
 type Router struct {
-	client *daemon.Client
-	out    sender
-	logf   func(string, ...any)
+	client   *daemon.Client
+	out      sender
+	progress ProgressMode
+	logf     func(string, ...any)
 
 	// Reconnect backoff bounds for the SSE relay; defaulted in NewRouter and
 	// overridable in tests so a reconnect can be exercised without real waits.
@@ -67,16 +86,27 @@ type sessionEntry struct {
 	err     error
 	seq     atomic.Int64 // highest agent-event seq seen, fed back as `since` on resume
 	relayed atomic.Int64 // highest seq already posted, for exactly-once delivery across reconnects
+
+	// pmu guards pending, the progress placeholder awaiting the next relayed
+	// turn (ProgressIndicator). Handle posts it; relay clears it when the
+	// turn's reply is delivered. Zero value means no placeholder outstanding.
+	pmu     sync.Mutex
+	pending chat.MessageRef
 }
 
-// NewRouter builds a Router. logf may be nil.
-func NewRouter(client *daemon.Client, out sender, logf func(string, ...any)) *Router {
+// NewRouter builds a Router. progress selects long-turn feedback (ProgressOff
+// if empty); logf may be nil.
+func NewRouter(client *daemon.Client, out sender, progress ProgressMode, logf func(string, ...any)) *Router {
 	if logf == nil {
 		logf = func(string, ...any) {}
+	}
+	if progress == "" {
+		progress = ProgressOff
 	}
 	return &Router{
 		client:     client,
 		out:        out,
+		progress:   progress,
 		logf:       logf,
 		minBackoff: reconnectMinBackoff,
 		maxBackoff: reconnectMaxBackoff,
@@ -95,7 +125,57 @@ func (r *Router) Handle(ctx context.Context, msg chat.Message) error {
 	if err := r.client.Inject(ctx, entry.sess, msg.Caller, msg.Text); err != nil {
 		return err
 	}
-	return r.client.Wake(ctx, entry.sess, msg.Caller)
+	// Post the progress placeholder before waking: a reply can only follow
+	// wake, so placing it first guarantees relay sees the placeholder before it
+	// delivers the turn (no orphaned "Working…" from a fast reply).
+	r.showIndicator(ctx, entry, msg.Conversation)
+	if err := r.client.Wake(ctx, entry.sess, msg.Caller); err != nil {
+		// The turn will never run, so the placeholder would linger; clear it.
+		r.clearIndicator(ctx, entry, msg.Conversation)
+		return err
+	}
+	return nil
+}
+
+// showIndicator posts the ProgressIndicator placeholder for a turn and records
+// it on the entry so relay can clear it when the reply arrives. A no-op unless
+// ProgressIndicator is selected. A placeholder still outstanding from a prior
+// turn (a second turn started before the first replied) is deleted so only the
+// latest remains. Failures are logged, never fatal — a missing indicator must
+// not drop the turn.
+func (r *Router) showIndicator(ctx context.Context, e *sessionEntry, conv string) {
+	if r.progress != ProgressIndicator {
+		return
+	}
+	ref, err := r.out.Send(ctx, chat.Reply{Conversation: conv, Text: indicatorText})
+	if err != nil {
+		r.logf("progress %s: post indicator: %v", conv, err)
+		return
+	}
+	e.pmu.Lock()
+	stale := e.pending
+	e.pending = ref
+	e.pmu.Unlock()
+	if stale.ID != "" {
+		if derr := r.out.Delete(ctx, stale); derr != nil {
+			r.logf("progress %s: clear stale indicator: %v", conv, derr)
+		}
+	}
+}
+
+// clearIndicator deletes and forgets the entry's outstanding progress
+// placeholder, if any. Called just before a real reply is relayed so the
+// placeholder gives way to the answer. No-op when none is outstanding.
+func (r *Router) clearIndicator(ctx context.Context, e *sessionEntry, conv string) {
+	e.pmu.Lock()
+	ref := e.pending
+	e.pending = chat.MessageRef{}
+	e.pmu.Unlock()
+	if ref.ID != "" {
+		if err := r.out.Delete(ctx, ref); err != nil {
+			r.logf("relay %s: clear indicator: %v", conv, err)
+		}
+	}
 }
 
 // session returns the conversation's session, creating it (and starting
@@ -160,7 +240,10 @@ func (r *Router) relay(ctx context.Context, conv string, e *sessionEntry, owner 
 				return nil
 			}
 			e.relayed.Store(reply.Seq)
-			if serr := r.out.Send(ctx, chat.Reply{Conversation: conv, Text: reply.Text}); serr != nil {
+			// A real reply is ready: retire the progress placeholder (if any)
+			// before posting the answer.
+			r.clearIndicator(ctx, e, conv)
+			if _, serr := r.out.Send(ctx, chat.Reply{Conversation: conv, Text: reply.Text}); serr != nil {
 				// A failed post should not tear down the stream; log and keep
 				// relaying subsequent turns.
 				r.logf("relay %s: send: %v", conv, serr)

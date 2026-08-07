@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -29,14 +30,43 @@ import (
 	"github.com/go-steer/switchboard/pkg/daemon"
 )
 
-// fakeSender captures replies the router relays back.
+// fakeSender captures replies the router relays back and records the
+// progress-message lifecycle (each Send hands back a unique ref; Update and
+// Delete are recorded so tests can assert placeholder handling).
 type fakeSender struct {
 	replies chan chat.Reply
+
+	mu      sync.Mutex
+	nextID  int
+	deleted []chat.MessageRef
 }
 
-func (f *fakeSender) Send(_ context.Context, r chat.Reply) error {
+func (f *fakeSender) Send(_ context.Context, r chat.Reply) (chat.MessageRef, error) {
+	f.mu.Lock()
+	f.nextID++
+	ref := chat.MessageRef{Conversation: r.Conversation, ID: fmt.Sprintf("ts%d", f.nextID)}
+	f.mu.Unlock()
 	f.replies <- r
+	return ref, nil
+}
+
+// Update satisfies the sender interface; the router does not use it until the
+// status/stream progress modes land, so the fake simply accepts the call.
+func (f *fakeSender) Update(_ context.Context, _ chat.MessageRef, _ chat.Reply) error {
 	return nil
+}
+
+func (f *fakeSender) Delete(_ context.Context, ref chat.MessageRef) error {
+	f.mu.Lock()
+	f.deleted = append(f.deleted, ref)
+	f.mu.Unlock()
+	return nil
+}
+
+func (f *fakeSender) deletedRefs() []chat.MessageRef {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]chat.MessageRef(nil), f.deleted...)
 }
 
 // TestRouterRoundTrip drives the full inbound path against a fake daemon:
@@ -87,7 +117,7 @@ func TestRouterRoundTrip(t *testing.T) {
 		t.Fatalf("daemon.New: %v", err)
 	}
 	fake := &fakeSender{replies: make(chan chat.Reply, 4)}
-	router := NewRouter(dc, fake, nil)
+	router := NewRouter(dc, fake, ProgressOff, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -125,6 +155,86 @@ func TestRouterRoundTrip(t *testing.T) {
 	}
 	assertInjected(t, injected, "first")
 	assertInjected(t, injected, "second")
+}
+
+// TestRouterProgressIndicator verifies the indicator lifecycle: on wake the
+// router posts a placeholder, and when the agent's real reply arrives the
+// relay deletes that placeholder before posting the answer. The fake daemon
+// withholds the agent event until the test releases it, so the placeholder is
+// guaranteed to be observed (and its ref recorded) before the answer.
+func TestRouterProgressIndicator(t *testing.T) {
+	release := make(chan struct{})
+	const agentEvent = `{"seq":1,"event":{"Content":{"parts":[{"text":"the answer"}],"role":"model"},"Partial":false}}`
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /sessions", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		fmt.Fprint(w, `{"app":"core-agent","sessionID":"s1"}`)
+	})
+	mux.HandleFunc("POST /sessions/{app}/{sid}/inject", func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, `{}`) })
+	mux.HandleFunc("POST /sessions/{app}/{sid}/wake", func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, `{}`) })
+	mux.HandleFunc("GET /sessions/{app}/{sid}/events", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		f := w.(http.Flusher)
+		f.Flush()
+		<-release // hold the answer back until the placeholder is in flight
+		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", daemon.EventAgent, agentEvent)
+		f.Flush()
+		<-r.Context().Done()
+	})
+
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	dc, err := daemon.New(daemon.Config{BaseURL: srv.URL, BearerToken: "tok", HTTPClient: srv.Client()})
+	if err != nil {
+		t.Fatalf("daemon.New: %v", err)
+	}
+	fake := &fakeSender{replies: make(chan chat.Reply, 4)}
+	router := NewRouter(dc, fake, ProgressIndicator, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := router.Handle(ctx, chat.Message{Conversation: "C0:1", Caller: "a@b.com", Text: "hi"}); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+
+	// Handle posts the placeholder synchronously; it must arrive first.
+	ind := recvReply(t, fake.replies)
+	if ind.Text != indicatorText {
+		t.Fatalf("first reply = %q, want indicator %q", ind.Text, indicatorText)
+	}
+
+	// Release the real answer; the relay should clear the placeholder, then post.
+	close(release)
+	ans := recvReply(t, fake.replies)
+	if ans.Text != "the answer" {
+		t.Fatalf("second reply = %q, want the answer", ans.Text)
+	}
+
+	// The placeholder (ts1, the first Send) must have been deleted.
+	deadline := time.After(2 * time.Second)
+	for {
+		if containsRefID(fake.deletedRefs(), "ts1") {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("placeholder was not deleted; deletes = %+v", fake.deletedRefs())
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+}
+
+func containsRefID(refs []chat.MessageRef, id string) bool {
+	for _, r := range refs {
+		if r.ID == id {
+			return true
+		}
+	}
+	return false
 }
 
 func recvReply(t *testing.T, ch <-chan chat.Reply) chat.Reply {
@@ -182,7 +292,7 @@ func TestRouterRelayReconnectsAndDedupes(t *testing.T) {
 		t.Fatalf("daemon.New: %v", err)
 	}
 	fake := &fakeSender{replies: make(chan chat.Reply, 8)}
-	router := NewRouter(dc, fake, nil)
+	router := NewRouter(dc, fake, ProgressOff, nil)
 	router.minBackoff, router.maxBackoff = 5*time.Millisecond, 20*time.Millisecond
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -254,7 +364,7 @@ func TestRouterConcurrentFirstTurnsCreateOnce(t *testing.T) {
 	if err != nil {
 		t.Fatalf("daemon.New: %v", err)
 	}
-	router := NewRouter(dc, &fakeSender{replies: make(chan chat.Reply, 8)}, nil)
+	router := NewRouter(dc, &fakeSender{replies: make(chan chat.Reply, 8)}, ProgressOff, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 

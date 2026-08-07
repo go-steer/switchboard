@@ -69,6 +69,9 @@ type Config struct {
 	Logf func(format string, args ...any)
 }
 
+// Adapter satisfies chat.Adapter.
+var _ chat.Adapter = (*Adapter)(nil)
+
 // Adapter is the Slack implementation of chat.Adapter.
 type Adapter struct {
 	api        *slack.Client
@@ -198,22 +201,23 @@ func (a *Adapter) handleMention(ctx context.Context, h chat.Handler, ev *slackev
 	}()
 }
 
-// Send renders the reply and posts it into its originating channel + thread.
-// The always-on baseline is Slack mrkdwn, split into several ordered in-thread
+// Send renders the reply and posts it into its originating channel + thread,
+// returning a ref to the first posted message (for later Update/Delete). The
+// always-on baseline is Slack mrkdwn, split into several ordered in-thread
 // posts so no single message is truncated (escape=false because toMrkdwn has
 // already escaped Slack control characters). When RichBlocks is enabled it
 // first attempts a single Block Kit message (with the mrkdwn text attached as
 // the notification/fallback); if the renderer declines (nil) or Slack rejects
 // the payload (invalid_blocks), it falls back to the plain mrkdwn path so a
 // rich render never loses a message.
-func (a *Adapter) Send(ctx context.Context, r chat.Reply) error {
+func (a *Adapter) Send(ctx context.Context, r chat.Reply) (chat.MessageRef, error) {
 	channel, thread, ok := splitConversation(r.Conversation)
 	if !ok {
-		return fmt.Errorf("slack: malformed conversation key %q", r.Conversation)
+		return chat.MessageRef{}, fmt.Errorf("slack: malformed conversation key %q", r.Conversation)
 	}
 	rendered := toMrkdwn(r.Text)
 	if strings.TrimSpace(rendered) == "" {
-		return nil // nothing worth posting
+		return chat.MessageRef{}, nil // nothing worth posting
 	}
 
 	if a.richBlocks {
@@ -222,37 +226,103 @@ func (a *Adapter) Send(ctx context.Context, r chat.Reply) error {
 			// The text fallback is for notifications/old clients only; clamp it
 			// so a very long turn does not bloat the payload (blocks carry the
 			// full content).
-			fallback := rendered
-			if len(fallback) > maxSectionText {
-				fallback = fallback[:maxSectionText]
-			}
-			_, _, err := a.api.PostMessageContext(ctx, channel,
+			_, ts, err := a.api.PostMessageContext(ctx, channel,
 				slack.MsgOptionBlocks(toSlackBlocks(blocks)...),
-				slack.MsgOptionText(fallback, false),
+				slack.MsgOptionText(clamp(rendered, maxSectionText), false),
 				slack.MsgOptionTS(thread),
 			)
 			if err == nil {
-				return nil
+				return chat.MessageRef{Conversation: r.Conversation, ID: ts}, nil
 			}
 			if !isBlockRejection(err) {
-				return fmt.Errorf("slack: post blocks to %s: %w", r.Conversation, err)
+				return chat.MessageRef{}, fmt.Errorf("slack: post blocks to %s: %w", r.Conversation, err)
 			}
 			a.logf("slack: blocks rejected for %s (%v); retrying as text", r.Conversation, err)
 		}
 	}
 
+	var ref chat.MessageRef // first posted message, returned to the caller
 	for _, chunk := range chunkMessage(rendered, slackTextLimit) {
 		if strings.TrimSpace(chunk) == "" {
 			continue
 		}
-		if _, _, err := a.api.PostMessageContext(ctx, channel,
+		_, ts, err := a.api.PostMessageContext(ctx, channel,
 			slack.MsgOptionText(chunk, false),
 			slack.MsgOptionTS(thread),
-		); err != nil {
-			return fmt.Errorf("slack: post to %s: %w", r.Conversation, err)
+		)
+		if err != nil {
+			return ref, fmt.Errorf("slack: post to %s: %w", r.Conversation, err)
+		}
+		if ref.ID == "" {
+			ref = chat.MessageRef{Conversation: r.Conversation, ID: ts}
 		}
 	}
+	return ref, nil
+}
+
+// Update replaces a previously posted message's content in place — the
+// mechanism behind long-turn status edits. A zero ref no-ops. Rendering
+// mirrors Send but targets a single message: Block Kit when enabled and
+// accepted, else clamped mrkdwn (an update cannot be split across messages).
+// Slack supports editing, so this never returns chat.ErrUnsupported.
+func (a *Adapter) Update(ctx context.Context, ref chat.MessageRef, r chat.Reply) error {
+	if ref.ID == "" {
+		return nil
+	}
+	channel, _, ok := splitConversation(ref.Conversation)
+	if !ok {
+		return fmt.Errorf("slack: malformed conversation key %q", ref.Conversation)
+	}
+	rendered := toMrkdwn(r.Text)
+
+	if a.richBlocks {
+		blocks := sanitizeBlocks(renderBlocks(r.Text, toMrkdwn))
+		if blocks != nil {
+			_, _, _, err := a.api.UpdateMessageContext(ctx, channel, ref.ID,
+				slack.MsgOptionBlocks(toSlackBlocks(blocks)...),
+				slack.MsgOptionText(clamp(rendered, maxSectionText), false),
+			)
+			if err == nil {
+				return nil
+			}
+			if !isBlockRejection(err) {
+				return fmt.Errorf("slack: update blocks in %s: %w", ref.Conversation, err)
+			}
+			a.logf("slack: blocks rejected updating %s (%v); retrying as text", ref.Conversation, err)
+		}
+	}
+
+	if _, _, _, err := a.api.UpdateMessageContext(ctx, channel, ref.ID,
+		slack.MsgOptionText(clamp(rendered, slackTextLimit), false),
+	); err != nil {
+		return fmt.Errorf("slack: update %s: %w", ref.Conversation, err)
+	}
 	return nil
+}
+
+// Delete removes a previously posted message — used to clear a progress
+// placeholder once the real reply is ready. A zero ref no-ops. Slack
+// supports deletion, so this never returns chat.ErrUnsupported.
+func (a *Adapter) Delete(ctx context.Context, ref chat.MessageRef) error {
+	if ref.ID == "" {
+		return nil
+	}
+	channel, _, ok := splitConversation(ref.Conversation)
+	if !ok {
+		return fmt.Errorf("slack: malformed conversation key %q", ref.Conversation)
+	}
+	if _, _, err := a.api.DeleteMessageContext(ctx, channel, ref.ID); err != nil {
+		return fmt.Errorf("slack: delete %s: %w", ref.Conversation, err)
+	}
+	return nil
+}
+
+// clamp truncates s to at most max bytes, mirroring Slack's field limits.
+func clamp(s string, max int) string {
+	if len(s) > max {
+		return s[:max]
+	}
+	return s
 }
 
 // isBlockRejection reports whether err is Slack rejecting the blocks payload

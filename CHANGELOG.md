@@ -23,6 +23,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   turns — a dropped stream no longer silently strands a conversation. Delivery
   is exactly-once: a turn replayed across the reconnect boundary is posted only
   once. First slice of Phase 2 hardening (#3).
+- Long-turn progress feedback (`cmd/switchboard`, `--progress-mode`): with the
+  default `indicator` mode the router posts a lightweight "⏳ Working…"
+  placeholder into the thread when a turn is woken and deletes it as soon as the
+  agent's reply is relayed, so a slow turn no longer looks dead; `off` keeps the
+  prior silent-until-complete behavior. First slice of the long-turn feedback
+  work (#3); `stream` and `status` modes and chat-command control follow. The
+  egress seam grew to support this: `chat.Adapter.Send` now returns a
+  `chat.MessageRef` and the interface adds `Update`/`Delete` (with an
+  `ErrUnsupported` sentinel so a platform lacking them degrades to plain
+  `Send`). Indicator mode needs the bot's `chat:delete` scope to clear the
+  placeholder; without it the placeholder is left in place and the failure is
+  logged.
 - `daemon.AgentText` helper to extract assistant text from `agent` SSE frames.
 - Slack mrkdwn rendering (`pkg/chat/slack`): replies now convert a model turn's
   standard markdown into Slack mrkdwn before posting — bold/italic/strikethrough,
