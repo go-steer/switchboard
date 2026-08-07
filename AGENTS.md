@@ -101,7 +101,10 @@ Conventions worth knowing at agent prompt time:
 
 ## Current state
 
-**Scaffolding.** The multicall binary boots (`serve` / `version`), the daemon
-wire client and the `pkg/chat` adapter seam exist, and the distroless image
-builds. No chat adapters are registered yet — Slack MVP is the next phase (see
-`docs/DESIGN.md` §4).
+**Slack MVP.** `serve` boots the Slack adapter (Socket Mode) and the session
+router: an app-mention in a thread drives a core-agent session and the agent's
+reply lands back in the same thread, with multi-turn continuity per thread.
+Interactive hardening (long turns, backpressure, SSE reconnect) and Google Chat
+are the next phases (see `docs/DESIGN.md` §4). Frictionless thread replies
+(continuing without re-mentioning) are not wired yet — the MVP engages on
+app-mentions only.

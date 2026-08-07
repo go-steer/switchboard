@@ -64,29 +64,62 @@ func TestCreateSessionSendsAuthAndCaller(t *testing.T) {
 		if got := r.Header.Get("X-Asserted-Caller"); got != "alice@example.com" {
 			t.Errorf("X-Asserted-Caller = %q", got)
 		}
-		fmt.Fprint(w, `{"session_id":"sess-123"}`)
+		// The daemon requires Content-Type: application/json on every
+		// write, even this body-less create.
+		if got := r.Header.Get("Content-Type"); got != "application/json" {
+			t.Errorf("Content-Type = %q", got)
+		}
+		w.WriteHeader(http.StatusCreated)
+		// Daemon returns app + sessionID (camelCase), not session_id.
+		fmt.Fprint(w, `{"app":"core-agent","sessionID":"sess-123","user":"alice@example.com"}`)
 	})
-	sid, err := c.CreateSession(context.Background(), "alice@example.com")
+	sess, err := c.CreateSession(context.Background(), "alice@example.com")
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
-	if sid != "sess-123" {
-		t.Fatalf("sid = %q, want sess-123", sid)
+	if sess.App != "core-agent" || sess.ID != "sess-123" {
+		t.Fatalf("sess = %+v, want {core-agent sess-123}", sess)
 	}
 }
 
 func TestCreateSessionEmptyIDErrors(t *testing.T) {
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, `{"session_id":""}`)
+		fmt.Fprint(w, `{"app":"core-agent","sessionID":""}`)
 	})
 	if _, err := c.CreateSession(context.Background(), ""); err == nil {
-		t.Fatal("expected error on empty session_id")
+		t.Fatal("expected error on empty sessionID")
+	}
+}
+
+func TestCreateSessionEmptyAppErrors(t *testing.T) {
+	// A missing app would make every app-qualified route malformed, so it
+	// must fail at create rather than later.
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"app":"","sessionID":"s1"}`)
+	})
+	if _, err := c.CreateSession(context.Background(), ""); err == nil {
+		t.Fatal("expected error on empty app")
+	}
+}
+
+// TestDefaultClientHasNoWholeRequestTimeout guards the SSE blocker: a
+// client-wide http.Client.Timeout also bounds response-body reads, which
+// would force-close the long-lived Subscribe stream. Unary calls get
+// their deadline from context instead.
+func TestDefaultClientHasNoWholeRequestTimeout(t *testing.T) {
+	c, err := New(Config{BaseURL: "http://x", BearerToken: "t"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if c.http.Timeout != 0 {
+		t.Fatalf("default http client Timeout = %v, want 0 (would kill SSE)", c.http.Timeout)
 	}
 }
 
 func TestInjectBody(t *testing.T) {
+	sess := Session{App: "core-agent", ID: "sess-1"}
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/sessions/sess-1/inject" {
+		if r.URL.Path != "/sessions/core-agent/sess-1/inject" {
 			t.Errorf("path = %s", r.URL.Path)
 		}
 		b, _ := io.ReadAll(r.Body)
@@ -95,7 +128,7 @@ func TestInjectBody(t *testing.T) {
 		}
 		w.WriteHeader(http.StatusOK)
 	})
-	if err := c.Inject(context.Background(), "sess-1", "bob@example.com", "hello"); err != nil {
+	if err := c.Inject(context.Background(), sess, "bob@example.com", "hello"); err != nil {
 		t.Fatalf("Inject: %v", err)
 	}
 }
@@ -104,22 +137,29 @@ func TestNon2xxErrors(t *testing.T) {
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "boom", http.StatusInternalServerError)
 	})
-	if err := c.Wake(context.Background(), "s", ""); err == nil {
+	if err := c.Wake(context.Background(), Session{App: "a", ID: "s"}, ""); err == nil {
 		t.Fatal("expected error on 500")
 	}
 }
 
 func TestSubscribeParsesSSE(t *testing.T) {
+	sess := Session{App: "core-agent", ID: "s"}
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/sessions/s/events" {
+		if r.URL.Path != "/sessions/core-agent/s/events" {
 			t.Errorf("path = %s", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("since"); got != "7" {
+			t.Errorf("since = %q, want 7", got)
+		}
+		if got := r.URL.Query().Get("protocol"); got != protocolVersion {
+			t.Errorf("protocol = %q, want %q", got, protocolVersion)
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		fmt.Fprint(w, "event: turn\ndata: line one\ndata: line two\n\nevent: done\ndata: {}\n\n")
 	})
 
 	var got []Event
-	err := c.Subscribe(context.Background(), "s", "", func(e Event) error {
+	err := c.Subscribe(context.Background(), sess, "", 7, func(e Event) error {
 		got = append(got, e)
 		return nil
 	})
@@ -134,5 +174,74 @@ func TestSubscribeParsesSSE(t *testing.T) {
 	}
 	if got[1].Type != "done" || got[1].Data != "{}" {
 		t.Errorf("event1 = %+v", got[1])
+	}
+}
+
+func TestAgentText(t *testing.T) {
+	cases := []struct {
+		name     string
+		data     string
+		wantOK   bool
+		wantText string
+		wantSeq  int64
+		partial  bool
+	}{
+		{
+			name:     "final model text",
+			data:     `{"seq":12,"event":{"Content":{"parts":[{"text":"hello "},{"text":"world"}],"role":"model"},"Partial":false,"Author":"agent"}}`,
+			wantOK:   true,
+			wantText: "hello world",
+			wantSeq:  12,
+		},
+		{
+			name:     "partial chunk still parses but is flagged",
+			data:     `{"seq":11,"event":{"Content":{"parts":[{"text":"hel"}],"role":"model"},"Partial":true}}`,
+			wantOK:   true,
+			wantText: "hel",
+			partial:  true,
+			wantSeq:  11,
+		},
+		{
+			name:    "user-authored turn is not relayed",
+			data:    `{"seq":9,"event":{"Content":{"parts":[{"text":"my question"}],"role":"user"}}}`,
+			wantOK:  false,
+			wantSeq: 9,
+		},
+		{
+			name:    "tool-call event has no text",
+			data:    `{"seq":13,"event":{"Content":{"parts":[{"functionCall":{"name":"x"}}],"role":"model"}}}`,
+			wantOK:  false,
+			wantSeq: 13,
+		},
+		{
+			name:    "no content",
+			data:    `{"seq":5,"event":{"Partial":false}}`,
+			wantOK:  false,
+			wantSeq: 5,
+		},
+		{
+			name:   "malformed json",
+			data:   `not json`,
+			wantOK: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r, ok := AgentText(tc.data)
+			if ok != tc.wantOK {
+				t.Fatalf("ok = %v, want %v (r = %+v)", ok, tc.wantOK, r)
+			}
+			if r.Seq != tc.wantSeq {
+				t.Errorf("seq = %d, want %d", r.Seq, tc.wantSeq)
+			}
+			if tc.wantOK {
+				if r.Text != tc.wantText {
+					t.Errorf("text = %q, want %q", r.Text, tc.wantText)
+				}
+				if r.Partial != tc.partial {
+					t.Errorf("partial = %v, want %v", r.Partial, tc.partial)
+				}
+			}
+		})
 	}
 }

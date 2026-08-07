@@ -21,6 +21,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -28,6 +29,7 @@ import (
 	"syscall"
 
 	"github.com/go-steer/switchboard/internal/version"
+	"github.com/go-steer/switchboard/pkg/chat/slack"
 	"github.com/go-steer/switchboard/pkg/daemon"
 )
 
@@ -77,6 +79,12 @@ func runServe(args []string) error {
 		"core-agent daemon base URL (no trailing slash)")
 	tokenEnv := fs.String("token-env", "SWITCHBOARD_DAEMON_TOKEN",
 		"env var holding the daemon bearer token (never pass the token as a bare flag)")
+	appTokenEnv := fs.String("slack-app-token-env", "SWITCHBOARD_SLACK_APP_TOKEN",
+		"env var holding the Slack Socket Mode app-level token (xapp-...)")
+	botTokenEnv := fs.String("slack-bot-token-env", "SWITCHBOARD_SLACK_BOT_TOKEN",
+		"env var holding the Slack bot user OAuth token (xoxb-...)")
+	callerID := fs.String("caller-id", "email",
+		"how to derive X-Asserted-Caller from a Slack user: \"email\" (users.info) or \"id\" (raw user ID)")
 	showVersion := fs.Bool("version", false, "print build identity and exit")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -91,20 +99,50 @@ func runServe(args []string) error {
 		return fmt.Errorf("no daemon token in $%s (set --token-env to the right var)", *tokenEnv)
 	}
 
+	callerMode, err := parseCallerMode(*callerID)
+	if err != nil {
+		return err
+	}
+
 	dc, err := daemon.New(daemon.Config{BaseURL: *daemonURL, BearerToken: token})
 	if err != nil {
 		return err
 	}
-	_ = dc // router + chat adapters wired in W1 phases; see docs/DESIGN.md
+
+	logf := func(format string, a ...any) { fmt.Fprintf(os.Stderr, prog+": "+format+"\n", a...) }
+	adapter, err := slack.New(slack.Config{
+		AppToken:   os.Getenv(*appTokenEnv),
+		BotToken:   os.Getenv(*botTokenEnv),
+		CallerMode: callerMode,
+		Logf:       logf,
+	})
+	if err != nil {
+		return fmt.Errorf("slack adapter: %w (set $%s and $%s)", err, *appTokenEnv, *botTokenEnv)
+	}
+	router := NewRouter(dc, adapter, logf)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
 	fmt.Fprintf(os.Stderr, "%s: %s\n", prog, version.String(prog))
-	fmt.Fprintf(os.Stderr, "%s: scaffold only — no chat adapters registered yet (see docs/DESIGN.md)\n", prog)
-	<-ctx.Done()
+	fmt.Fprintf(os.Stderr, "%s: bridging %s -> %s\n", prog, adapter.Name(), *daemonURL)
+	if err := adapter.Run(ctx, router); err != nil && !errors.Is(err, context.Canceled) {
+		return err
+	}
 	fmt.Fprintf(os.Stderr, "%s: shutting down\n", prog)
 	return nil
+}
+
+// parseCallerMode validates the --caller-id flag value.
+func parseCallerMode(s string) (slack.CallerMode, error) {
+	switch slack.CallerMode(s) {
+	case slack.CallerEmail:
+		return slack.CallerEmail, nil
+	case slack.CallerID:
+		return slack.CallerID, nil
+	default:
+		return "", fmt.Errorf("invalid --caller-id %q (want \"email\" or \"id\")", s)
+	}
 }
 
 func envOr(key, def string) string {
