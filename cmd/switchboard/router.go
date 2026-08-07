@@ -16,6 +16,7 @@ package main
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -42,19 +43,36 @@ type sender interface {
 }
 
 // ProgressMode selects how the router signals liveness while an agent turn
-// runs. off keeps today's behavior (nothing until the turn completes);
-// indicator posts a lightweight placeholder on wake and clears it when the
-// turn's reply arrives. (stream and status are later phases.)
+// runs:
+//   - off: nothing until the turn completes (the reply lands as before).
+//   - indicator: post a lightweight placeholder on wake, deleted when the
+//     turn's reply arrives.
+//   - status: post one message on wake and edit it in place to name the tool
+//     the agent is currently running; the reply replaces it when ready.
+//   - stream: relay each completed model turn and post a standalone notice for
+//     every tool the agent runs — the most transparent, and noisiest.
 type ProgressMode string
 
 const (
 	ProgressOff       ProgressMode = "off"
 	ProgressIndicator ProgressMode = "indicator"
+	ProgressStatus    ProgressMode = "status"
+	ProgressStream    ProgressMode = "stream"
 )
 
-// indicatorText is the placeholder posted under ProgressIndicator while a
-// turn is in flight; it is deleted once the real reply is relayed.
-const indicatorText = "⏳ Working…"
+// workingText is the initial progress message posted on wake under the
+// indicator and status modes while a turn is in flight. It is always a
+// transient message — retired when the reply is delivered — never the answer.
+const workingText = "⏳ Working…"
+
+// activityText renders a tool-activity notice, e.g. "🔧 Running `lookup`".
+func activityText(tools []string) string {
+	quoted := make([]string, len(tools))
+	for i, t := range tools {
+		quoted[i] = "`" + t + "`"
+	}
+	return "🔧 Running " + strings.Join(quoted, ", ")
+}
 
 // Router maps chat conversations onto core-agent sessions and shuttles
 // turns across the daemon contract. It is the chat.Handler an adapter
@@ -87,11 +105,29 @@ type sessionEntry struct {
 	seq     atomic.Int64 // highest agent-event seq seen, fed back as `since` on resume
 	relayed atomic.Int64 // highest seq already posted, for exactly-once delivery across reconnects
 
-	// pmu guards pending, the progress placeholder awaiting the next relayed
-	// turn (ProgressIndicator). Handle posts it; relay clears it when the
-	// turn's reply is delivered. Zero value means no placeholder outstanding.
-	pmu     sync.Mutex
-	pending chat.MessageRef
+	// pmu guards progressMsg, the session's current transient progress message
+	// (the indicator placeholder, or the status message being edited with tool
+	// steps). Handle posts it before waking; relay edits it on tool activity
+	// (status mode) and retires it when the reply is delivered. It never holds
+	// the answer. Zero value means none is outstanding.
+	pmu         sync.Mutex
+	progressMsg chat.MessageRef
+}
+
+// takeProgress atomically reads and clears the entry's progress message.
+func (e *sessionEntry) takeProgress() chat.MessageRef {
+	e.pmu.Lock()
+	defer e.pmu.Unlock()
+	ref := e.progressMsg
+	e.progressMsg = chat.MessageRef{}
+	return ref
+}
+
+// currentProgress reads the entry's progress message without clearing it.
+func (e *sessionEntry) currentProgress() chat.MessageRef {
+	e.pmu.Lock()
+	defer e.pmu.Unlock()
+	return e.progressMsg
 }
 
 // NewRouter builds a Router. progress selects long-turn feedback (ProgressOff
@@ -125,56 +161,83 @@ func (r *Router) Handle(ctx context.Context, msg chat.Message) error {
 	if err := r.client.Inject(ctx, entry.sess, msg.Caller, msg.Text); err != nil {
 		return err
 	}
-	// Post the progress placeholder before waking: a reply can only follow
-	// wake, so placing it first guarantees relay sees the placeholder before it
-	// delivers the turn (no orphaned "Working…" from a fast reply).
-	r.showIndicator(ctx, entry, msg.Conversation)
+	// Post the progress message before waking: a reply can only follow wake, so
+	// placing it first guarantees relay sees it before delivering the turn (no
+	// orphaned "Working…" from a fast reply). A no-op in off and stream modes.
+	r.startProgress(ctx, entry, msg.Conversation)
 	if err := r.client.Wake(ctx, entry.sess, msg.Caller); err != nil {
-		// The turn will never run, so the placeholder would linger; clear it.
-		r.clearIndicator(ctx, entry, msg.Conversation)
+		// The turn will never run, so the progress message would linger; clear it.
+		r.clearProgress(ctx, entry, msg.Conversation)
 		return err
 	}
 	return nil
 }
 
-// showIndicator posts the ProgressIndicator placeholder for a turn and records
-// it on the entry so relay can clear it when the reply arrives. A no-op unless
-// ProgressIndicator is selected. A placeholder still outstanding from a prior
-// turn (a second turn started before the first replied) is deleted so only the
-// latest remains. Failures are logged, never fatal — a missing indicator must
-// not drop the turn.
-func (r *Router) showIndicator(ctx context.Context, e *sessionEntry, conv string) {
-	if r.progress != ProgressIndicator {
+// startProgress posts the initial progress message for a turn (indicator and
+// status modes) and records it on the entry so relay can edit or clear it. A
+// no-op in off and stream modes. A message still outstanding from a prior turn
+// (a second turn started before the first replied) is deleted so only the
+// latest remains. Failures are logged, never fatal — a missing progress
+// message must not drop the turn.
+func (r *Router) startProgress(ctx context.Context, e *sessionEntry, conv string) {
+	if r.progress != ProgressIndicator && r.progress != ProgressStatus {
 		return
 	}
-	ref, err := r.out.Send(ctx, chat.Reply{Conversation: conv, Text: indicatorText})
+	ref, err := r.out.Send(ctx, chat.Reply{Conversation: conv, Text: workingText})
 	if err != nil {
-		r.logf("progress %s: post indicator: %v", conv, err)
+		r.logf("progress %s: post: %v", conv, err)
 		return
 	}
 	e.pmu.Lock()
-	stale := e.pending
-	e.pending = ref
+	stale := e.progressMsg
+	e.progressMsg = ref
 	e.pmu.Unlock()
 	if stale.ID != "" {
 		if derr := r.out.Delete(ctx, stale); derr != nil {
-			r.logf("progress %s: clear stale indicator: %v", conv, derr)
+			r.logf("progress %s: clear stale: %v", conv, derr)
 		}
 	}
 }
 
-// clearIndicator deletes and forgets the entry's outstanding progress
-// placeholder, if any. Called just before a real reply is relayed so the
-// placeholder gives way to the answer. No-op when none is outstanding.
-func (r *Router) clearIndicator(ctx context.Context, e *sessionEntry, conv string) {
-	e.pmu.Lock()
-	ref := e.pending
-	e.pending = chat.MessageRef{}
-	e.pmu.Unlock()
-	if ref.ID != "" {
+// clearProgress deletes and forgets the entry's outstanding progress message,
+// if any. Called before a reply is relayed so the transient message gives way
+// to the answer. No-op when none is outstanding.
+func (r *Router) clearProgress(ctx context.Context, e *sessionEntry, conv string) {
+	if ref := e.takeProgress(); ref.ID != "" {
 		if err := r.out.Delete(ctx, ref); err != nil {
-			r.logf("relay %s: clear indicator: %v", conv, err)
+			r.logf("progress %s: clear: %v", conv, err)
 		}
+	}
+}
+
+// deliverText relays a completed model turn: retire the transient progress
+// message (a no-op unless indicator/status mode left one) and post the turn as
+// its own message. Shared by every mode, so a long answer is chunked by the
+// adapter rather than squeezed into an in-place edit.
+func (r *Router) deliverText(ctx context.Context, e *sessionEntry, conv, text string) {
+	r.clearProgress(ctx, e, conv)
+	if _, err := r.out.Send(ctx, chat.Reply{Conversation: conv, Text: text}); err != nil {
+		// A failed post should not tear down the stream; log and keep relaying.
+		r.logf("relay %s: send: %v", conv, err)
+	}
+}
+
+// postActivity surfaces the tools the agent is running (stream and status
+// modes). Status mode edits the managed status message in place so the whole
+// turn stays one message; stream mode — and status mode with no message left
+// to edit — posts a standalone notice.
+func (r *Router) postActivity(ctx context.Context, e *sessionEntry, conv string, tools []string) {
+	text := activityText(tools)
+	if r.progress == ProgressStatus {
+		if ref := e.currentProgress(); ref.ID != "" {
+			if err := r.out.Update(ctx, ref, chat.Reply{Conversation: conv, Text: text}); err != nil {
+				r.logf("relay %s: status activity: %v", conv, err)
+			}
+			return
+		}
+	}
+	if _, err := r.out.Send(ctx, chat.Reply{Conversation: conv, Text: text}); err != nil {
+		r.logf("relay %s: activity: %v", conv, err)
 	}
 }
 
@@ -228,25 +291,26 @@ func (r *Router) relay(ctx context.Context, conv string, e *sessionEntry, owner 
 				e.seq.Store(reply.Seq)
 				progressed = true
 			}
-			// Relay only completed, non-empty model turns: partial chunks
-			// are repeated by the final event, and tool-call events carry no
-			// text.
-			if !ok || reply.Partial || reply.Text == "" {
+			// A completed, non-empty model turn is a reply worth relaying
+			// (partial chunks are repeated by the final event). Exactly-once: a
+			// reconnect resumes from the last seq seen, but skip anything
+			// already posted in case a turn straddled the drop.
+			if ok && !reply.Partial && reply.Text != "" {
+				if reply.Seq <= e.relayed.Load() {
+					return nil
+				}
+				e.relayed.Store(reply.Seq)
+				r.deliverText(ctx, e, conv, reply.Text)
 				return nil
 			}
-			// Exactly-once: a reconnect resumes from the last seq seen, but
-			// skip anything already posted in case a turn straddled the drop.
-			if reply.Seq <= e.relayed.Load() {
-				return nil
-			}
-			e.relayed.Store(reply.Seq)
-			// A real reply is ready: retire the progress placeholder (if any)
-			// before posting the answer.
-			r.clearIndicator(ctx, e, conv)
-			if _, serr := r.out.Send(ctx, chat.Reply{Conversation: conv, Text: reply.Text}); serr != nil {
-				// A failed post should not tear down the stream; log and keep
-				// relaying subsequent turns.
-				r.logf("relay %s: send: %v", conv, serr)
+			// Otherwise it may be tool activity — surfaced only in the modes
+			// that show progress, and gated by the same seq so a reconnect
+			// replay does not repost it.
+			if r.progress == ProgressStream || r.progress == ProgressStatus {
+				if tools := daemon.ToolCalls(ev.Data); len(tools) > 0 && reply.Seq > e.relayed.Load() {
+					e.relayed.Store(reply.Seq)
+					r.postActivity(ctx, e, conv, tools)
+				}
 			}
 			return nil
 		})

@@ -35,6 +35,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `Send`). Indicator mode needs the bot's `chat:delete` scope to clear the
   placeholder; without it the placeholder is left in place and the failure is
   logged.
+- Long-turn progress modes `status` and `stream` (`cmd/switchboard`,
+  `--progress-mode`): `status` keeps one message per turn — the "⏳ Working…"
+  placeholder is edited in place to name the tool the agent is currently
+  running (e.g. "🔧 Running `lookup`") and retired when the reply arrives;
+  `stream` posts a standalone tool-activity notice per tool call in addition to
+  relaying each completed turn, for maximum transparency (and noise). Both are
+  driven off `agent`-frame tool calls (unambiguous), gated by the same
+  exactly-once seq as turn delivery so a reconnect replay never reposts. Second
+  slice of the long-turn feedback work (#3); chat-command control follows.
+  `status` needs the bot's `chat:delete` scope (like `indicator`).
+- `daemon.ToolCalls` helper to extract tool-call names from `agent` SSE frames.
 - `daemon.AgentText` helper to extract assistant text from `agent` SSE frames.
 - Slack mrkdwn rendering (`pkg/chat/slack`): replies now convert a model turn's
   standard markdown into Slack mrkdwn before posting — bold/italic/strikethrough,

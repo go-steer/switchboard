@@ -38,7 +38,14 @@ type fakeSender struct {
 
 	mu      sync.Mutex
 	nextID  int
+	updated []fakeUpdate
 	deleted []chat.MessageRef
+}
+
+// fakeUpdate records one in-place edit (used to assert status-mode behavior).
+type fakeUpdate struct {
+	ref  chat.MessageRef
+	text string
 }
 
 func (f *fakeSender) Send(_ context.Context, r chat.Reply) (chat.MessageRef, error) {
@@ -50,10 +57,17 @@ func (f *fakeSender) Send(_ context.Context, r chat.Reply) (chat.MessageRef, err
 	return ref, nil
 }
 
-// Update satisfies the sender interface; the router does not use it until the
-// status/stream progress modes land, so the fake simply accepts the call.
-func (f *fakeSender) Update(_ context.Context, _ chat.MessageRef, _ chat.Reply) error {
+func (f *fakeSender) Update(_ context.Context, ref chat.MessageRef, r chat.Reply) error {
+	f.mu.Lock()
+	f.updated = append(f.updated, fakeUpdate{ref: ref, text: r.Text})
+	f.mu.Unlock()
 	return nil
+}
+
+func (f *fakeSender) updatedCalls() []fakeUpdate {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]fakeUpdate(nil), f.updated...)
 }
 
 func (f *fakeSender) Delete(_ context.Context, ref chat.MessageRef) error {
@@ -203,8 +217,8 @@ func TestRouterProgressIndicator(t *testing.T) {
 
 	// Handle posts the placeholder synchronously; it must arrive first.
 	ind := recvReply(t, fake.replies)
-	if ind.Text != indicatorText {
-		t.Fatalf("first reply = %q, want indicator %q", ind.Text, indicatorText)
+	if ind.Text != workingText {
+		t.Fatalf("first reply = %q, want indicator %q", ind.Text, workingText)
 	}
 
 	// Release the real answer; the relay should clear the placeholder, then post.
@@ -235,6 +249,127 @@ func containsRefID(refs []chat.MessageRef, id string) bool {
 		}
 	}
 	return false
+}
+
+// newEventRouter builds a router (in the given progress mode) wired to a fake
+// daemon that streams the supplied agent-event payloads in order once release
+// is closed — pass a nil release to stream immediately — then holds the stream
+// open like a live daemon.
+func newEventRouter(t *testing.T, mode ProgressMode, release <-chan struct{}, events ...string) (*Router, *fakeSender) {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /sessions", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		fmt.Fprint(w, `{"app":"core-agent","sessionID":"s1"}`)
+	})
+	mux.HandleFunc("POST /sessions/{app}/{sid}/inject", func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, `{}`) })
+	mux.HandleFunc("POST /sessions/{app}/{sid}/wake", func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, `{}`) })
+	mux.HandleFunc("GET /sessions/{app}/{sid}/events", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		f := w.(http.Flusher)
+		f.Flush()
+		if release != nil {
+			<-release
+		}
+		for _, ev := range events {
+			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", daemon.EventAgent, ev)
+		}
+		f.Flush()
+		<-r.Context().Done()
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	dc, err := daemon.New(daemon.Config{BaseURL: srv.URL, BearerToken: "tok", HTTPClient: srv.Client()})
+	if err != nil {
+		t.Fatalf("daemon.New: %v", err)
+	}
+	fake := &fakeSender{replies: make(chan chat.Reply, 8)}
+	return NewRouter(dc, fake, mode, nil), fake
+}
+
+// waitFor polls cond until it holds or the deadline passes.
+func waitFor(t *testing.T, cond func() bool, msg string) {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for {
+		if cond() {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatal(msg)
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+}
+
+const (
+	toolCallEvent = `{"seq":1,"event":{"Content":{"parts":[{"functionCall":{"name":"lookup"}}],"role":"model"}}}`
+	answerEvent   = `{"seq":2,"event":{"Content":{"parts":[{"text":"the answer"}],"role":"model"},"Partial":false}}`
+)
+
+// TestRouterProgressStream verifies stream mode posts a standalone notice for a
+// tool call and then relays the completed turn — with no in-place edits and no
+// managed placeholder.
+func TestRouterProgressStream(t *testing.T) {
+	router, fake := newEventRouter(t, ProgressStream, nil, toolCallEvent, answerEvent)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := router.Handle(ctx, chat.Message{Conversation: "C0:1", Caller: "a@b.com", Text: "hi"}); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+
+	if got := recvReply(t, fake.replies); got.Text != activityText([]string{"lookup"}) {
+		t.Fatalf("first reply = %q, want tool notice %q", got.Text, activityText([]string{"lookup"}))
+	}
+	if got := recvReply(t, fake.replies); got.Text != "the answer" {
+		t.Fatalf("second reply = %q, want the answer", got.Text)
+	}
+	if n := len(fake.updatedCalls()); n != 0 {
+		t.Errorf("stream mode edited %d message(s); want 0", n)
+	}
+}
+
+// TestRouterProgressStatus verifies status mode keeps one message per turn: the
+// placeholder posted on wake is edited in place to name the running tool, then
+// deleted when the answer is posted. The fake withholds events until the
+// placeholder is in flight so the edit targets it deterministically.
+func TestRouterProgressStatus(t *testing.T) {
+	release := make(chan struct{})
+	router, fake := newEventRouter(t, ProgressStatus, release, toolCallEvent, answerEvent)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := router.Handle(ctx, chat.Message{Conversation: "C0:1", Caller: "a@b.com", Text: "hi"}); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+
+	// Handle posts the status placeholder synchronously; it must arrive first.
+	if got := recvReply(t, fake.replies); got.Text != workingText {
+		t.Fatalf("first reply = %q, want placeholder %q", got.Text, workingText)
+	}
+
+	// Release the tool + answer events.
+	close(release)
+	if got := recvReply(t, fake.replies); got.Text != "the answer" {
+		t.Fatalf("reply = %q, want the answer", got.Text)
+	}
+
+	// The status message (ts1) was edited in place to name the tool...
+	waitFor(t, func() bool {
+		for _, u := range fake.updatedCalls() {
+			if u.ref.ID == "ts1" && u.text == activityText([]string{"lookup"}) {
+				return true
+			}
+		}
+		return false
+	}, "status message was not edited with the tool notice")
+	// ...and then retired when the answer was posted.
+	waitFor(t, func() bool { return containsRefID(fake.deletedRefs(), "ts1") },
+		"status message was not deleted when the answer arrived")
 }
 
 func recvReply(t *testing.T, ch <-chan chat.Reply) chat.Reply {
