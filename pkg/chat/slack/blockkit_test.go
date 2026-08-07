@@ -341,6 +341,82 @@ func (e errorString) Error() string { return string(e) }
 // TestToSlackBlocksMarshal proves the raw-map blocks serialize as their
 // underlying object (via rawBlock.MarshalJSON) — the actual wire format sent
 // to Slack — rather than an empty struct.
+// styleOf returns the style map of the first element whose text equals want.
+func styleOf(els []any, want string) (map[string]any, bool) {
+	for _, e := range els {
+		m, ok := e.(map[string]any)
+		if !ok {
+			continue
+		}
+		if t, _ := m["text"].(string); t == want {
+			st, _ := m["style"].(map[string]any)
+			return st, true
+		}
+	}
+	return nil, false
+}
+
+func TestInlineElementsBoldAcrossCode(t *testing.T) {
+	// A bold run that wraps inline code (**foo `bar`**) must style both the
+	// text and the code span bold — the delimiters must not be stranded on
+	// opposite sides of the code span and rendered as literal "**".
+	els := inlineElements("**Structs (`struct`)**: rest")
+	if st, ok := styleOf(els, "Structs ("); !ok || st["bold"] != true {
+		t.Errorf("text before code not bold: %+v", els)
+	}
+	st, ok := styleOf(els, "struct")
+	if !ok || st["bold"] != true || st["code"] != true {
+		t.Errorf("code span inside bold not bold+code: %+v", els)
+	}
+	if st, ok := styleOf(els, ")"); !ok || st["bold"] != true {
+		t.Errorf("text after code not bold: %+v", els)
+	}
+	// No element may still carry the literal delimiters.
+	for _, e := range els {
+		if m, ok := e.(map[string]any); ok {
+			if txt, _ := m["text"].(string); strings.Contains(txt, "**") {
+				t.Errorf("literal ** survived: %q", txt)
+			}
+		}
+	}
+}
+
+func TestInlineElementsEmphasisIgnoresDelimsInCode(t *testing.T) {
+	// A * or _ inside a code span is literal, not an emphasis delimiter.
+	els := inlineElements("use `a*b*c` here")
+	st, ok := styleOf(els, "a*b*c")
+	if !ok || st["code"] != true {
+		t.Errorf("code content should be verbatim + code-styled: %+v", els)
+	}
+}
+
+func TestRenderBlocksFenceInsideList(t *testing.T) {
+	// A fenced code block nested under a list item is rendered as its own
+	// preformatted block, not flattened into the item's text (regression:
+	// the fence was absorbed as continuation text and mangled inline).
+	md := "1. If using Cargo:\n   ```bash\n   cargo new x\n   cd x\n   ```\n2. Run it"
+	blocks := renderBlocks(md, toMrkdwn)
+	got := blockTypes(blocks)
+	want := []string{"rich_text", "rich_text", "rich_text"} // list, preformatted, list
+	if len(got) != len(want) {
+		t.Fatalf("types = %v, want list/preformatted/list", got)
+	}
+	// The middle block is the code fence as rich_text_preformatted.
+	mid := blocks[1]["elements"].([]any)[0].(map[string]any)
+	if mid["type"] != "rich_text_preformatted" {
+		t.Fatalf("middle block = %v, want rich_text_preformatted", mid["type"])
+	}
+	code := mid["elements"].([]any)[0].(map[string]any)["text"].(string)
+	if code != "cargo new x\ncd x" { // dedented, newlines preserved
+		t.Errorf("code block = %q, want dedented two-line body", code)
+	}
+	// No block anywhere may carry the leaked fence markers.
+	data, _ := json.Marshal(toSlackBlocks(blocks))
+	if strings.Contains(string(data), "```") {
+		t.Errorf("fence markers leaked into rendered blocks:\n%s", data)
+	}
+}
+
 func TestToSlackBlocksMarshal(t *testing.T) {
 	md := "# Heading\n\n- a\n- b\n\n| x | y |\n| - | - |\n| 1 | 2 |"
 	blocks := sanitizeBlocks(renderBlocks(md, toMrkdwn))

@@ -119,9 +119,36 @@ func styleObj(s map[string]bool) map[string]any {
 	return out
 }
 
+// maskProtected returns a copy of s with inline code spans and (non-image)
+// links overwritten by an equal-length run of a neutral byte. Emphasis
+// detection runs against this mask so a * or _ inside code or a link URL is
+// never mistaken for a delimiter — and, crucially, so an emphasis run may pair
+// *across* a code span (e.g. **foo `bar` baz**). Byte offsets are preserved, so
+// match indices map straight back onto the original string.
+func maskProtected(s string) string {
+	b := []byte(s)
+	blank := func(lo, hi int) {
+		for i := lo; i < hi; i++ {
+			b[i] = '\x01'
+		}
+	}
+	for _, loc := range inlineCodeGrpRE.FindAllStringSubmatchIndex(s, -1) {
+		blank(loc[0], loc[1])
+	}
+	for _, loc := range inlineLinkRE.FindAllStringSubmatchIndex(s, -1) {
+		if loc[0] > 0 && s[loc[0]-1] == '!' {
+			continue // image: not masked, handled as text downstream
+		}
+		blank(loc[0], loc[1])
+	}
+	return string(b)
+}
+
 // inlineElements parses inline markdown into rich_text section child elements
 // (styled text + link elements). Unmatched markup is emitted verbatim, so it
-// never loses characters.
+// never loses characters. Emphasis binds outermost — resolved first against a
+// masked copy that hides code spans and links — so bold/italic/strike can wrap
+// those spans; code and links are then split out of each emphasis run.
 func inlineElements(text string) []any {
 	var elements []any
 
@@ -136,29 +163,66 @@ func inlineElements(text string) []any {
 		elements = append(elements, el)
 	}
 
-	var walk func(s string, style map[string]bool)
-	var walkLinks func(s string, style map[string]bool)
-	var walkEmphasis func(s string, style map[string]bool)
+	var emphasis func(s string, style map[string]bool)
+	var codeSpans func(s string, style map[string]bool)
+	var linkSpans func(s string, style map[string]bool)
 
-	walk = func(s string, style map[string]bool) {
+	// emphasis resolves bold/strike/italic on a masked copy (so delimiters are
+	// found only outside code/links and may pair across them), recursing on the
+	// original substrings; the leaf hands remaining text to codeSpans.
+	emphasis = func(s string, style map[string]bool) {
+		if s == "" {
+			return
+		}
+		mask := maskProtected(s)
+		if loc := inlineBoldRE.FindStringSubmatchIndex(mask); loc != nil {
+			emphasis(s[:loc[0]], style)
+			inner := cloneStyle(style)
+			inner["bold"] = true
+			emphasis(s[loc[2]:loc[3]], inner)
+			emphasis(s[loc[1]:], style)
+			return
+		}
+		if loc := inlineStrikeRE.FindStringSubmatchIndex(mask); loc != nil {
+			emphasis(s[:loc[0]], style)
+			inner := cloneStyle(style)
+			inner["strike"] = true
+			emphasis(s[loc[2]:loc[3]], inner)
+			emphasis(s[loc[1]:], style)
+			return
+		}
+		if start, end, cs, ce, ok := findItalic(mask); ok {
+			emphasis(s[:start], style)
+			inner := cloneStyle(style)
+			inner["italic"] = true
+			emphasis(s[cs:ce], inner)
+			emphasis(s[end:], style)
+			return
+		}
+		codeSpans(s, style)
+	}
+
+	// codeSpans emits inline `code` runs (opaque, carrying any active style) and
+	// hands the gaps to linkSpans.
+	codeSpans = func(s string, style map[string]bool) {
 		pos := 0
 		for _, loc := range inlineCodeGrpRE.FindAllStringSubmatchIndex(s, -1) {
-			walkLinks(s[pos:loc[0]], style)
+			linkSpans(s[pos:loc[0]], style)
 			cs := cloneStyle(style)
 			cs["code"] = true
 			emit(s[loc[2]:loc[3]], cs)
 			pos = loc[1]
 		}
-		walkLinks(s[pos:], style)
+		linkSpans(s[pos:], style)
 	}
 
-	walkLinks = func(s string, style map[string]bool) {
+	linkSpans = func(s string, style map[string]bool) {
 		pos := 0
 		for _, loc := range inlineLinkRE.FindAllStringSubmatchIndex(s, -1) {
 			if loc[0] > 0 && s[loc[0]-1] == '!' {
 				continue // image: leave for the surrounding text run
 			}
-			walkEmphasis(s[pos:loc[0]], style)
+			emit(s[pos:loc[0]], style)
 			linkEl := map[string]any{"type": "link", "url": s[loc[4]:loc[5]], "text": s[loc[2]:loc[3]]}
 			if st := styleObj(style); st != nil {
 				linkEl["style"] = st
@@ -166,41 +230,10 @@ func inlineElements(text string) []any {
 			elements = append(elements, linkEl)
 			pos = loc[1]
 		}
-		walkEmphasis(s[pos:], style)
+		emit(s[pos:], style)
 	}
 
-	walkEmphasis = func(s string, style map[string]bool) {
-		if s == "" {
-			return
-		}
-		if loc := inlineBoldRE.FindStringSubmatchIndex(s); loc != nil {
-			walkEmphasis(s[:loc[0]], style)
-			inner := cloneStyle(style)
-			inner["bold"] = true
-			walkEmphasis(s[loc[2]:loc[3]], inner)
-			walkEmphasis(s[loc[1]:], style)
-			return
-		}
-		if loc := inlineStrikeRE.FindStringSubmatchIndex(s); loc != nil {
-			walkEmphasis(s[:loc[0]], style)
-			inner := cloneStyle(style)
-			inner["strike"] = true
-			walkEmphasis(s[loc[2]:loc[3]], inner)
-			walkEmphasis(s[loc[1]:], style)
-			return
-		}
-		if start, end, cs, ce, ok := findItalic(s); ok {
-			walkEmphasis(s[:start], style)
-			inner := cloneStyle(style)
-			inner["italic"] = true
-			walkEmphasis(s[cs:ce], inner)
-			walkEmphasis(s[end:], style)
-			return
-		}
-		emit(s, style)
-	}
-
-	walk(text, map[string]bool{})
+	emphasis(text, map[string]bool{})
 	if len(elements) == 0 {
 		return []any{map[string]any{"type": "text", "text": text}}
 	}
@@ -502,6 +535,34 @@ func isListLine(line string) bool {
 	return bulletLineRE.MatchString(line) || orderedLineRE.MatchString(line)
 }
 
+// dedent strips the longest run of leading whitespace common to every non-blank
+// line, preserving relative indentation. A fenced code block nested under a list
+// item would otherwise carry the item's indentation into the rendered code.
+func dedent(lines []string) []string {
+	min := -1
+	for _, ln := range lines {
+		if strings.TrimSpace(ln) == "" {
+			continue
+		}
+		n := len(ln) - len(strings.TrimLeft(ln, " \t"))
+		if min < 0 || n < min {
+			min = n
+		}
+	}
+	if min <= 0 {
+		return lines
+	}
+	out := make([]string, len(lines))
+	for i, ln := range lines {
+		if len(ln) >= min {
+			out[i] = ln[min:]
+		} else {
+			out[i] = strings.TrimLeft(ln, " \t")
+		}
+	}
+	return out
+}
+
 func indentLevel(spaces string) int {
 	width := 0
 	for _, ch := range spaces {
@@ -570,7 +631,7 @@ func renderBlocks(markdown string, mrkdwnFn func(string) string) (blocks []map[s
 				i++
 			}
 			i++ // consume closing fence
-			blocks = append(blocks, preformattedBlock(strings.Join(body, "\n")))
+			blocks = append(blocks, preformattedBlock(strings.Join(dedent(body), "\n")))
 			continue
 		}
 		if hrLineRE.MatchString(line) {
@@ -627,6 +688,12 @@ func renderBlocks(markdown string, mrkdwnFn func(string) string) (blocks []map[s
 				} else if om := orderedLineRE.FindStringSubmatch(lines[i]); om != nil {
 					items = append(items, listItem{indent: indentLevel(om[1]), ordered: true, text: om[3]})
 					i++
+				} else if fenceLineRE.MatchString(lines[i]) {
+					// A fenced code block (even indented under an item) ends the
+					// list: rich_text_list children are inline-only, so the outer
+					// loop renders the fence as its own preformatted block rather
+					// than flattening it into the item's text.
+					break
 				} else if strings.TrimSpace(lines[i]) != "" && (strings.HasPrefix(lines[i], " ") || strings.HasPrefix(lines[i], "\t")) && len(items) > 0 {
 					items[len(items)-1].text += " " + strings.TrimSpace(lines[i])
 					i++

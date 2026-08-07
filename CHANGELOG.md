@@ -35,6 +35,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `block_kit.py`; mrkdwn stays the default.
 
 ### Fixed
+- Slack Block Kit rendering: bold/italic/strikethrough that wraps an inline code
+  span (e.g. `` **Foo (`bar`)** ``) is now styled correctly instead of leaving the
+  `**` delimiters literal — emphasis is resolved before code spans, treating code
+  and links as opaque. A fenced code block nested under a list item is rendered as
+  its own code block (dedented) rather than being flattened into the list item's
+  text and mangled inline.
 - Slack mention stripping now preserves newlines and indentation: an inbound
   turn's markdown block structure (headers, lists, tables, code fences) is
   newline-driven, and the previous strip collapsed all whitespace, flattening a
