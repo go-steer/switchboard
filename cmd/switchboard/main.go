@@ -85,6 +85,8 @@ func runServe(args []string) error {
 		"env var holding the Slack bot user OAuth token (xoxb-...)")
 	callerID := fs.String("caller-id", "email",
 		"how to derive X-Asserted-Caller from a Slack user: \"email\" (users.info) or \"id\" (raw user ID)")
+	richBlocks := fs.Bool("slack-rich-blocks", false,
+		"render replies as Slack Block Kit (headers, lists, tables, code); mrkdwn text is always sent as the fallback")
 	showVersion := fs.Bool("version", false, "print build identity and exit")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -114,6 +116,7 @@ func runServe(args []string) error {
 		AppToken:   os.Getenv(*appTokenEnv),
 		BotToken:   os.Getenv(*botTokenEnv),
 		CallerMode: callerMode,
+		RichBlocks: *richBlocks,
 		Logf:       logf,
 	})
 	if err != nil {

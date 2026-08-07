@@ -60,16 +60,22 @@ type Config struct {
 	// CallerMode selects caller identity resolution; empty means
 	// CallerEmail.
 	CallerMode CallerMode
+	// RichBlocks opts replies into Block Kit rendering (headers, lists,
+	// tables, code, blockquotes). The mrkdwn text is always sent alongside
+	// as the fallback; on an invalid_blocks rejection the send retries with
+	// text only. Default (false) posts flat mrkdwn.
+	RichBlocks bool
 	// Logf is an optional structured-ish logger; nil discards.
 	Logf func(format string, args ...any)
 }
 
 // Adapter is the Slack implementation of chat.Adapter.
 type Adapter struct {
-	api  *slack.Client
-	sm   *socketmode.Client
-	mode CallerMode
-	logf func(string, ...any)
+	api        *slack.Client
+	sm         *socketmode.Client
+	mode       CallerMode
+	richBlocks bool
+	logf       func(string, ...any)
 
 	// botUserID is this bot's own user ID, resolved at Run start and
 	// used to ignore our own posts (loop guard).
@@ -102,6 +108,7 @@ func New(cfg Config) (*Adapter, error) {
 		api:        api,
 		sm:         sm,
 		mode:       mode,
+		richBlocks: cfg.RichBlocks,
 		logf:       logf,
 		callerByID: make(map[string]string),
 	}, nil
@@ -191,20 +198,74 @@ func (a *Adapter) handleMention(ctx context.Context, h chat.Handler, ev *slackev
 	}()
 }
 
-// Send posts a reply into its originating channel + thread.
+// Send renders the reply and posts it into its originating channel + thread.
+// The always-on baseline is Slack mrkdwn, split into several ordered in-thread
+// posts so no single message is truncated (escape=false because toMrkdwn has
+// already escaped Slack control characters). When RichBlocks is enabled it
+// first attempts a single Block Kit message (with the mrkdwn text attached as
+// the notification/fallback); if the renderer declines (nil) or Slack rejects
+// the payload (invalid_blocks), it falls back to the plain mrkdwn path so a
+// rich render never loses a message.
 func (a *Adapter) Send(ctx context.Context, r chat.Reply) error {
 	channel, thread, ok := splitConversation(r.Conversation)
 	if !ok {
 		return fmt.Errorf("slack: malformed conversation key %q", r.Conversation)
 	}
-	_, _, err := a.api.PostMessageContext(ctx, channel,
-		slack.MsgOptionText(r.Text, false),
-		slack.MsgOptionTS(thread),
-	)
-	if err != nil {
-		return fmt.Errorf("slack: post to %s: %w", r.Conversation, err)
+	rendered := toMrkdwn(r.Text)
+	if strings.TrimSpace(rendered) == "" {
+		return nil // nothing worth posting
+	}
+
+	if a.richBlocks {
+		blocks := sanitizeBlocks(renderBlocks(r.Text, toMrkdwn))
+		if blocks != nil {
+			// The text fallback is for notifications/old clients only; clamp it
+			// so a very long turn does not bloat the payload (blocks carry the
+			// full content).
+			fallback := rendered
+			if len(fallback) > maxSectionText {
+				fallback = fallback[:maxSectionText]
+			}
+			_, _, err := a.api.PostMessageContext(ctx, channel,
+				slack.MsgOptionBlocks(toSlackBlocks(blocks)...),
+				slack.MsgOptionText(fallback, false),
+				slack.MsgOptionTS(thread),
+			)
+			if err == nil {
+				return nil
+			}
+			if !isBlockRejection(err) {
+				return fmt.Errorf("slack: post blocks to %s: %w", r.Conversation, err)
+			}
+			a.logf("slack: blocks rejected for %s (%v); retrying as text", r.Conversation, err)
+		}
+	}
+
+	for _, chunk := range chunkMessage(rendered, slackTextLimit) {
+		if strings.TrimSpace(chunk) == "" {
+			continue
+		}
+		if _, _, err := a.api.PostMessageContext(ctx, channel,
+			slack.MsgOptionText(chunk, false),
+			slack.MsgOptionTS(thread),
+		); err != nil {
+			return fmt.Errorf("slack: post to %s: %w", r.Conversation, err)
+		}
 	}
 	return nil
+}
+
+// isBlockRejection reports whether err is Slack rejecting the blocks payload
+// specifically (invalid_blocks / invalid_block(s)), as opposed to a transport
+// or auth error — the former is recoverable by resending as plain text.
+func isBlockRejection(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "invalid_blocks") ||
+		strings.Contains(msg, "invalid_block") ||
+		strings.Contains(msg, "blocks_")
 }
 
 // resolveCaller maps a Slack user ID onto the asserted-caller identity,
@@ -238,12 +299,19 @@ func (a *Adapter) resolveCaller(ctx context.Context, userID string) string {
 	return caller
 }
 
-var mentionRE = regexp.MustCompile(`<@[^>]+>`)
+// mentionRE matches Slack user-mention markup (<@U123>, <@U123|name>) plus any
+// spaces/tabs hugging it — but never newlines, so line breaks and leading
+// indentation survive the strip.
+var mentionRE = regexp.MustCompile(`[ \t]*<@[^>]+>[ \t]*`)
 
-// stripMentions removes Slack user-mention markup (<@U123>, <@U123|name>)
-// and normalizes surrounding whitespace, leaving the human-readable body.
+// stripMentions removes Slack user-mention markup and trims surrounding
+// whitespace, leaving the human-readable body. Each mention (with its adjacent
+// spaces) collapses to a single space so words never run together, but internal
+// newlines and indentation are preserved: markdown block structure (headers,
+// lists, tables, code fences) is newline-driven, so flattening all whitespace
+// would turn a multi-line turn into a single unrenderable line.
 func stripMentions(text string) string {
-	return strings.TrimSpace(strings.Join(strings.Fields(mentionRE.ReplaceAllString(text, " ")), " "))
+	return strings.TrimSpace(mentionRE.ReplaceAllString(text, " "))
 }
 
 // threadRoot returns the thread timestamp to key a conversation on: the
