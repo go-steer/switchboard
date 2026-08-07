@@ -38,6 +38,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -78,53 +80,174 @@ func New(cfg Config) (*Client, error) {
 	}
 	hc := cfg.HTTPClient
 	if hc == nil {
-		hc = &http.Client{Timeout: 30 * time.Second}
+		// No client-wide Timeout: it would also bound reading the
+		// response body, which force-closes the long-lived Subscribe SSE
+		// stream. Unary calls get a deadline via context in do() instead;
+		// Subscribe is bounded only by its caller's context.
+		hc = &http.Client{}
 	}
 	return &Client{cfg: cfg, http: hc}, nil
 }
 
-// CreateSession opens a new session and returns its ID. assertedCaller
-// (may be empty) is the identity the daemon stamps as Owner; switchboard
-// must be listed in the daemon's attach.multi_session.proxy_identities
-// for it to be honored.
-func (c *Client) CreateSession(ctx context.Context, assertedCaller string) (string, error) {
+// unaryTimeout bounds a single create/inject/wake round-trip. It is
+// applied per-request via context so it never touches the streaming
+// Subscribe path.
+const unaryTimeout = 30 * time.Second
+
+// Session identifies a core-agent session. The daemon namespaces every
+// session under an app; switchboard addresses sessions by the
+// app-qualified route (/sessions/<app>/<id>/...) rather than the
+// /sessions/<id>/... shortcut, which the daemon rejects with 409 when an
+// id is ambiguous across apps. Both fields come back from CreateSession.
+type Session struct {
+	App string
+	ID  string
+}
+
+// path builds an app-qualified session route with the given suffix
+// (e.g. "/inject", "/events", or "" for the session root).
+func (s Session) path(suffix string) string {
+	return "/sessions/" + s.App + "/" + s.ID + suffix
+}
+
+// CreateSession opens a new session and returns it. assertedCaller (may
+// be empty) is the identity the daemon stamps as Owner; switchboard must
+// be listed in the daemon's attach.multi_session.proxy_identities for it
+// to be honored. The daemon requires an authenticated, non-anonymous
+// caller here, so a create against a multi-session daemon needs either a
+// real bearer identity or a valid asserted caller.
+func (c *Client) CreateSession(ctx context.Context, assertedCaller string) (Session, error) {
+	// The daemon reads no request body on create but browserWriteGuard
+	// still requires Content-Type: application/json, which do() sets for
+	// the (empty) struct payload below.
 	var out struct {
-		SessionID string `json:"session_id"`
+		App       string `json:"app"`
+		SessionID string `json:"sessionID"` // daemon uses camelCase, not session_id
 	}
 	if err := c.do(ctx, http.MethodPost, "/sessions", assertedCaller, struct{}{}, &out); err != nil {
-		return "", err
+		return Session{}, err
 	}
 	if out.SessionID == "" {
-		return "", errors.New("daemon: create session returned empty session_id")
+		return Session{}, errors.New("daemon: create session returned empty sessionID")
 	}
-	return out.SessionID, nil
+	if out.App == "" {
+		// Without an app, every app-qualified route would be malformed
+		// (/sessions//<id>/...). Fail loudly at create instead.
+		return Session{}, errors.New("daemon: create session returned empty app")
+	}
+	return Session{App: out.App, ID: out.SessionID}, nil
 }
 
 // Inject queues a user message on the session's inbox. assertedCaller
 // attributes this turn to the originating chat user.
-func (c *Client) Inject(ctx context.Context, sid, assertedCaller, text string) error {
+func (c *Client) Inject(ctx context.Context, sess Session, assertedCaller, text string) error {
 	body := map[string]string{"message": text}
-	return c.do(ctx, http.MethodPost, "/sessions/"+sid+"/inject", assertedCaller, body, nil)
+	return c.do(ctx, http.MethodPost, sess.path("/inject"), assertedCaller, body, nil)
 }
 
 // Wake nudges a sleeping session to run a turn (e.g. after an inject on
 // a session that has gone idle).
-func (c *Client) Wake(ctx context.Context, sid, assertedCaller string) error {
-	return c.do(ctx, http.MethodPost, "/sessions/"+sid+"/wake", assertedCaller, struct{}{}, nil)
+func (c *Client) Wake(ctx context.Context, sess Session, assertedCaller string) error {
+	return c.do(ctx, http.MethodPost, sess.path("/wake"), assertedCaller, struct{}{}, nil)
 }
 
-// Event is one server-sent event from a session's output stream.
+// Event is one server-sent event from a session's output stream. Type is
+// the SSE event name (e.g. "agent", "status-update", "turn-complete") and
+// Data is its raw JSON payload; use AgentText to pull assistant text out
+// of an "agent" event.
 type Event struct {
 	Type string
 	Data string
 }
 
+// EventAgent is the SSE event name carrying the agent's streamed output —
+// model text, tool calls, and tool results are all multiplexed onto it.
+// The typed lifecycle events ("status-update", "turn-complete",
+// "turn-error") are separate names switchboard does not relay verbatim.
+const EventAgent = "agent"
+
+// agentFrame is the JSON payload of an EventAgent event. It wraps an ADK
+// session.Event, whose own fields carry no JSON tags and so serialize
+// under their Go names (Content, Partial, Author, ...); the nested
+// genai.Content does carry tags (parts, role, text). Only the fields
+// switchboard needs are modeled.
+type agentFrame struct {
+	Seq   int64 `json:"seq"`
+	Event *struct {
+		Content *struct {
+			Parts []struct {
+				Text string `json:"text"`
+			} `json:"parts"`
+			Role string `json:"role"`
+		} `json:"Content"`
+		Partial bool   `json:"Partial"`
+		Author  string `json:"Author"`
+	} `json:"event"`
+}
+
+// AgentReply is the assistant text carried by one EventAgent event.
+type AgentReply struct {
+	// Seq is the event's monotonic sequence number; feed the last one
+	// back to Subscribe as `since` to resume a stream without replaying.
+	Seq int64
+	// Text is the concatenated model-authored text of the event, empty
+	// for tool-call/tool-result-only or user-authored events.
+	Text string
+	// Partial is true for an in-progress streaming chunk. The daemon
+	// repeats the full text in a final Partial:false event, so relaying
+	// only non-partial events yields one message per assistant turn.
+	Partial bool
+}
+
+// AgentText parses an EventAgent payload and reports the model-authored
+// text it carries. ok is false when the event is not model output worth
+// relaying (a parse failure, a non-agent/user-authored event, or an event
+// with no text — e.g. a tool call). Callers typically relay r.Text when
+// ok && !r.Partial && r.Text != "".
+func AgentText(data string) (r AgentReply, ok bool) {
+	var f agentFrame
+	if err := json.Unmarshal([]byte(data), &f); err != nil {
+		return AgentReply{}, false
+	}
+	r.Seq = f.Seq
+	if f.Event == nil || f.Event.Content == nil {
+		return AgentReply{Seq: f.Seq}, false
+	}
+	// role is "model" for assistant output and "user" for injected turns
+	// echoed back onto the stream; only the former is relayed.
+	if f.Event.Content.Role != "model" {
+		return AgentReply{Seq: f.Seq}, false
+	}
+	r.Partial = f.Event.Partial
+	var b strings.Builder
+	for _, p := range f.Event.Content.Parts {
+		b.WriteString(p.Text)
+	}
+	r.Text = b.String()
+	if r.Text == "" {
+		return r, false
+	}
+	return r, true
+}
+
+// protocolVersion is the attach protocol switchboard speaks. The daemon
+// accepts any declaration sharing its major version (additive minor/patch
+// fields) and 409s on a major mismatch, so this must track the daemon's
+// major. Sending it lets the daemon reject an incompatible client early
+// instead of streaming frames switchboard cannot parse.
+const protocolVersion = "1.4.0"
+
 // Subscribe opens the SSE stream for a session and delivers events to fn
 // until the context is cancelled, the stream ends, or fn returns an
 // error. It is the read half of the round-trip: the gateway relays these
-// back into the chat thread.
-func (c *Client) Subscribe(ctx context.Context, sid, assertedCaller string, fn func(Event) error) error {
-	req, err := c.newRequest(ctx, http.MethodGet, "/sessions/"+sid+"/events", assertedCaller, nil)
+// back into the chat thread. since replays frames with seq greater than
+// it (0 = from the start of the daemon's replay window); track the last
+// seq from AgentText to resume without re-delivering old turns.
+func (c *Client) Subscribe(ctx context.Context, sess Session, assertedCaller string, since int64, fn func(Event) error) error {
+	q := url.Values{}
+	q.Set("since", strconv.FormatInt(since, 10))
+	q.Set("protocol", protocolVersion)
+	req, err := c.newRequest(ctx, http.MethodGet, sess.path("/events")+"?"+q.Encode(), assertedCaller, nil)
 	if err != nil {
 		return err
 	}
@@ -167,8 +290,12 @@ func (c *Client) Subscribe(ctx context.Context, sid, assertedCaller string, fn f
 }
 
 // do performs a JSON request/response round-trip. out may be nil when
-// the response body is not needed.
+// the response body is not needed. Each call is bounded by unaryTimeout
+// via context (not the http.Client, which must stay timeout-free for the
+// streaming Subscribe path).
 func (c *Client) do(ctx context.Context, method, path, assertedCaller string, in, out any) error {
+	ctx, cancel := context.WithTimeout(ctx, unaryTimeout)
+	defer cancel()
 	var body io.Reader
 	if in != nil {
 		b, err := json.Marshal(in)

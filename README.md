@@ -8,8 +8,9 @@ agents from a thread. It is a small, independently released, **distroless**
 sidecar that speaks only the daemon's HTTP contract — the same "one contract,
 many companions" pattern as [k8s-lookout](https://github.com/go-steer/k8s-lookout).
 
-> **Status:** scaffolding. The wire client and adapter seam exist; chat adapters
-> land next. See [`docs/DESIGN.md`](docs/DESIGN.md).
+> **Status:** Slack MVP. An app-mention in a Slack thread drives a core-agent
+> session and the reply lands back in the thread. Interactive hardening and
+> Google Chat land next. See [`docs/DESIGN.md`](docs/DESIGN.md).
 
 ## Where it fits
 
@@ -33,9 +34,13 @@ resolve **per-caller** MCP credentials — not one shared bot identity.
 # Build
 go build ./cmd/switchboard
 
-# Run against a local daemon (token read from an env var, never a bare flag)
-export SWITCHBOARD_DAEMON_TOKEN=…
+# Run against a local daemon (tokens read from env vars, never bare flags)
+export SWITCHBOARD_DAEMON_TOKEN=…       # daemon bearer token
+export SWITCHBOARD_SLACK_APP_TOKEN=xapp-…   # Socket Mode app-level token
+export SWITCHBOARD_SLACK_BOT_TOKEN=xoxb-…   # bot user OAuth token
 switchboard serve --daemon-url http://127.0.0.1:7777
+# @-mention the bot in a Slack thread to drive a session; replies land in-thread.
+# --caller-id id  asserts the raw Slack user ID instead of the resolved email.
 
 # Build identity
 switchboard version
