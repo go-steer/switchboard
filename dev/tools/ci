@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Full local CI in fast-fail order — the same scripts CI runs
+# (dev/ci/presubmits/*). A green local run is the same green run as
+# remote CI; run this before every push. Mirrors core-agent's
+# dev/tools/ci.
+set -euo pipefail
+
+root="$(cd "$(dirname "$0")/../.." && pwd)"
+presubmits="$root/dev/ci/presubmits"
+
+# Fast-fail order: cheapest / most-likely-to-fail first.
+checks=(
+  verify-go-format
+  vet
+  build
+  test-unit
+  verify-mod-tidy
+  verify-vuln
+)
+
+for c in "${checks[@]}"; do
+  echo "=== $c ==="
+  "$presubmits/$c"
+done
+
+echo "=== all presubmits passed ==="
