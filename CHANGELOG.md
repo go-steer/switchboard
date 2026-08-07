@@ -17,6 +17,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   long-lived SSE subscription that relays completed agent turns back through the
   adapter, subsequent turns inject + wake. `serve` now boots the Slack adapter
   from `--slack-app-token-env` / `--slack-bot-token-env`.
+- SSE relay resilience (`cmd/switchboard`): the per-session event subscription
+  now reconnects with exponential backoff (1s→30s, reset on progress) when the
+  stream drops, resuming from the last seq seen so the daemon replays only new
+  turns — a dropped stream no longer silently strands a conversation. Delivery
+  is exactly-once: a turn replayed across the reconnect boundary is posted only
+  once. First slice of Phase 2 hardening (#3).
 - `daemon.AgentText` helper to extract assistant text from `agent` SSE frames.
 - Slack mrkdwn rendering (`pkg/chat/slack`): replies now convert a model turn's
   standard markdown into Slack mrkdwn before posting — bold/italic/strikethrough,

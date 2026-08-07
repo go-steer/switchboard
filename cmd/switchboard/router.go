@@ -18,9 +18,18 @@ import (
 	"context"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/go-steer/switchboard/pkg/chat"
 	"github.com/go-steer/switchboard/pkg/daemon"
+)
+
+// SSE relay reconnect backoff bounds. A dropped stream is reconnected after
+// minBackoff, doubling up to maxBackoff while it keeps failing and resetting to
+// minBackoff once a connection makes progress again.
+const (
+	reconnectMinBackoff = time.Second
+	reconnectMaxBackoff = 30 * time.Second
 )
 
 // sender is the egress half of a chat.Adapter the router needs to relay
@@ -41,6 +50,10 @@ type Router struct {
 	out    sender
 	logf   func(string, ...any)
 
+	// Reconnect backoff bounds for the SSE relay; defaulted in NewRouter and
+	// overridable in tests so a reconnect can be exercised without real waits.
+	minBackoff, maxBackoff time.Duration
+
 	mu       sync.Mutex
 	sessions map[string]*sessionEntry
 }
@@ -49,10 +62,11 @@ type Router struct {
 // exactly once under concurrent inbound turns. ready is closed when
 // creation finishes (successfully or not); waiters block on it.
 type sessionEntry struct {
-	ready chan struct{}
-	sess  daemon.Session
-	err   error
-	seq   atomic.Int64 // highest agent-event seq relayed, for resume
+	ready   chan struct{}
+	sess    daemon.Session
+	err     error
+	seq     atomic.Int64 // highest agent-event seq seen, fed back as `since` on resume
+	relayed atomic.Int64 // highest seq already posted, for exactly-once delivery across reconnects
 }
 
 // NewRouter builds a Router. logf may be nil.
@@ -61,10 +75,12 @@ func NewRouter(client *daemon.Client, out sender, logf func(string, ...any)) *Ro
 		logf = func(string, ...any) {}
 	}
 	return &Router{
-		client:   client,
-		out:      out,
-		logf:     logf,
-		sessions: make(map[string]*sessionEntry),
+		client:     client,
+		out:        out,
+		logf:       logf,
+		minBackoff: reconnectMinBackoff,
+		maxBackoff: reconnectMaxBackoff,
+		sessions:   make(map[string]*sessionEntry),
 	}
 }
 
@@ -114,31 +130,60 @@ func (r *Router) session(ctx context.Context, conv, caller string) (*sessionEntr
 }
 
 // relay holds the session's SSE subscription and posts each completed
-// assistant turn back into the conversation. It runs until ctx is
-// cancelled or the stream ends (reconnect is a later phase, #3).
+// assistant turn back into the conversation. It reconnects with exponential
+// backoff when the stream ends — a dropped stream must never silently strand a
+// conversation — resuming from the last seq seen so the daemon replays only new
+// turns, and skipping any turn already posted so a boundary replay cannot double
+// up (#3). It runs until ctx is cancelled.
 func (r *Router) relay(ctx context.Context, conv string, e *sessionEntry, owner string) {
-	err := r.client.Subscribe(ctx, e.sess, owner, 0, func(ev daemon.Event) error {
-		if ev.Type != daemon.EventAgent {
+	backoff := r.minBackoff
+	for ctx.Err() == nil {
+		progressed := false
+		err := r.client.Subscribe(ctx, e.sess, owner, e.seq.Load(), func(ev daemon.Event) error {
+			if ev.Type != daemon.EventAgent {
+				return nil
+			}
+			reply, ok := daemon.AgentText(ev.Data)
+			if reply.Seq > e.seq.Load() {
+				e.seq.Store(reply.Seq)
+				progressed = true
+			}
+			// Relay only completed, non-empty model turns: partial chunks
+			// are repeated by the final event, and tool-call events carry no
+			// text.
+			if !ok || reply.Partial || reply.Text == "" {
+				return nil
+			}
+			// Exactly-once: a reconnect resumes from the last seq seen, but
+			// skip anything already posted in case a turn straddled the drop.
+			if reply.Seq <= e.relayed.Load() {
+				return nil
+			}
+			e.relayed.Store(reply.Seq)
+			if serr := r.out.Send(ctx, chat.Reply{Conversation: conv, Text: reply.Text}); serr != nil {
+				// A failed post should not tear down the stream; log and keep
+				// relaying subsequent turns.
+				r.logf("relay %s: send: %v", conv, serr)
+			}
 			return nil
+		})
+		if ctx.Err() != nil {
+			return // shutting down: not a reconnectable failure
 		}
-		reply, ok := daemon.AgentText(ev.Data)
-		if reply.Seq > e.seq.Load() {
-			e.seq.Store(reply.Seq)
+		// The subscription returned: the stream ended or errored. Reset the
+		// backoff if this connection made progress (a healthy stream that
+		// blipped reconnects fast; only a persistently failing one backs off).
+		if progressed {
+			backoff = r.minBackoff
 		}
-		// Relay only completed, non-empty model turns: partial chunks
-		// are repeated by the final event, and tool-call events carry no
-		// text.
-		if !ok || reply.Partial || reply.Text == "" {
-			return nil
+		r.logf("relay %s: stream ended (%v); resuming from seq %d in %s", conv, err, e.seq.Load(), backoff)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(backoff):
 		}
-		if serr := r.out.Send(ctx, chat.Reply{Conversation: conv, Text: reply.Text}); serr != nil {
-			// A failed post should not tear down the stream; log and keep
-			// relaying subsequent turns.
-			r.logf("relay %s: send: %v", conv, serr)
+		if !progressed {
+			backoff = min(backoff*2, r.maxBackoff)
 		}
-		return nil
-	})
-	if err != nil && ctx.Err() == nil {
-		r.logf("relay %s: stream ended: %v", conv, err)
 	}
 }
