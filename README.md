@@ -112,14 +112,31 @@ transient messages.
 
 ### Container
 
+Released images are published to **GHCR** and are multi-arch
+(`linux/amd64`, `linux/arm64`):
+
+```sh
+docker pull ghcr.io/go-steer/switchboard:latest        # or a pinned :v0.1.0
+docker run --rm -e SWITCHBOARD_DAEMON_TOKEN ghcr.io/go-steer/switchboard:latest \
+  --daemon-url http://core-agent:7777
+```
+
+Or build it locally:
+
 ```sh
 docker build -t ghcr.io/go-steer/switchboard:dev .
-docker run --rm -e SWITCHBOARD_DAEMON_TOKEN ghcr.io/go-steer/switchboard:dev \
-  --daemon-url http://core-agent:7777
 ```
 
 The image is `gcr.io/distroless/static-debian12:nonroot` — no shell, no package
 manager. Default entrypoint is `switchboard serve`.
+
+**Releases.** Pushing a semver tag (`vX.Y.Z`) triggers
+[`release-images.yml`](.github/workflows/release-images.yml), which builds the
+multi-arch image, stamps build identity into `switchboard version`, and pushes it
+to GHCR tagged `X.Y.Z`, `X.Y`, `X`, and `latest` (a `-rc`/prerelease tag
+publishes only its exact version and never moves `latest`). Each push also ships
+an SBOM and a signed build-provenance attestation, verifiable with
+`gh attestation verify oci://ghcr.io/go-steer/switchboard:vX.Y.Z --repo go-steer/switchboard`.
 
 ## Layout
 

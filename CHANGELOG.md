@@ -7,6 +7,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- Release image publishing (`.github/workflows/release-images.yml`): pushing a
+  semver tag (`vX.Y.Z`) builds the distroless multicall image for `linux/amd64`
+  and `linux/arm64` off the existing buildx-ready Dockerfile and pushes it to
+  `ghcr.io/go-steer/switchboard`, tagged `X.Y.Z`, `X.Y`, `X`, and `latest` (a
+  prerelease tag publishes only its exact version and never moves `latest`).
+  Build identity (`VERSION`/`COMMIT`/`BUILD_DATE`) is injected as build args and
+  surfaces in `switchboard version`. Each push also attaches an SBOM and a signed
+  build-provenance attestation (`gh attestation verify`). `workflow_dispatch` runs
+  a build-only dry run that never authenticates or pushes.
 - Google Chat adapter MVP (`pkg/chat/googlechat`, `--platform googlechat`):
   Pub/Sub ingress (the app publishes events to a topic and switchboard pulls
   them from a subscription, so no public webhook is exposed — matching Slack
