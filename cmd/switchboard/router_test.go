@@ -519,3 +519,98 @@ func TestRouterConcurrentFirstTurnsCreateOnce(t *testing.T) {
 		t.Fatalf("creates = %d, want 1", got)
 	}
 }
+
+// newCommandRouter builds a router with no live daemon — enough to exercise
+// HandleCommand, which never touches the client or the sender.
+func newCommandRouter(t *testing.T, mode ProgressMode) *Router {
+	t.Helper()
+	dc, err := daemon.New(daemon.Config{BaseURL: "http://127.0.0.1:1", BearerToken: "tok"})
+	if err != nil {
+		t.Fatalf("daemon.New: %v", err)
+	}
+	return NewRouter(dc, &fakeSender{replies: make(chan chat.Reply, 1)}, mode, nil)
+}
+
+// TestRouterHandleCommand covers the progress command surface: querying,
+// setting (case-insensitively), per-channel isolation, invalid values, the
+// missing-channel guard, and help/unknown fallbacks.
+func TestRouterHandleCommand(t *testing.T) {
+	r := newCommandRouter(t, ProgressIndicator)
+	ctx := context.Background()
+
+	// Query with no override reports the process default.
+	if ack, _ := r.HandleCommand(ctx, chat.Command{Name: "progress", Channel: "C1"}); !strings.Contains(ack, "indicator") {
+		t.Errorf("query ack = %q, want it to name the default mode", ack)
+	}
+
+	// Set a valid mode; the override sticks for that channel only.
+	ack, err := r.HandleCommand(ctx, chat.Command{Name: "progress", Channel: "C1", Args: []string{"status"}})
+	if err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	if !strings.Contains(ack, "status") {
+		t.Errorf("set ack = %q, want it to confirm status", ack)
+	}
+	if got := r.progressFor("C1"); got != ProgressStatus {
+		t.Errorf("progressFor(C1) = %q, want status", got)
+	}
+	if got := r.progressFor("C2"); got != ProgressIndicator {
+		t.Errorf("progressFor(C2) = %q, want the untouched default", got)
+	}
+
+	// The value is case-insensitive.
+	if _, err := r.HandleCommand(ctx, chat.Command{Name: "progress", Channel: "C1", Args: []string{"OFF"}}); err != nil {
+		t.Fatalf("set OFF: %v", err)
+	}
+	if got := r.progressFor("C1"); got != ProgressOff {
+		t.Errorf("progressFor(C1) after OFF = %q, want off", got)
+	}
+
+	// An invalid value is a helpful ack, not a change.
+	if ack, _ := r.HandleCommand(ctx, chat.Command{Name: "progress", Channel: "C1", Args: []string{"bogus"}}); !strings.Contains(ack, "Unknown progress mode") {
+		t.Errorf("invalid ack = %q", ack)
+	}
+	if got := r.progressFor("C1"); got != ProgressOff {
+		t.Errorf("invalid value changed the mode to %q", got)
+	}
+
+	// Setting requires a channel.
+	if ack, _ := r.HandleCommand(ctx, chat.Command{Name: "progress", Args: []string{"status"}}); !strings.Contains(ack, "channel") {
+		t.Errorf("no-channel ack = %q, want the channel guard", ack)
+	}
+
+	// Empty and unknown commands both fall back to the usage line.
+	if ack, _ := r.HandleCommand(ctx, chat.Command{Name: "", Channel: "C1"}); !strings.Contains(ack, "progress") {
+		t.Errorf("help ack = %q", ack)
+	}
+	if ack, _ := r.HandleCommand(ctx, chat.Command{Name: "wat", Channel: "C1"}); !strings.Contains(ack, "progress") {
+		t.Errorf("unknown ack = %q", ack)
+	}
+}
+
+// TestRouterCommandOverridesTurnMode proves a per-channel override set via a
+// command actually changes turn handling: with the process default off, a
+// command flips channel C0 to stream, so a tool call now surfaces a standalone
+// activity notice ahead of the answer.
+func TestRouterCommandOverridesTurnMode(t *testing.T) {
+	router, fake := newEventRouter(t, ProgressOff, nil, toolCallEvent, answerEvent)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if ack, err := router.HandleCommand(ctx, chat.Command{Name: "progress", Channel: "C0", Args: []string{"stream"}}); err != nil {
+		t.Fatalf("command: %v", err)
+	} else if !strings.Contains(ack, "stream") {
+		t.Fatalf("command ack = %q, want it to confirm stream", ack)
+	}
+
+	if err := router.Handle(ctx, chat.Message{Conversation: "C0:1", Channel: "C0", Caller: "a@b.com", Text: "hi"}); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+
+	if got := recvReply(t, fake.replies); got.Text != activityText([]string{"lookup"}) {
+		t.Fatalf("first reply = %q, want tool notice under the stream override", got.Text)
+	}
+	if got := recvReply(t, fake.replies); got.Text != "the answer" {
+		t.Fatalf("second reply = %q, want the answer", got.Text)
+	}
+}

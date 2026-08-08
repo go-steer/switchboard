@@ -171,6 +171,32 @@ func (a *Adapter) dispatch(ctx context.Context, h chat.Handler, evt socketmode.E
 			return
 		}
 		a.handleMention(ctx, h, mention)
+	case socketmode.EventTypeSlashCommand:
+		sc, ok := evt.Data.(slack.SlashCommand)
+		if !ok {
+			return
+		}
+		a.handleSlashCommand(ctx, h, evt.Request, sc)
+	}
+}
+
+// handleSlashCommand routes a native Slack slash command (e.g.
+// "/switchboard progress status") to the gateway and acks it with an
+// ephemeral reply visible only to the invoker. The router's HandleCommand is
+// an in-memory map operation, so running it inline keeps well within Slack's
+// 3s ack window. The command's scope is the channel it was issued in.
+func (a *Adapter) handleSlashCommand(ctx context.Context, h chat.Handler, req *socketmode.Request, sc slack.SlashCommand) {
+	cmd := parseSlashCommand(sc)
+	cmd.Caller = a.resolveCaller(ctx, sc.UserID)
+	ack, err := h.HandleCommand(ctx, cmd)
+	if err != nil {
+		a.logf("slack: slash command %q: %v", cmd.Name, err)
+		ack = "Sorry, that command failed."
+	}
+	if req != nil {
+		if aerr := a.sm.Ack(*req, map[string]any{"response_type": "ephemeral", "text": ack}); aerr != nil {
+			a.logf("slack: ack slash command: %v", aerr)
+		}
 	}
 }
 
@@ -185,6 +211,14 @@ func (a *Adapter) handleMention(ctx context.Context, h chat.Handler, ev *slackev
 	}
 	conv := conversationKey(ev.Channel, threadRoot(ev.ThreadTimeStamp, ev.TimeStamp))
 	text := stripMentions(ev.Text)
+	// A mention that tightly matches a gateway command (e.g. "@switchboard
+	// progress status") configures the gateway instead of running an agent
+	// turn; anything else is agent input.
+	if cmd, ok := parseMentionCommand(text); ok {
+		cmd.Channel = ev.Channel
+		go a.runMentionCommand(ctx, h, cmd, conv, ev.User)
+		return
+	}
 	// Resolve the caller and run the daemon round-trip off the socket
 	// read loop: resolveCaller may make a users.info call on a cache miss,
 	// and Handle does create/inject/wake, neither of which should stall
@@ -192,6 +226,7 @@ func (a *Adapter) handleMention(ctx context.Context, h chat.Handler, ev *slackev
 	go func() {
 		msg := chat.Message{
 			Conversation: conv,
+			Channel:      ev.Channel,
 			Caller:       a.resolveCaller(ctx, ev.User),
 			Text:         text,
 		}
@@ -199,6 +234,22 @@ func (a *Adapter) handleMention(ctx context.Context, h chat.Handler, ev *slackev
 			a.logf("slack: handle %s: %v", conv, err)
 		}
 	}()
+}
+
+// runMentionCommand executes a command parsed from an app-mention and posts
+// its acknowledgment back into the originating thread (unlike a slash command,
+// a mention has a thread to reply in). Run off the socket loop because
+// resolveCaller may make a users.info call on a cache miss.
+func (a *Adapter) runMentionCommand(ctx context.Context, h chat.Handler, cmd chat.Command, conv, userID string) {
+	cmd.Caller = a.resolveCaller(ctx, userID)
+	ack, err := h.HandleCommand(ctx, cmd)
+	if err != nil {
+		a.logf("slack: mention command %q: %v", cmd.Name, err)
+		return
+	}
+	if _, err := a.Send(ctx, chat.Reply{Conversation: conv, Text: ack}); err != nil {
+		a.logf("slack: command ack %s: %v", conv, err)
+	}
 }
 
 // Send renders the reply and posts it into its originating channel + thread,
@@ -382,6 +433,45 @@ var mentionRE = regexp.MustCompile(`[ \t]*<@[^>]+>[ \t]*`)
 // would turn a multi-line turn into a single unrenderable line.
 func stripMentions(text string) string {
 	return strings.TrimSpace(mentionRE.ReplaceAllString(text, " "))
+}
+
+// mentionCommandVerbs are the leading words that mark an app-mention as a
+// gateway command rather than an agent turn. Kept deliberately small: a
+// mention is only treated as a command on a tight match (see
+// parseMentionCommand), so a normal turn that happens to mention a verb still
+// reaches the daemon. The router owns what each verb means and validates the
+// argument; the adapter only recognizes the surface.
+var mentionCommandVerbs = map[string]bool{"progress": true}
+
+// parseMentionCommand recognizes a gateway command inside an app-mention body,
+// e.g. "progress status". To keep agent turns from being swallowed it matches
+// only tightly: a known verb alone (query the setting) or a known verb plus a
+// single argument (set it). Three or more tokens — "progress on the ticket?" —
+// is treated as agent input, not a command.
+func parseMentionCommand(text string) (chat.Command, bool) {
+	fields := strings.Fields(text)
+	if len(fields) == 0 || len(fields) > 2 || !mentionCommandVerbs[strings.ToLower(fields[0])] {
+		return chat.Command{}, false
+	}
+	cmd := chat.Command{Name: strings.ToLower(fields[0])}
+	if len(fields) == 2 {
+		cmd.Args = []string{fields[1]}
+	}
+	return cmd, true
+}
+
+// parseSlashCommand normalizes a Slack slash command into a neutral
+// chat.Command. The invoked command word (e.g. "/switchboard") is dropped —
+// Slack carries it in sc.Command — and the remaining text is split into the
+// verb and its arguments. An explicit surface, so it parses freely (no arity
+// guard); the router validates. Caller is filled in by the dispatcher.
+func parseSlashCommand(sc slack.SlashCommand) chat.Command {
+	cmd := chat.Command{Channel: sc.ChannelID}
+	if fields := strings.Fields(sc.Text); len(fields) > 0 {
+		cmd.Name = strings.ToLower(fields[0])
+		cmd.Args = fields[1:]
+	}
+	return cmd
 }
 
 // threadRoot returns the thread timestamp to key a conversation on: the

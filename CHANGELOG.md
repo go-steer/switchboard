@@ -45,6 +45,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   exactly-once seq as turn delivery so a reconnect replay never reposts. Second
   slice of the long-turn feedback work (#3); chat-command control follows.
   `status` needs the bot's `chat:delete` scope (like `indicator`).
+- Runtime per-channel progress control via chat commands (`cmd/switchboard`,
+  `pkg/chat`, `pkg/chat/slack`): operators can change a channel's long-turn
+  feedback mode without a restart. `progress <off|indicator|status|stream>`
+  sets it, bare `progress` reports it, and the override is scoped to the
+  channel it was issued in (other channels keep the `--progress-mode` default).
+  Two surfaces: a native Slack slash command (`/switchboard progress status`,
+  acked ephemerally) and a mention subcommand (`@switchboard progress status`,
+  acked in-thread). The mention form matches only tightly (a known verb alone
+  or with one argument) so a normal turn is never swallowed. This adds a
+  provider-neutral `chat.Command` type and a `Handler.HandleCommand` method
+  each adapter maps its native command surface onto (Google Chat slash commands
+  later, no router change), plus a `Channel` field on `chat.Message` for
+  channel-scoped settings. The native `/switchboard` command needs a one-time
+  Slack app manifest entry (see README).
 - `daemon.ToolCalls` helper to extract tool-call names from `agent` SSE frames.
 - `daemon.AgentText` helper to extract assistant text from `agent` SSE frames.
 - Slack mrkdwn rendering (`pkg/chat/slack`): replies now convert a model turn's
