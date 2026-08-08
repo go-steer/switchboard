@@ -7,6 +7,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- Google Chat adapter MVP (`pkg/chat/googlechat`, `--platform googlechat`):
+  Pub/Sub ingress (the app publishes events to a topic and switchboard pulls
+  them from a subscription, so no public webhook is exposed — matching Slack
+  Socket Mode and the distroless posture) and Google Chat REST egress
+  (`spaces.messages` create/patch/delete, so every long-turn progress mode
+  works). A conversation is keyed on space + thread, so a mention thread maps to
+  one core-agent session; the caller asserted to the daemon is the sender's user
+  resource name (`users/NNN`) — verified identity and per-caller credential
+  resolution stay in core-agent (W0). Long replies are split across in-thread
+  posts under Chat's message limit. Credentials come from Application Default
+  Credentials (`--platform`, `--google-project`, `--google-subscription`; no
+  secrets as flags). Native slash commands and reply formatting follow.
 - Slack adapter MVP (`pkg/chat/slack`): Socket Mode ingress that engages on
   app-mentions, normalizes them into `chat.Message` (mention markup stripped),
   and posts replies back into the originating channel + thread. Caller identity

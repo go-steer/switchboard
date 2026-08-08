@@ -29,6 +29,8 @@ import (
 	"syscall"
 
 	"github.com/go-steer/switchboard/internal/version"
+	"github.com/go-steer/switchboard/pkg/chat"
+	"github.com/go-steer/switchboard/pkg/chat/googlechat"
 	"github.com/go-steer/switchboard/pkg/chat/slack"
 	"github.com/go-steer/switchboard/pkg/daemon"
 )
@@ -79,6 +81,8 @@ func runServe(args []string) error {
 		"core-agent daemon base URL (no trailing slash)")
 	tokenEnv := fs.String("token-env", "SWITCHBOARD_DAEMON_TOKEN",
 		"env var holding the daemon bearer token (never pass the token as a bare flag)")
+	platform := fs.String("platform", "slack",
+		"chat platform to bridge: \"slack\" (Socket Mode) or \"googlechat\" (Pub/Sub)")
 	appTokenEnv := fs.String("slack-app-token-env", "SWITCHBOARD_SLACK_APP_TOKEN",
 		"env var holding the Slack Socket Mode app-level token (xapp-...)")
 	botTokenEnv := fs.String("slack-bot-token-env", "SWITCHBOARD_SLACK_BOT_TOKEN",
@@ -90,6 +94,10 @@ func runServe(args []string) error {
 	progressMode := fs.String("progress-mode", "indicator",
 		"long-turn feedback: \"indicator\" (placeholder cleared on reply), \"status\" "+
 			"(one message edited with the running tool), \"stream\" (a notice per tool + each turn), or \"off\"")
+	googleProject := fs.String("google-project", envOr("SWITCHBOARD_GOOGLE_PROJECT", ""),
+		"GCP project hosting the Google Chat Pub/Sub subscription (--platform googlechat)")
+	googleSub := fs.String("google-subscription", envOr("SWITCHBOARD_GOOGLE_SUBSCRIPTION", ""),
+		"Pub/Sub subscription carrying Google Chat events (--platform googlechat)")
 	showVersion := fs.Bool("version", false, "print build identity and exit")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -120,15 +128,31 @@ func runServe(args []string) error {
 	}
 
 	logf := func(format string, a ...any) { fmt.Fprintf(os.Stderr, prog+": "+format+"\n", a...) }
-	adapter, err := slack.New(slack.Config{
-		AppToken:   os.Getenv(*appTokenEnv),
-		BotToken:   os.Getenv(*botTokenEnv),
-		CallerMode: callerMode,
-		RichBlocks: *richBlocks,
-		Logf:       logf,
-	})
-	if err != nil {
-		return fmt.Errorf("slack adapter: %w (set $%s and $%s)", err, *appTokenEnv, *botTokenEnv)
+
+	var adapter chat.Adapter
+	switch *platform {
+	case "slack":
+		adapter, err = slack.New(slack.Config{
+			AppToken:   os.Getenv(*appTokenEnv),
+			BotToken:   os.Getenv(*botTokenEnv),
+			CallerMode: callerMode,
+			RichBlocks: *richBlocks,
+			Logf:       logf,
+		})
+		if err != nil {
+			return fmt.Errorf("slack adapter: %w (set $%s and $%s)", err, *appTokenEnv, *botTokenEnv)
+		}
+	case "googlechat":
+		adapter, err = googlechat.New(googlechat.Config{
+			ProjectID:      *googleProject,
+			SubscriptionID: *googleSub,
+			Logf:           logf,
+		})
+		if err != nil {
+			return fmt.Errorf("googlechat adapter: %w (set --google-project and --google-subscription)", err)
+		}
+	default:
+		return fmt.Errorf("invalid --platform %q (want \"slack\" or \"googlechat\")", *platform)
 	}
 	router := NewRouter(dc, adapter, progress, logf)
 

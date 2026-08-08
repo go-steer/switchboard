@@ -8,9 +8,9 @@ agents from a thread. It is a small, independently released, **distroless**
 sidecar that speaks only the daemon's HTTP contract — the same "one contract,
 many companions" pattern as [k8s-lookout](https://github.com/go-steer/k8s-lookout).
 
-> **Status:** Slack MVP. An app-mention in a Slack thread drives a core-agent
-> session and the reply lands back in the thread. Interactive hardening and
-> Google Chat land next. See [`docs/DESIGN.md`](docs/DESIGN.md).
+> **Status:** Slack and Google Chat MVPs. An app-mention in a Slack thread — or
+> a message to the app in a Google Chat space — drives a core-agent session and
+> the reply lands back in the thread. See [`docs/DESIGN.md`](docs/DESIGN.md).
 
 ## Where it fits
 
@@ -45,6 +45,29 @@ switchboard serve --daemon-url http://127.0.0.1:7777
 # Build identity
 switchboard version
 ```
+
+### Google Chat
+
+Select the platform with `--platform googlechat`. Ingress is **Pub/Sub** (the
+Chat app is configured to publish events to a topic; switchboard pulls them from
+a subscription, so no public webhook is exposed), and egress is the Chat REST
+API. Credentials come from **Application Default Credentials** — workload
+identity in-cluster, or `GOOGLE_APPLICATION_CREDENTIALS` locally — and must
+grant Pub/Sub subscribe on the subscription and the Chat bot scope.
+
+```sh
+export SWITCHBOARD_DAEMON_TOKEN=…
+switchboard serve --platform googlechat \
+  --google-project my-gcp-project \
+  --google-subscription switchboard-chat-events \
+  --daemon-url http://127.0.0.1:7777
+# Message the app in a Chat space (or @-mention it in a room); the reply lands
+# in the same thread. The asserted caller is the sender's users/NNN resource name.
+```
+
+One-time setup: in the Chat API app configuration, set the **Connection
+settings** to *Cloud Pub/Sub* and point it at your topic, then create a pull
+subscription on that topic for switchboard to consume.
 
 ### Long-turn feedback
 
