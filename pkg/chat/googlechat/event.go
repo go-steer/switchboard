@@ -26,9 +26,9 @@ import (
 )
 
 // eventTypeMessage is the Google Chat event type for a user message directed at
-// the app (an @mention in a space, or any message in a DM). It is the only
-// event type the MVP turns into an agent turn; membership/space lifecycle
-// events are acked and ignored.
+// the app (an @mention in a space, a slash command, or any message in a DM). It
+// is the only event type the MVP acts on; membership/space lifecycle events are
+// acked and ignored.
 const eventTypeMessage = "MESSAGE"
 
 // senderTypeBot marks a message authored by an app (including this one). Chat
@@ -41,27 +41,56 @@ const senderTypeBot = "BOT"
 // which is conservative for multi-byte text (fewer runes than bytes).
 const chatTextLimit = 4096
 
-// messageFromEvent parses a Google Chat event (the JSON body of a Pub/Sub
-// message) into a normalized chat.Message. ok is false when the event is not a
-// user message worth running — a non-MESSAGE lifecycle event, a bot-authored
-// message, or one with no text — in which case the caller acks and moves on.
-// err is non-nil only on a malformed payload, which the caller logs (and still
-// acks, so a poison message is not redelivered forever).
-func messageFromEvent(data []byte) (chat.Message, bool, error) {
+// decodeEvent parses the JSON body of a Pub/Sub message into a Chat event.
+func decodeEvent(data []byte) (*chatv1.DeprecatedEvent, error) {
 	var ev chatv1.DeprecatedEvent
 	if err := json.Unmarshal(data, &ev); err != nil {
-		return chat.Message{}, false, fmt.Errorf("googlechat: decode event: %w", err)
+		return nil, fmt.Errorf("googlechat: decode event: %w", err)
 	}
+	return &ev, nil
+}
+
+// isUserMessage reports whether ev is a human message the gateway should act on
+// (a MESSAGE event carrying a message, not authored by a bot/app). It gates both
+// the command and the agent-turn paths.
+func isUserMessage(ev *chatv1.DeprecatedEvent) bool {
 	if ev.Type != eventTypeMessage || ev.Message == nil {
-		return chat.Message{}, false, nil
+		return false
 	}
+	if ev.Message.Sender != nil && ev.Message.Sender.Type == senderTypeBot {
+		return false
+	}
+	return true
+}
+
+// commandFromEvent extracts a gateway control command from a native slash-command
+// invocation, mapping Google Chat's command surface onto the neutral chat.Command
+// the router already understands (the same seam Slack's /switchboard uses). ok is
+// false for an ordinary message, which is an agent turn instead. The invoked
+// command word is carried out-of-band in message.slashCommand, so ArgumentText is
+// already just the verb and its arguments (e.g. "progress status").
+func commandFromEvent(ev *chatv1.DeprecatedEvent) (chat.Command, bool) {
 	m := ev.Message
-	if m.Sender != nil && m.Sender.Type == senderTypeBot {
-		return chat.Message{}, false, nil
+	if m == nil || m.SlashCommand == nil {
+		return chat.Command{}, false
 	}
-	space := spaceName(&ev)
+	cmd := chat.Command{Channel: spaceName(ev), Caller: callerID(ev)}
+	if fields := strings.Fields(m.ArgumentText); len(fields) > 0 {
+		cmd.Name = strings.ToLower(fields[0])
+		cmd.Args = fields[1:]
+	}
+	return cmd, true
+}
+
+// messageFromEvent builds a normalized chat.Message (an agent turn) from a human
+// MESSAGE event. ok is false when there is nothing to run — no space, or no text
+// after stripping (e.g. an attachment-only message). Callers must have already
+// confirmed isUserMessage and that the event is not a command.
+func messageFromEvent(ev *chatv1.DeprecatedEvent) (chat.Message, bool) {
+	m := ev.Message
+	space := spaceName(ev)
 	if space == "" {
-		return chat.Message{}, false, fmt.Errorf("googlechat: MESSAGE event has no space")
+		return chat.Message{}, false
 	}
 	// ArgumentText is the body with the app mention (and any slash command)
 	// stripped — the human-readable turn; fall back to raw Text if absent.
@@ -70,18 +99,14 @@ func messageFromEvent(data []byte) (chat.Message, bool, error) {
 		text = strings.TrimSpace(m.Text)
 	}
 	if text == "" {
-		return chat.Message{}, false, nil // nothing to run (e.g. attachment-only)
-	}
-	thread := ""
-	if m.Thread != nil {
-		thread = m.Thread.Name
+		return chat.Message{}, false
 	}
 	return chat.Message{
-		Conversation: conversationKey(space, thread),
+		Conversation: conversationKey(space, threadName(ev)),
 		Channel:      space,
-		Caller:       callerID(&ev),
+		Caller:       callerID(ev),
 		Text:         text,
-	}, true, nil
+	}, true
 }
 
 // spaceName resolves the space resource name (spaces/AAAA) an event belongs to,
@@ -92,6 +117,15 @@ func spaceName(ev *chatv1.DeprecatedEvent) string {
 	}
 	if ev.Message != nil && ev.Message.Space != nil {
 		return ev.Message.Space.Name
+	}
+	return ""
+}
+
+// threadName resolves the thread resource name a message belongs to, or "" when
+// the space is unthreaded.
+func threadName(ev *chatv1.DeprecatedEvent) string {
+	if ev.Message != nil && ev.Message.Thread != nil {
+		return ev.Message.Thread.Name
 	}
 	return ""
 }

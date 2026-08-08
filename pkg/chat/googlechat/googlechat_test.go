@@ -21,19 +21,69 @@ import (
 	"strings"
 	"testing"
 
+	"cloud.google.com/go/pubsub"
 	chatv1 "google.golang.org/api/chat/v1"
 
 	"github.com/go-steer/switchboard/pkg/chat"
 )
 
+func mustDecode(t *testing.T, payload string) *chatv1.DeprecatedEvent {
+	t.Helper()
+	ev, err := decodeEvent([]byte(payload))
+	if err != nil {
+		t.Fatalf("decodeEvent: %v", err)
+	}
+	return ev
+}
+
+func TestDecodeEventMalformed(t *testing.T) {
+	if _, err := decodeEvent([]byte(`{"type": "MESSAGE", `)); err == nil {
+		t.Fatalf("expected error for malformed json")
+	}
+}
+
+func TestIsUserMessage(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload string
+		want    bool
+	}{
+		{
+			name:    "human message",
+			payload: `{"type": "MESSAGE", "message": {"argumentText": "hi", "sender": {"type": "HUMAN"}}}`,
+			want:    true,
+		},
+		{
+			name:    "non-message event",
+			payload: `{"type": "ADDED_TO_SPACE", "space": {"name": "spaces/X"}}`,
+			want:    false,
+		},
+		{
+			name:    "message event with no message",
+			payload: `{"type": "MESSAGE"}`,
+			want:    false,
+		},
+		{
+			name:    "bot sender",
+			payload: `{"type": "MESSAGE", "message": {"argumentText": "loop?", "sender": {"type": "BOT"}}}`,
+			want:    false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isUserMessage(mustDecode(t, tt.payload)); got != tt.want {
+				t.Fatalf("isUserMessage = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestMessageFromEvent(t *testing.T) {
 	tests := []struct {
-		name     string
-		payload  string
-		wantOK   bool
-		wantErr  bool
-		wantMsg  chat.Message
-		checkMsg bool
+		name    string
+		payload string
+		wantOK  bool
+		wantMsg chat.Message
 	}{
 		{
 			name: "message with argument text",
@@ -49,8 +99,7 @@ func TestMessageFromEvent(t *testing.T) {
 					"sender": {"name": "users/123", "type": "HUMAN"}
 				}
 			}`,
-			wantOK:   true,
-			checkMsg: true,
+			wantOK: true,
 			wantMsg: chat.Message{
 				Conversation: "spaces/AAA:spaces/AAA/threads/T1",
 				Channel:      "spaces/AAA",
@@ -66,8 +115,7 @@ func TestMessageFromEvent(t *testing.T) {
 				"space": {"name": "spaces/B"},
 				"message": {"text": "  plain body  ", "thread": {"name": "spaces/B/threads/T"}}
 			}`,
-			wantOK:   true,
-			checkMsg: true,
+			wantOK: true,
 			wantMsg: chat.Message{
 				Conversation: "spaces/B:spaces/B/threads/T",
 				Channel:      "spaces/B",
@@ -82,8 +130,7 @@ func TestMessageFromEvent(t *testing.T) {
 				"space": {"name": "spaces/C"},
 				"message": {"argumentText": "hi", "sender": {"name": "users/77", "type": "HUMAN"}}
 			}`,
-			wantOK:   true,
-			checkMsg: true,
+			wantOK: true,
 			wantMsg: chat.Message{
 				Conversation: "spaces/C:",
 				Channel:      "spaces/C",
@@ -92,56 +139,101 @@ func TestMessageFromEvent(t *testing.T) {
 			},
 		},
 		{
-			name:    "non-message event ignored",
-			payload: `{"type": "ADDED_TO_SPACE", "space": {"name": "spaces/X"}}`,
+			name:    "empty text ignored",
+			payload: `{"type": "MESSAGE", "space": {"name": "spaces/E"}, "message": {"argumentText": "   ", "text": ""}}`,
 			wantOK:  false,
 		},
 		{
-			name: "bot sender ignored",
-			payload: `{
-				"type": "MESSAGE",
-				"space": {"name": "spaces/D"},
-				"message": {"argumentText": "loop?", "sender": {"name": "users/bot", "type": "BOT"}}
-			}`,
-			wantOK: false,
-		},
-		{
-			name: "empty text ignored",
-			payload: `{
-				"type": "MESSAGE",
-				"space": {"name": "spaces/E"},
-				"message": {"argumentText": "   ", "text": ""}
-			}`,
-			wantOK: false,
-		},
-		{
-			name:    "message with no space is an error",
+			name:    "no space ignored",
 			payload: `{"type": "MESSAGE", "message": {"argumentText": "hi"}}`,
-			wantErr: true,
-		},
-		{
-			name:    "malformed json is an error",
-			payload: `{"type": "MESSAGE", `,
-			wantErr: true,
+			wantOK:  false,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			msg, ok, err := messageFromEvent([]byte(tt.payload))
-			if tt.wantErr {
-				if err == nil {
-					t.Fatalf("expected error, got nil (ok=%v msg=%+v)", ok, msg)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
+			msg, ok := messageFromEvent(mustDecode(t, tt.payload))
 			if ok != tt.wantOK {
 				t.Fatalf("ok = %v, want %v", ok, tt.wantOK)
 			}
-			if tt.checkMsg && msg != tt.wantMsg {
+			if tt.wantOK && msg != tt.wantMsg {
 				t.Fatalf("message = %+v, want %+v", msg, tt.wantMsg)
+			}
+		})
+	}
+}
+
+func TestCommandFromEvent(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload string
+		wantOK  bool
+		wantCmd chat.Command
+	}{
+		{
+			name: "slash command with verb and arg",
+			payload: `{
+				"type": "MESSAGE",
+				"user": {"name": "users/5"},
+				"space": {"name": "spaces/AAA"},
+				"message": {
+					"argumentText": "progress status",
+					"slashCommand": {"commandId": "1"},
+					"thread": {"name": "spaces/AAA/threads/T1"}
+				}
+			}`,
+			wantOK: true,
+			wantCmd: chat.Command{
+				Channel: "spaces/AAA",
+				Caller:  "users/5",
+				Name:    "progress",
+				Args:    []string{"status"},
+			},
+		},
+		{
+			name: "slash command verb only",
+			payload: `{
+				"type": "MESSAGE",
+				"space": {"name": "spaces/AAA"},
+				"message": {"argumentText": "PROGRESS", "slashCommand": {"commandId": "1"}}
+			}`,
+			wantOK: true,
+			wantCmd: chat.Command{
+				Channel: "spaces/AAA",
+				Name:    "progress", // lower-cased
+			},
+		},
+		{
+			name: "bare slash command",
+			payload: `{
+				"type": "MESSAGE",
+				"space": {"name": "spaces/AAA"},
+				"message": {"argumentText": "", "slashCommand": {"commandId": "1"}}
+			}`,
+			wantOK: true,
+			wantCmd: chat.Command{
+				Channel: "spaces/AAA",
+			},
+		},
+		{
+			name:    "ordinary message is not a command",
+			payload: `{"type": "MESSAGE", "space": {"name": "spaces/AAA"}, "message": {"argumentText": "progress status"}}`,
+			wantOK:  false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd, ok := commandFromEvent(mustDecode(t, tt.payload))
+			if ok != tt.wantOK {
+				t.Fatalf("ok = %v, want %v", ok, tt.wantOK)
+			}
+			if !tt.wantOK {
+				return
+			}
+			if cmd.Channel != tt.wantCmd.Channel || cmd.Caller != tt.wantCmd.Caller || cmd.Name != tt.wantCmd.Name {
+				t.Fatalf("cmd = %+v, want %+v", cmd, tt.wantCmd)
+			}
+			if strings.Join(cmd.Args, ",") != strings.Join(tt.wantCmd.Args, ",") {
+				t.Fatalf("cmd.Args = %v, want %v", cmd.Args, tt.wantCmd.Args)
 			}
 		})
 	}
@@ -413,5 +505,103 @@ func TestUpdateAndDelete(t *testing.T) {
 	}
 	if len(f.deletes) != 1 || f.deletes[0] != ref.ID {
 		t.Fatalf("unexpected delete %+v", f.deletes)
+	}
+}
+
+// fakeHandler records the turns and commands dispatch routes to the router.
+type fakeHandler struct {
+	msgs []chat.Message
+	cmds []chat.Command
+	ack  string
+	err  error
+}
+
+func (h *fakeHandler) Handle(_ context.Context, m chat.Message) error {
+	h.msgs = append(h.msgs, m)
+	return nil
+}
+
+func (h *fakeHandler) HandleCommand(_ context.Context, c chat.Command) (string, error) {
+	h.cmds = append(h.cmds, c)
+	return h.ack, h.err
+}
+
+// pubsubMessage wraps a payload as the Pub/Sub message dispatch consumes. Ack is
+// a no-op in tests; the summary only cares that the payload routes correctly.
+func TestDispatchRoutesCommandToHandleCommand(t *testing.T) {
+	f := &fakeMessenger{}
+	h := &fakeHandler{ack: "progress mode set to status"}
+	a := newTestAdapter(f)
+
+	payload := []byte(`{
+		"type": "MESSAGE",
+		"user": {"name": "users/5"},
+		"space": {"name": "spaces/AAA"},
+		"message": {
+			"argumentText": "progress status",
+			"slashCommand": {"commandId": "1"},
+			"thread": {"name": "spaces/AAA/threads/T1"}
+		}
+	}`)
+	a.dispatch(context.Background(), h, &pubsub.Message{Data: payload})
+
+	if len(h.cmds) != 1 {
+		t.Fatalf("want 1 command, got %d", len(h.cmds))
+	}
+	if len(h.msgs) != 0 {
+		t.Fatalf("command must not become an agent turn: %+v", h.msgs)
+	}
+	cmd := h.cmds[0]
+	if cmd.Name != "progress" || cmd.Channel != "spaces/AAA" || cmd.Caller != "users/5" {
+		t.Fatalf("unexpected command %+v", cmd)
+	}
+	// The ack posts back into the invoking thread.
+	if len(f.creates) != 1 {
+		t.Fatalf("want 1 ack post, got %d", len(f.creates))
+	}
+	c := f.creates[0]
+	if c.parent != "spaces/AAA" || c.thread != "spaces/AAA/threads/T1" || c.text != "progress mode set to status" {
+		t.Fatalf("unexpected ack post %+v", c)
+	}
+}
+
+func TestDispatchEmptyAckPostsNothing(t *testing.T) {
+	f := &fakeMessenger{}
+	h := &fakeHandler{ack: ""}
+	a := newTestAdapter(f)
+
+	payload := []byte(`{
+		"type": "MESSAGE",
+		"space": {"name": "spaces/AAA"},
+		"message": {"argumentText": "progress", "slashCommand": {"commandId": "1"}}
+	}`)
+	a.dispatch(context.Background(), h, &pubsub.Message{Data: payload})
+
+	if len(h.cmds) != 1 {
+		t.Fatalf("want 1 command, got %d", len(h.cmds))
+	}
+	if len(f.creates) != 0 {
+		t.Fatalf("empty ack must post nothing, got %+v", f.creates)
+	}
+}
+
+func TestDispatchRoutesMessageToHandle(t *testing.T) {
+	f := &fakeMessenger{}
+	h := &fakeHandler{}
+	a := newTestAdapter(f)
+
+	payload := []byte(`{
+		"type": "MESSAGE",
+		"user": {"name": "users/7"},
+		"space": {"name": "spaces/AAA"},
+		"message": {"argumentText": "hello there", "thread": {"name": "spaces/AAA/threads/T1"}}
+	}`)
+	a.dispatch(context.Background(), h, &pubsub.Message{Data: payload})
+
+	if len(h.msgs) != 1 || len(h.cmds) != 0 {
+		t.Fatalf("want 1 turn and no command, got msgs=%+v cmds=%+v", h.msgs, h.cmds)
+	}
+	if h.msgs[0].Text != "hello there" || h.msgs[0].Caller != "users/7" {
+		t.Fatalf("unexpected turn %+v", h.msgs[0])
 	}
 }

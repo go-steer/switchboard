@@ -18,7 +18,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   resolution stay in core-agent (W0). Long replies are split across in-thread
   posts under Chat's message limit. Credentials come from Application Default
   Credentials (`--platform`, `--google-project`, `--google-subscription`; no
-  secrets as flags). Native slash commands and reply formatting follow.
+  secrets as flags). Reply formatting follows.
+- Google Chat native slash commands (`pkg/chat/googlechat`): a configured slash
+  command (e.g. `/switchboard progress status`) is mapped onto the same
+  provider-neutral `chat.Command` seam Slack's `/switchboard` uses and routed to
+  `Handler.HandleCommand` — so runtime per-channel progress control works on
+  Google Chat with no router change. The command is detected from the event's
+  `slashCommand` (its `argumentText` is already just the verb and arguments) and
+  never reaches the daemon as a turn; the acknowledgment is posted back into the
+  invoking thread (Google Chat has no ephemeral async reply). The command word,
+  its argument list, and the caller's user resource name flow through unchanged.
 - Slack adapter MVP (`pkg/chat/slack`): Socket Mode ingress that engages on
   app-mentions, normalizes them into `chat.Message` (mention markup stripped),
   and posts replies back into the originating channel + thread. Caller identity
