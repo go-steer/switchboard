@@ -69,6 +69,13 @@ One-time setup: in the Chat API app configuration, set the **Connection
 settings** to *Cloud Pub/Sub* and point it at your topic, then create a pull
 subscription on that topic for switchboard to consume.
 
+To use the runtime progress control (below) on Google Chat, add a **slash
+command** in the same app configuration — name it `switchboard`, give it a
+command ID, and switchboard maps its invocation onto the same `chat.Command`
+seam as Slack's `/switchboard`. Chat strips the command word before delivery, so
+`/switchboard progress status` arrives as the verb `progress` with argument
+`status`; the acknowledgment is posted back into the invoking thread.
+
 ### Long-turn feedback
 
 While an agent turn runs, switchboard can show liveness. `--progress-mode` sets

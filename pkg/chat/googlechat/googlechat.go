@@ -126,23 +126,50 @@ func (a *Adapter) Run(ctx context.Context, h chat.Handler) error {
 	})
 }
 
-// dispatch translates one Pub/Sub message into a turn and hands it to the
-// router. It always acks: a message we cannot turn into a turn (a lifecycle
-// event, a bot sender, a malformed payload) must not be redelivered forever,
-// and a daemon failure is logged rather than retried (a retry would re-inject
-// and could duplicate the turn), mirroring the Slack adapter.
+// dispatch translates one Pub/Sub message into a turn (or a gateway command) and
+// hands it to the router. It always acks: a message we cannot act on (a lifecycle
+// event, a bot sender, a malformed payload) must not be redelivered forever, and
+// a daemon failure is logged rather than retried (a retry would re-inject and
+// could duplicate the turn), mirroring the Slack adapter.
 func (a *Adapter) dispatch(ctx context.Context, h chat.Handler, m *pubsub.Message) {
 	defer m.Ack()
-	msg, ok, err := messageFromEvent(m.Data)
+	ev, err := decodeEvent(m.Data)
 	if err != nil {
 		a.logf("googlechat: %v", err)
 		return
 	}
+	if !isUserMessage(ev) {
+		return
+	}
+	// A native slash command configures the gateway; anything else is an agent
+	// turn. The command never reaches the daemon.
+	if cmd, ok := commandFromEvent(ev); ok {
+		a.runCommand(ctx, h, conversationKey(spaceName(ev), threadName(ev)), cmd)
+		return
+	}
+	msg, ok := messageFromEvent(ev)
 	if !ok {
 		return
 	}
 	if err := h.Handle(ctx, msg); err != nil {
 		a.logf("googlechat: handle %s: %v", msg.Conversation, err)
+	}
+}
+
+// runCommand runs a gateway command and posts its acknowledgment back into the
+// invoking thread. Google Chat has no ephemeral async reply, so (like the Slack
+// mention subcommand) the ack is a normal in-thread message.
+func (a *Adapter) runCommand(ctx context.Context, h chat.Handler, conv string, cmd chat.Command) {
+	ack, err := h.HandleCommand(ctx, cmd)
+	if err != nil {
+		a.logf("googlechat: command %q: %v", cmd.Name, err)
+		return
+	}
+	if ack == "" {
+		return
+	}
+	if _, err := a.Send(ctx, chat.Reply{Conversation: conv, Text: ack}); err != nil {
+		a.logf("googlechat: command ack %s: %v", conv, err)
 	}
 }
 
