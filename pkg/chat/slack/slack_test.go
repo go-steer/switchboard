@@ -14,7 +14,12 @@
 
 package slack
 
-import "testing"
+import (
+	"strings"
+	"testing"
+
+	"github.com/slack-go/slack"
+)
 
 func TestStripMentions(t *testing.T) {
 	cases := []struct {
@@ -85,5 +90,59 @@ func TestNewValidation(t *testing.T) {
 	}
 	if a.Name() != "slack" {
 		t.Errorf("Name = %q", a.Name())
+	}
+}
+
+func TestParseMentionCommand(t *testing.T) {
+	cases := []struct {
+		in       string
+		wantOK   bool
+		wantName string
+		wantArgs string // space-joined
+	}{
+		{"progress", true, "progress", ""},              // bare verb: query
+		{"progress status", true, "progress", "status"}, // verb + one arg: set
+		{"Progress STATUS", true, "progress", "STATUS"}, // verb case-folded; arg preserved
+		{"progress on the ticket?", false, "", ""},      // 4 tokens: an agent turn
+		{"progress status extra", false, "", ""},        // 3 tokens: an agent turn
+		{"deploy the thing", false, "", ""},             // unknown verb
+		{"", false, "", ""},
+	}
+	for _, tc := range cases {
+		cmd, ok := parseMentionCommand(tc.in)
+		if ok != tc.wantOK {
+			t.Errorf("parseMentionCommand(%q) ok = %v, want %v", tc.in, ok, tc.wantOK)
+			continue
+		}
+		if !ok {
+			continue
+		}
+		if cmd.Name != tc.wantName || strings.Join(cmd.Args, " ") != tc.wantArgs {
+			t.Errorf("parseMentionCommand(%q) = {name %q args %v}, want {name %q args %q}",
+				tc.in, cmd.Name, cmd.Args, tc.wantName, tc.wantArgs)
+		}
+	}
+}
+
+func TestParseSlashCommand(t *testing.T) {
+	cases := []struct {
+		text     string
+		wantName string
+		wantArgs string // space-joined
+	}{
+		{"progress status", "progress", "status"},
+		{"PROGRESS Status Extra", "progress", "Status Extra"}, // explicit surface parses freely
+		{"  progress   status  ", "progress", "status"},       // extra whitespace collapses
+		{"", "", ""}, // empty text: help
+	}
+	for _, tc := range cases {
+		cmd := parseSlashCommand(slack.SlashCommand{ChannelID: "C1", Text: tc.text})
+		if cmd.Channel != "C1" {
+			t.Errorf("parseSlashCommand(%q) channel = %q, want C1", tc.text, cmd.Channel)
+		}
+		if cmd.Name != tc.wantName || strings.Join(cmd.Args, " ") != tc.wantArgs {
+			t.Errorf("parseSlashCommand(%q) = {name %q args %v}, want {name %q args %q}",
+				tc.text, cmd.Name, cmd.Args, tc.wantName, tc.wantArgs)
+		}
 	}
 }

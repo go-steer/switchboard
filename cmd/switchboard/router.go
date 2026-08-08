@@ -16,6 +16,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -93,6 +94,12 @@ type Router struct {
 
 	mu       sync.Mutex
 	sessions map[string]*sessionEntry
+
+	// omu guards overrides, the per-channel progress-mode overrides set at
+	// runtime via chat commands (HandleCommand). A channel absent from the map
+	// uses the process default (r.progress); progressFor resolves the two.
+	omu       sync.Mutex
+	overrides map[string]ProgressMode
 }
 
 // sessionEntry is a conversation's session plus the state to create it
@@ -102,6 +109,7 @@ type sessionEntry struct {
 	ready   chan struct{}
 	sess    daemon.Session
 	err     error
+	channel string       // platform channel, for resolving the channel's progress mode
 	seq     atomic.Int64 // highest agent-event seq seen, fed back as `since` on resume
 	relayed atomic.Int64 // highest seq already posted, for exactly-once delivery across reconnects
 
@@ -147,14 +155,77 @@ func NewRouter(client *daemon.Client, out sender, progress ProgressMode, logf fu
 		minBackoff: reconnectMinBackoff,
 		maxBackoff: reconnectMaxBackoff,
 		sessions:   make(map[string]*sessionEntry),
+		overrides:  make(map[string]ProgressMode),
 	}
+}
+
+// progressFor resolves the progress mode in effect for a channel: its runtime
+// override (set via a chat command) if any, else the process default. An empty
+// channel has no per-channel override and always resolves to the default.
+func (r *Router) progressFor(channel string) ProgressMode {
+	if channel != "" {
+		r.omu.Lock()
+		m, ok := r.overrides[channel]
+		r.omu.Unlock()
+		if ok {
+			return m
+		}
+	}
+	return r.progress
+}
+
+// setProgress records a per-channel progress-mode override.
+func (r *Router) setProgress(channel string, mode ProgressMode) {
+	r.omu.Lock()
+	r.overrides[channel] = mode
+	r.omu.Unlock()
+}
+
+// HandleCommand processes a gateway control command and returns a short
+// acknowledgment for the adapter to surface to the invoker. It never touches
+// the daemon: commands configure the gateway. An unknown or malformed command
+// yields a helpful ack rather than an error; the error return is reserved for
+// future commands that can fail internally.
+func (r *Router) HandleCommand(_ context.Context, cmd chat.Command) (string, error) {
+	switch cmd.Name {
+	case "progress":
+		return r.progressCommand(cmd), nil
+	case "", "help":
+		return commandHelp, nil
+	default:
+		return fmt.Sprintf("Unknown command %q. %s", cmd.Name, commandHelp), nil
+	}
+}
+
+// commandHelp is the one-line usage surfaced for an empty, "help", or unknown
+// command.
+const commandHelp = "Try `progress <off|indicator|status|stream>` to set this " +
+	"channel's long-turn feedback, or `progress` to see the current mode."
+
+// progressCommand reads or sets the calling channel's progress mode. With no
+// argument it reports the mode in effect; with one it validates and records an
+// override. It is channel-scoped, so a command with no channel is refused.
+func (r *Router) progressCommand(cmd chat.Command) string {
+	if cmd.Channel == "" {
+		return "The progress mode can only be set from within a channel."
+	}
+	if len(cmd.Args) == 0 {
+		return fmt.Sprintf("Progress mode for this channel is *%s*. Change it with "+
+			"`progress <off|indicator|status|stream>`.", r.progressFor(cmd.Channel))
+	}
+	mode, err := parseProgressMode(strings.ToLower(cmd.Args[0]))
+	if err != nil {
+		return fmt.Sprintf("Unknown progress mode %q. Choose one of: off, indicator, status, stream.", cmd.Args[0])
+	}
+	r.setProgress(cmd.Channel, mode)
+	return fmt.Sprintf("Progress mode for this channel set to *%s*.", mode)
 }
 
 // Handle processes one inbound turn: ensure a session exists for the
 // conversation (creating it and its relay subscription on the first
 // turn), then inject the message and wake the session to run it.
 func (r *Router) Handle(ctx context.Context, msg chat.Message) error {
-	entry, err := r.session(ctx, msg.Conversation, msg.Caller)
+	entry, err := r.session(ctx, msg.Conversation, msg.Channel, msg.Caller)
 	if err != nil {
 		return err
 	}
@@ -180,7 +251,7 @@ func (r *Router) Handle(ctx context.Context, msg chat.Message) error {
 // latest remains. Failures are logged, never fatal — a missing progress
 // message must not drop the turn.
 func (r *Router) startProgress(ctx context.Context, e *sessionEntry, conv string) {
-	if r.progress != ProgressIndicator && r.progress != ProgressStatus {
+	if mode := r.progressFor(e.channel); mode != ProgressIndicator && mode != ProgressStatus {
 		return
 	}
 	ref, err := r.out.Send(ctx, chat.Reply{Conversation: conv, Text: workingText})
@@ -226,9 +297,9 @@ func (r *Router) deliverText(ctx context.Context, e *sessionEntry, conv, text st
 // modes). Status mode edits the managed status message in place so the whole
 // turn stays one message; stream mode — and status mode with no message left
 // to edit — posts a standalone notice.
-func (r *Router) postActivity(ctx context.Context, e *sessionEntry, conv string, tools []string) {
+func (r *Router) postActivity(ctx context.Context, e *sessionEntry, conv string, mode ProgressMode, tools []string) {
 	text := activityText(tools)
-	if r.progress == ProgressStatus {
+	if mode == ProgressStatus {
 		if ref := e.currentProgress(); ref.ID != "" {
 			if err := r.out.Update(ctx, ref, chat.Reply{Conversation: conv, Text: text}); err != nil {
 				r.logf("relay %s: status activity: %v", conv, err)
@@ -244,7 +315,7 @@ func (r *Router) postActivity(ctx context.Context, e *sessionEntry, conv string,
 // session returns the conversation's session, creating it (and starting
 // its relay goroutine) on first use. The first caller in a thread owns
 // the created session; the SSE relay is attributed to that owner.
-func (r *Router) session(ctx context.Context, conv, caller string) (*sessionEntry, error) {
+func (r *Router) session(ctx context.Context, conv, channel, caller string) (*sessionEntry, error) {
 	r.mu.Lock()
 	if e, ok := r.sessions[conv]; ok {
 		r.mu.Unlock()
@@ -254,7 +325,7 @@ func (r *Router) session(ctx context.Context, conv, caller string) (*sessionEntr
 	// This goroutine owns creation; publish a not-yet-ready entry so
 	// concurrent turns on the same conversation wait rather than
 	// double-create, and release the map lock before the network call.
-	e := &sessionEntry{ready: make(chan struct{})}
+	e := &sessionEntry{ready: make(chan struct{}), channel: channel}
 	r.sessions[conv] = e
 	r.mu.Unlock()
 
@@ -305,11 +376,12 @@ func (r *Router) relay(ctx context.Context, conv string, e *sessionEntry, owner 
 			}
 			// Otherwise it may be tool activity — surfaced only in the modes
 			// that show progress, and gated by the same seq so a reconnect
-			// replay does not repost it.
-			if r.progress == ProgressStream || r.progress == ProgressStatus {
+			// replay does not repost it. The mode is resolved per event so a
+			// mid-session command takes effect on the next turn.
+			if mode := r.progressFor(e.channel); mode == ProgressStream || mode == ProgressStatus {
 				if tools := daemon.ToolCalls(ev.Data); len(tools) > 0 && reply.Seq > e.relayed.Load() {
 					e.relayed.Store(reply.Seq)
-					r.postActivity(ctx, e, conv, tools)
+					r.postActivity(ctx, e, conv, mode, tools)
 				}
 			}
 			return nil

@@ -34,6 +34,13 @@ type Message struct {
 	// Same Conversation across turns => same session.
 	Conversation string
 
+	// Channel is the platform channel/space the conversation lives in,
+	// independent of thread — a Slack channel ID or a Google Chat space.
+	// The router uses it for channel-scoped gateway settings (e.g. a
+	// per-channel progress mode) that apply across every thread in the
+	// channel.
+	Channel string
+
 	// Caller is the platform identity of the human who sent the message,
 	// in the daemon's asserted-caller form (e.g. "alice@example.com").
 	// The router forwards it as X-Asserted-Caller so the daemon attributes
@@ -75,10 +82,41 @@ type MessageRef struct {
 // platform that lacks them.
 var ErrUnsupported = errors.New("chat: operation not supported by this platform")
 
-// Handler receives normalized inbound messages. The router implements it;
-// an Adapter calls it once per inbound turn.
+// Command is a normalized gateway control command — a platform's native
+// slash command (Slack /switchboard, a Google Chat slash command) or a
+// recognized mention subcommand (@switchboard progress status). Unlike a
+// Message it never reaches the daemon: it configures the gateway itself.
+// Adding a platform means mapping its native command surface onto this
+// type; the router interprets Name/Args and never learns the platform.
+type Command struct {
+	// Channel is the platform channel/space the command applies to. Gateway
+	// settings are channel-scoped, so a Command carries the channel rather
+	// than a full conversation key.
+	Channel string
+
+	// Caller is the invoker's asserted-caller identity (for logging/authz).
+	Caller string
+
+	// Name is the command verb, lower-cased, e.g. "progress".
+	Name string
+
+	// Args are the remaining whitespace-separated tokens, e.g. ["status"].
+	Args []string
+}
+
+// Handler receives normalized inbound turns and gateway commands. The
+// router implements it; an Adapter calls Handle once per inbound message
+// and HandleCommand once per recognized command.
 type Handler interface {
+	// Handle processes one inbound message (an agent turn).
 	Handle(ctx context.Context, msg Message) error
+
+	// HandleCommand processes a gateway control command and returns a short,
+	// human-readable acknowledgment for the adapter to surface to the invoker
+	// (ephemerally for a slash command, or as a thread reply for a mention
+	// subcommand). An error is returned only for an internal failure; an
+	// unknown or malformed command yields a helpful ack, not an error.
+	HandleCommand(ctx context.Context, cmd Command) (string, error)
 }
 
 // Adapter is a single chat platform's ingress + egress. Run blocks,

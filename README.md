@@ -46,6 +46,40 @@ switchboard serve --daemon-url http://127.0.0.1:7777
 switchboard version
 ```
 
+### Long-turn feedback
+
+While an agent turn runs, switchboard can show liveness. `--progress-mode` sets
+the process default:
+
+| Mode | Behavior |
+|------|----------|
+| `indicator` (default) | posts a "⏳ Working…" placeholder, deleted when the reply lands |
+| `status` | keeps one message per turn, edited in place to name the running tool |
+| `stream` | posts a "🔧 Running `tool`" notice per tool call, plus each completed turn |
+| `off` | silent until the reply is ready |
+
+Operators can override the mode **per channel** at runtime with a command — no
+restart:
+
+```
+/switchboard progress status     # native slash command
+@switchboard progress status     # or a mention subcommand
+@switchboard progress            # show the channel's current mode
+```
+
+The mention form needs no extra setup. The native `/switchboard` slash command
+requires a **one-time Slack app manifest entry** — add under `features`:
+
+```yaml
+slash_commands:
+  - command: /switchboard
+    description: Configure switchboard for this channel
+    usage_hint: progress <off|indicator|status|stream>
+```
+
+`indicator` and `status` also need the bot's `chat:delete` scope to clear their
+transient messages.
+
 ### Container
 
 ```sh
