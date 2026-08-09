@@ -131,7 +131,7 @@ func TestRouterRoundTrip(t *testing.T) {
 		t.Fatalf("daemon.New: %v", err)
 	}
 	fake := &fakeSender{replies: make(chan chat.Reply, 4)}
-	router := NewRouter(dc, fake, ProgressOff, nil)
+	router := NewRouter(dc, fake, ProgressOff, nil, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -206,7 +206,7 @@ func TestRouterProgressIndicator(t *testing.T) {
 		t.Fatalf("daemon.New: %v", err)
 	}
 	fake := &fakeSender{replies: make(chan chat.Reply, 4)}
-	router := NewRouter(dc, fake, ProgressIndicator, nil)
+	router := NewRouter(dc, fake, ProgressIndicator, nil, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -286,7 +286,7 @@ func newEventRouter(t *testing.T, mode ProgressMode, release <-chan struct{}, ev
 		t.Fatalf("daemon.New: %v", err)
 	}
 	fake := &fakeSender{replies: make(chan chat.Reply, 8)}
-	return NewRouter(dc, fake, mode, nil), fake
+	return NewRouter(dc, fake, mode, nil, nil), fake
 }
 
 // waitFor polls cond until it holds or the deadline passes.
@@ -427,7 +427,7 @@ func TestRouterRelayReconnectsAndDedupes(t *testing.T) {
 		t.Fatalf("daemon.New: %v", err)
 	}
 	fake := &fakeSender{replies: make(chan chat.Reply, 8)}
-	router := NewRouter(dc, fake, ProgressOff, nil)
+	router := NewRouter(dc, fake, ProgressOff, nil, nil)
 	router.minBackoff, router.maxBackoff = 5*time.Millisecond, 20*time.Millisecond
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -499,7 +499,7 @@ func TestRouterConcurrentFirstTurnsCreateOnce(t *testing.T) {
 	if err != nil {
 		t.Fatalf("daemon.New: %v", err)
 	}
-	router := NewRouter(dc, &fakeSender{replies: make(chan chat.Reply, 8)}, ProgressOff, nil)
+	router := NewRouter(dc, &fakeSender{replies: make(chan chat.Reply, 8)}, ProgressOff, nil, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -528,7 +528,7 @@ func newCommandRouter(t *testing.T, mode ProgressMode) *Router {
 	if err != nil {
 		t.Fatalf("daemon.New: %v", err)
 	}
-	return NewRouter(dc, &fakeSender{replies: make(chan chat.Reply, 1)}, mode, nil)
+	return NewRouter(dc, &fakeSender{replies: make(chan chat.Reply, 1)}, mode, nil, nil)
 }
 
 // TestRouterHandleCommand covers the progress command surface: querying,

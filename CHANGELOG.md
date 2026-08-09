@@ -7,6 +7,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- Health check + Prometheus metrics (`--metrics-addr`, default disabled): when
+  set to a `host:port`, `serve` starts an HTTP server exposing `/healthz`
+  (liveness, `200 ok`, no scrape dependency) and `/metrics`. The router
+  instruments inbound turns and commands, core-agent requests
+  (`create`/`inject`/`wake`, with latency), outbound sends, agent turns relayed,
+  SSE reconnects, and active sessions — all series prefixed `switchboard_`. A
+  metrics bind failure brings the process down so the health surface a
+  deployment's probes depend on is never silently absent. The deploy manifests
+  set `--metrics-addr=:9090`, expose a named `metrics` port, wire `/healthz` to
+  the liveness + readiness probes, and narrow the NetworkPolicy from deny-all to
+  admit only that port. Mirrors k8s-lookout's `serveMetrics`.
 - Kubernetes deploy manifests (`deploy/`, kustomize): a platform-neutral `base`
   (ServiceAccount, deny-all-ingress NetworkPolicy, and a hardened single-replica
   Deployment — non-root, read-only rootfs, all caps dropped, `RuntimeDefault`

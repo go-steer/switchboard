@@ -98,6 +98,8 @@ func runServe(args []string) error {
 		"GCP project hosting the Google Chat Pub/Sub subscription (--platform googlechat)")
 	googleSub := fs.String("google-subscription", envOr("SWITCHBOARD_GOOGLE_SUBSCRIPTION", ""),
 		"Pub/Sub subscription carrying Google Chat events (--platform googlechat)")
+	metricsAddr := fs.String("metrics-addr", envOr("SWITCHBOARD_METRICS_ADDR", ""),
+		"Prometheus /metrics + /healthz listener address (host:port); empty = disabled")
 	showVersion := fs.Bool("version", false, "print build identity and exit")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -154,15 +156,42 @@ func runServe(args []string) error {
 	default:
 		return fmt.Errorf("invalid --platform %q (want \"slack\" or \"googlechat\")", *platform)
 	}
-	router := NewRouter(dc, adapter, progress, logf)
+	m := newMetrics()
+	router := NewRouter(dc, adapter, progress, m, logf)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	// Serve /metrics + /healthz when an address is configured. A bind failure
+	// cancels ctx (stop closes the Done channel, unblocking adapter.Run) so the
+	// process exits rather than running without the health surface a deployment's
+	// probes depend on. metricsErr carries that failure so serve reports it as a
+	// non-zero exit; it holds nil on clean shutdown or when metrics are disabled.
+	metricsErr := make(chan error, 1)
+	if *metricsAddr != "" {
+		go func() {
+			err := serveMetrics(ctx, *metricsAddr, m)
+			if err != nil {
+				logf("metrics server: %v", err)
+				stop()
+			}
+			metricsErr <- err
+		}()
+	} else {
+		metricsErr <- nil
+	}
+
 	fmt.Fprintf(os.Stderr, "%s: %s\n", prog, version.String(prog))
 	fmt.Fprintf(os.Stderr, "%s: bridging %s -> %s\n", prog, adapter.Name(), *daemonURL)
-	if err := adapter.Run(ctx, router); err != nil && !errors.Is(err, context.Canceled) {
+	runErr := adapter.Run(ctx, router)
+
+	// A metrics bind failure cancels ctx, so adapter.Run returns
+	// context.Canceled; surface the underlying metrics error as the real cause.
+	if err := <-metricsErr; err != nil {
 		return err
+	}
+	if runErr != nil && !errors.Is(runErr, context.Canceled) {
+		return runErr
 	}
 	fmt.Fprintf(os.Stderr, "%s: shutting down\n", prog)
 	return nil
