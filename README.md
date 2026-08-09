@@ -112,12 +112,13 @@ transient messages.
 
 ### Container
 
-Released images are published to **GHCR** and are multi-arch
+Images are published to **GHCR** and are multi-arch
 (`linux/amd64`, `linux/arm64`):
 
 ```sh
-docker pull ghcr.io/go-steer/switchboard:latest        # or a pinned :v0.1.0
-docker run --rm -e SWITCHBOARD_DAEMON_TOKEN ghcr.io/go-steer/switchboard:latest \
+docker pull ghcr.io/go-steer/switchboard:latest        # newest release
+docker pull ghcr.io/go-steer/switchboard:main          # tip of main (every merged PR)
+docker run --rm -e SWITCHBOARD_DAEMON_TOKEN ghcr.io/go-steer/switchboard:0.1.0 \
   --daemon-url http://core-agent:7777
 ```
 
@@ -130,13 +131,23 @@ docker build -t ghcr.io/go-steer/switchboard:dev .
 The image is `gcr.io/distroless/static-debian12:nonroot` — no shell, no package
 manager. Default entrypoint is `switchboard serve`.
 
-**Releases.** Pushing a semver tag (`vX.Y.Z`) triggers
-[`release-images.yml`](.github/workflows/release-images.yml), which builds the
-multi-arch image, stamps build identity into `switchboard version`, and pushes it
-to GHCR tagged `X.Y.Z`, `X.Y`, `X`, and `latest` (a `-rc`/prerelease tag
-publishes only its exact version and never moves `latest`). Each push also ships
-an SBOM and a signed build-provenance attestation, verifiable with
-`gh attestation verify oci://ghcr.io/go-steer/switchboard:vX.Y.Z --repo go-steer/switchboard`.
+**Publishing.** [`release-images.yml`](.github/workflows/release-images.yml)
+builds the multi-arch image, stamps build identity into `switchboard version`,
+and pushes to GHCR — mirroring core-agent:
+
+- **Every merged PR** (push to `main`) publishes a floating `:main` and an
+  immutable `:main-<short-sha>` for development / staging.
+- **A semver tag** (`vX.Y.Z`) publishes `X.Y.Z`, `X.Y`, `X`, and `latest`. A
+  `-rc`/prerelease tag publishes only its exact version and never moves `latest`.
+
+Every image is signed with **Sigstore keyless** (cosign, GitHub OIDC → Fulcio,
+logged in Rekor). Verify before deploying:
+
+```sh
+cosign verify ghcr.io/go-steer/switchboard:v0.1.0 \
+  --certificate-identity-regexp '^https://github.com/go-steer/switchboard' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
 
 ## Layout
 
