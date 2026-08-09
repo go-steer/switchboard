@@ -12,92 +12,200 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# release-images publishes the distroless multicall image to GHCR on a
-# semver tag. It is the release counterpart to ci.yml: ci gates every PR,
-# this ships the artifact once a `v*` tag is pushed. The multi-stage
-# Dockerfile is already buildx-ready (BUILDPLATFORM builder + TARGETOS/
-# TARGETARCH), so both linux/amd64 and linux/arm64 come off one build.
-# Build identity (VERSION/COMMIT/BUILD_DATE) is injected as build args and
-# ends up in `switchboard version`.
-name: release-images
+name: Release images
+
+# Builds + publishes the multi-arch (amd64 + arm64) distroless image
+#
+#   ghcr.io/go-steer/switchboard — the switchboard multicall binary;
+#   ENTRYPOINT is `switchboard serve` (see Dockerfile).
+#
+# on every `v*.*.*` tag push, PLUS a floating `:main` + immutable
+# `:main-<short-sha>` development tag on every push to main (i.e. every
+# merged PR). Structure mirrors core-agent's release-images.yml
+# (metadata-action tag pyramid, buildx + QEMU, gha build cache,
+# Sigstore keyless signing) minus the variant matrix — one repo, one
+# binary, one image.
+#
+# Images are signed via Sigstore keyless (GitHub Actions OIDC → Fulcio
+# short-lived cert; signature recorded in Rekor). Verify with:
+#
+#   cosign verify ghcr.io/go-steer/switchboard:vX.Y.Z \
+#     --certificate-identity-regexp '^https://github.com/go-steer/switchboard' \
+#     --certificate-oidc-issuer https://token.actions.githubusercontent.com
+#
+# Manual republish (e.g. for a tag pushed before this workflow
+# existed): use the workflow_dispatch entrypoint with the tag input.
 
 on:
   push:
-    tags: ["v*"]
-  # Manual trigger for a dry run: builds the image but never pushes.
+    tags: ["v*.*.*"]
+    branches: ["main"]
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to publish (e.g. v0.1.0). Empty = use the current ref."
+        required: false
+
+permissions:
+  contents: read
+  packages: write   # push to GHCR
+  id-token: write   # cosign keyless via GitHub OIDC
 
 env:
-  IMAGE: ghcr.io/${{ github.repository }}
+  REGISTRY: ghcr.io
+  IMAGE_OWNER: ${{ github.repository_owner }}
+  IMAGE_NAME: switchboard
 
 jobs:
-  release-images:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-      # For build provenance / SBOM attestations pushed alongside the image.
-      id-token: write
-      attestations: write
+  build-and-push:
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
-      - uses: docker/setup-qemu-action@v3
+      # Extract Go version from go.mod so the build container always
+      # tracks the project's pinned version. Bumping go.mod
+      # automatically bumps the build image — no second source of truth
+      # that can drift from the Dockerfile default.
+      - name: Extract Go version from go.mod
+        id: go-version
+        run: |
+          GO_VERSION=$(grep -E '^go [0-9]+\.[0-9]+(\.[0-9]+)?$' go.mod | awk '{print $2}')
+          if [[ -z "$GO_VERSION" ]]; then
+            echo "::error::Could not extract Go version from go.mod" >&2
+            exit 1
+          fi
+          echo "version=${GO_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Building against Go ${GO_VERSION}"
 
-      - uses: docker/setup-buildx-action@v3
+      # QEMU enables building linux/arm64 images on the linux/amd64
+      # runner. Without this, buildx --platform fails for non-native
+      # architectures.
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
 
-      # Only authenticate to GHCR for a real tag push; a workflow_dispatch
-      # run stays a no-push dry run.
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
       - name: Log in to GHCR
-        if: github.event_name == 'push'
         uses: docker/login-action@v3
         with:
-          registry: ghcr.io
+          registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Compute build date
-        id: date
-        run: echo "value=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
-
-      # Derive tags from the semver git tag: full version, major.minor,
-      # major, plus `latest` for a non-prerelease. A prerelease tag
-      # (v1.2.3-rc1) publishes only its exact version, never moving latest.
-      - name: Docker metadata
+      # docker/metadata-action computes the full tag matrix from a
+      # declarative spec. On a released `v0.1.0` tag push it produces:
+      #   :0.1.0  :0.1  :0  :latest
+      # On a pre-release `v0.2.0-rc.1` push it produces:
+      #   :0.2.0-rc.1
+      #   (no floating short-tags: metadata-action's semver handler
+      #    skips :{{major}}.{{minor}} and :{{major}} for pre-releases;
+      #    we skip :latest via the enable-guard below.)
+      # On a push to main (every merged PR):
+      #   :main  :main-<short-sha>
+      # On workflow_dispatch with a tag input: that input verbatim.
+      - name: Compute image tags + labels + annotations
         id: meta
         uses: docker/metadata-action@v5
+        env:
+          # For MULTI-ARCH images, GHCR pulls its package-page
+          # description from manifest INDEX annotations, not from
+          # per-image LABELs. DOCKER_METADATA_ANNOTATIONS_LEVELS tells
+          # metadata-action to also emit annotations at the index level
+          # (the multi-arch fat manifest), so GHCR's page description
+          # isn't blank on multi-arch.
+          DOCKER_METADATA_ANNOTATIONS_LEVELS: index,manifest
         with:
-          images: ${{ env.IMAGE }}
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/${{ env.IMAGE_NAME }}
           tags: |
+            # Semver tag → full pyramid of floating tags
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
-            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
+            # Released semver tags get :latest — pre-release tags
+            # (v0.2.0-rc.1 / v0.2.0-dev.1 / etc.) do NOT, so a dev drop
+            # or RC doesn't accidentally become the tag consumers pull
+            # by default. Semver's convention: any tag containing a `-`
+            # is a pre-release.
+            type=raw,value=latest,enable=${{ github.ref_type == 'tag' && !contains(github.ref_name, '-') }}
+            # main pushes (every merged PR) get :main + :main-<short-sha>
+            # for a moving "latest development" tag plus an immutable
+            # per-commit pin.
+            type=ref,event=branch,enable=${{ github.ref_type != 'tag' }}
+            type=sha,prefix=main-,format=short,enable=${{ github.ref_name == 'main' && github.ref_type != 'tag' }}
+            # Manual dispatch with a tag input
+            type=raw,value=${{ inputs.tag }},enable=${{ github.event_name == 'workflow_dispatch' && inputs.tag != '' }}
+          # OCI image LABELS — baked into each per-platform image config
+          # blob. Consumed by OCI-aware tooling (inspectors, non-GHCR
+          # registries).
+          labels: |
+            org.opencontainers.image.title=switchboard
+            org.opencontainers.image.description=switchboard: chat-gateway bridging Slack and Google Chat onto the core-agent daemon contract (transport only — no tool execution or credential resolution).
+            org.opencontainers.image.vendor=go-steer
+          # OCI ANNOTATIONS — attached to the manifest / index. GHCR
+          # renders its package-page description from the index
+          # annotation on multi-arch images (labels alone don't
+          # populate the GHCR page). Keep in sync with `labels:` above.
+          annotations: |
+            org.opencontainers.image.title=switchboard
+            org.opencontainers.image.description=switchboard: chat-gateway bridging Slack and Google Chat onto the core-agent daemon contract (transport only — no tool execution or credential resolution).
+            org.opencontainers.image.vendor=go-steer
 
+      # Compute the build version: the tag if we're on one, else the
+      # dispatch input, else main-<short-sha>. Threaded into the binary
+      # via -ldflags so `switchboard version` reports the real identity.
+      - name: Compute build version
+        id: version
+        run: |
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            VERSION="${{ github.ref_name }}"
+          elif [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ inputs.tag }}" ]]; then
+            VERSION="${{ inputs.tag }}"
+          else
+            VERSION="main-$(git rev-parse --short HEAD)"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve build date
+        id: build-date
+        run: echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      # Build + push multi-arch image. type=gha cache speeds up
+      # iterative builds substantially — the Go module download +
+      # dependency compile is the slow part and it caches cleanly
+      # across builds with the same go.mod/go.sum.
       - name: Build and push
         id: build
         uses: docker/build-push-action@v6
         with:
           context: .
+          file: ./Dockerfile
           platforms: linux/amd64,linux/arm64
-          push: ${{ github.event_name == 'push' }}
+          push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
           build-args: |
-            VERSION=${{ github.ref_name }}
+            GO_VERSION=${{ steps.go-version.outputs.version }}
+            VERSION=${{ steps.version.outputs.version }}
             COMMIT=${{ github.sha }}
-            BUILD_DATE=${{ steps.date.outputs.value }}
-          # Supply-chain posture to match the distroless base: ship a
-          # max-detail provenance attestation and an SBOM with the image.
-          provenance: mode=max
-          sbom: true
+            BUILD_DATE=${{ steps.build-date.outputs.date }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
-      # A signed attestation binding the pushed digest to this workflow run,
-      # verifiable with `gh attestation verify`.
-      - name: Attest build provenance
-        if: github.event_name == 'push'
-        uses: actions/attest-build-provenance@v2
-        with:
-          subject-name: ${{ env.IMAGE }}
-          subject-digest: ${{ steps.build.outputs.digest }}
-          push-to-registry: true
+      # Sigstore keyless signing — uses the GitHub Actions OIDC token to
+      # mint a short-lived cert from Fulcio, signs the image manifest
+      # with it, and records the signature in Rekor (transparency log).
+      # No long-lived signing keys to manage.
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign images
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          # Sign by digest, not by tag — tags can move; digests are
+          # immutable. cosign signs once and the signature covers every
+          # tag that points at the same digest.
+          echo "$TAGS" | xargs -I {} cosign sign --yes "{}@${DIGEST}"
