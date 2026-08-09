@@ -149,6 +149,21 @@ cosign verify ghcr.io/go-steer/switchboard:v0.1.0 \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
 
+### Kubernetes
+
+Kustomize manifests live in [`deploy/`](deploy/): a platform-neutral `base` plus
+`overlays/slack` and `overlays/googlechat`. switchboard runs alongside core-agent
+in the `agent-triage` namespace, reads nothing from the Kubernetes API, and
+exposes no port (both platforms are outbound). After creating the prerequisite
+Secrets:
+
+```sh
+kubectl apply -k deploy/overlays/slack        # or overlays/googlechat
+```
+
+See [`deploy/README.md`](deploy/README.md) for prerequisites (namespace, Secrets,
+Google Chat Workload Identity) and image pinning.
+
 ## Layout
 
 | Path | What |
@@ -157,6 +172,7 @@ cosign verify ghcr.io/go-steer/switchboard:v0.1.0 \
 | `pkg/daemon` | thin client for the core-agent daemon contract (create / inject / wake / SSE) |
 | `pkg/chat` | provider-neutral `Adapter` interface + normalized message types |
 | `internal/version` | build-identity stamping |
+| `deploy/` | kustomize base + Slack / Google Chat overlays |
 | `docs/DESIGN.md` | switchboard design |
 
 ## License
