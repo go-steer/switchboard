@@ -86,6 +86,7 @@ type Router struct {
 	client   *daemon.Client
 	out      sender
 	progress ProgressMode
+	metrics  *metrics
 	logf     func(string, ...any)
 
 	// Reconnect backoff bounds for the SSE relay; defaulted in NewRouter and
@@ -139,8 +140,8 @@ func (e *sessionEntry) currentProgress() chat.MessageRef {
 }
 
 // NewRouter builds a Router. progress selects long-turn feedback (ProgressOff
-// if empty); logf may be nil.
-func NewRouter(client *daemon.Client, out sender, progress ProgressMode, logf func(string, ...any)) *Router {
+// if empty); m may be nil (metrics recording becomes a no-op); logf may be nil.
+func NewRouter(client *daemon.Client, out sender, progress ProgressMode, m *metrics, logf func(string, ...any)) *Router {
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
@@ -151,6 +152,7 @@ func NewRouter(client *daemon.Client, out sender, progress ProgressMode, logf fu
 		client:     client,
 		out:        out,
 		progress:   progress,
+		metrics:    m,
 		logf:       logf,
 		minBackoff: reconnectMinBackoff,
 		maxBackoff: reconnectMaxBackoff,
@@ -187,6 +189,7 @@ func (r *Router) setProgress(channel string, mode ProgressMode) {
 // yields a helpful ack rather than an error; the error return is reserved for
 // future commands that can fail internally.
 func (r *Router) HandleCommand(_ context.Context, cmd chat.Command) (string, error) {
+	r.metrics.recordCommand()
 	switch cmd.Name {
 	case "progress":
 		return r.progressCommand(cmd), nil
@@ -224,19 +227,28 @@ func (r *Router) progressCommand(cmd chat.Command) string {
 // Handle processes one inbound turn: ensure a session exists for the
 // conversation (creating it and its relay subscription on the first
 // turn), then inject the message and wake the session to run it.
-func (r *Router) Handle(ctx context.Context, msg chat.Message) error {
+func (r *Router) Handle(ctx context.Context, msg chat.Message) (err error) {
+	// One counter per inbound turn, tallied by outcome on the way out.
+	defer func() { r.metrics.recordMessage(err) }()
+
 	entry, err := r.session(ctx, msg.Conversation, msg.Channel, msg.Caller)
 	if err != nil {
 		return err
 	}
-	if err := r.client.Inject(ctx, entry.sess, msg.Caller, msg.Text); err != nil {
+	start := time.Now()
+	err = r.client.Inject(ctx, entry.sess, msg.Caller, msg.Text)
+	r.metrics.recordDaemon("inject", time.Since(start), err)
+	if err != nil {
 		return err
 	}
 	// Post the progress message before waking: a reply can only follow wake, so
 	// placing it first guarantees relay sees it before delivering the turn (no
 	// orphaned "Working…" from a fast reply). A no-op in off and stream modes.
 	r.startProgress(ctx, entry, msg.Conversation)
-	if err := r.client.Wake(ctx, entry.sess, msg.Caller); err != nil {
+	start = time.Now()
+	err = r.client.Wake(ctx, entry.sess, msg.Caller)
+	r.metrics.recordDaemon("wake", time.Since(start), err)
+	if err != nil {
 		// The turn will never run, so the progress message would linger; clear it.
 		r.clearProgress(ctx, entry, msg.Conversation)
 		return err
@@ -255,6 +267,7 @@ func (r *Router) startProgress(ctx context.Context, e *sessionEntry, conv string
 		return
 	}
 	ref, err := r.out.Send(ctx, chat.Reply{Conversation: conv, Text: workingText})
+	r.metrics.recordReply(err)
 	if err != nil {
 		r.logf("progress %s: post: %v", conv, err)
 		return
@@ -287,7 +300,10 @@ func (r *Router) clearProgress(ctx context.Context, e *sessionEntry, conv string
 // adapter rather than squeezed into an in-place edit.
 func (r *Router) deliverText(ctx context.Context, e *sessionEntry, conv, text string) {
 	r.clearProgress(ctx, e, conv)
-	if _, err := r.out.Send(ctx, chat.Reply{Conversation: conv, Text: text}); err != nil {
+	r.metrics.recordTurnRelayed()
+	_, err := r.out.Send(ctx, chat.Reply{Conversation: conv, Text: text})
+	r.metrics.recordReply(err)
+	if err != nil {
 		// A failed post should not tear down the stream; log and keep relaying.
 		r.logf("relay %s: send: %v", conv, err)
 	}
@@ -307,7 +323,9 @@ func (r *Router) postActivity(ctx context.Context, e *sessionEntry, conv string,
 			return
 		}
 	}
-	if _, err := r.out.Send(ctx, chat.Reply{Conversation: conv, Text: text}); err != nil {
+	_, err := r.out.Send(ctx, chat.Reply{Conversation: conv, Text: text})
+	r.metrics.recordReply(err)
+	if err != nil {
 		r.logf("relay %s: activity: %v", conv, err)
 	}
 }
@@ -329,7 +347,9 @@ func (r *Router) session(ctx context.Context, conv, channel, caller string) (*se
 	r.sessions[conv] = e
 	r.mu.Unlock()
 
+	start := time.Now()
 	e.sess, e.err = r.client.CreateSession(ctx, caller)
+	r.metrics.recordDaemon("create", time.Since(start), e.err)
 	if e.err != nil {
 		// Drop the failed entry so a later turn can retry.
 		r.mu.Lock()
@@ -338,6 +358,7 @@ func (r *Router) session(ctx context.Context, conv, channel, caller string) (*se
 		close(e.ready)
 		return e, e.err
 	}
+	r.metrics.sessionOpened()
 	close(e.ready)
 	go r.relay(ctx, conv, e, caller)
 	return e, nil
@@ -395,6 +416,7 @@ func (r *Router) relay(ctx context.Context, conv string, e *sessionEntry, owner 
 		if progressed {
 			backoff = r.minBackoff
 		}
+		r.metrics.recordReconnect()
 		r.logf("relay %s: stream ended (%v); resuming from seq %d in %s", conv, err, e.seq.Load(), backoff)
 		select {
 		case <-ctx.Done():

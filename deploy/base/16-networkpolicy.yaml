@@ -12,11 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Default-deny INGRESS for the switchboard pod. switchboard exposes no
-# listening port — both ingress paths are outbound pulls (Slack Socket
-# Mode is an outbound WebSocket; Google Chat is a Pub/Sub pull), and it
-# dials the core-agent daemon rather than being dialed. Nothing should
-# ever connect TO this pod, so an empty ingress rule denies all of it.
+# Ingress for the switchboard pod, restricted to the metrics port. The
+# two chat paths are outbound pulls (Slack Socket Mode is an outbound
+# WebSocket; Google Chat is a Pub/Sub pull) and switchboard dials the
+# core-agent daemon rather than being dialed — so the ONLY thing that
+# should connect TO this pod is a Prometheus scraper (and the kubelet's
+# probes, which bypass NetworkPolicy) hitting :9090 for /metrics +
+# /healthz. The single rule below admits that port and nothing else.
+#
+# The rule has no `from`, so it admits the metrics port from any source.
+# Kubernetes NetworkPolicy cannot special-case the kubelet, and scraper
+# topology is environment-specific; narrow `from` to your monitoring
+# namespace if your Prometheus runs in-cluster.
 #
 # Egress is deliberately unrestricted: switchboard dials the core-agent
 # Service (:7777) plus platform APIs (slack.com, pubsub.googleapis.com,
@@ -39,4 +46,8 @@ spec:
       app.kubernetes.io/name: switchboard
       app.kubernetes.io/component: gateway
   policyTypes: ["Ingress"]
-  ingress: [] # deny all ingress — switchboard serves nothing
+  ingress:
+    # Admit scrapes/probes to the metrics port only.
+    - ports:
+        - port: metrics
+          protocol: TCP

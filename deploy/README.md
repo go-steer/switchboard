@@ -2,13 +2,13 @@
 
 Kustomize manifests for running switchboard in Kubernetes next to a
 core-agent daemon. switchboard is **transport only** — it reads nothing
-from the Kubernetes API and exposes no listening port; it dials the
-core-agent daemon over pod networking and a chat platform's API over the
-internet.
+from the Kubernetes API and its only listening port is `:9090`
+(`/healthz` + `/metrics`); it dials the core-agent daemon over pod
+networking and a chat platform's API over the internet.
 
 ```
 deploy/
-  base/                 platform-neutral: SA, deny-ingress NetworkPolicy, Deployment
+  base/                 platform-neutral: SA, metrics-only NetworkPolicy, Deployment
   overlays/
     slack/              --platform=slack + Slack token Secret
     googlechat/         --platform=googlechat + Workload Identity
@@ -89,8 +89,13 @@ e.g. `newTag: v0.1.0` — once the first release is cut.
   in-memory map; a second replica would split the map and double-consume
   the platform stream. `strategy: Recreate` avoids overlap on rollout.
   Multi-replica waits on a durable session map (DESIGN.md).
-- **No probes.** switchboard has no health endpoint; its liveness is the
-  process — `serve` exits non-zero on a fatal error and the container
-  restarts. Adding `/healthz` is a code change, not a manifest one.
+- **Health + metrics.** `--metrics-addr=:9090` serves `/healthz` (backing
+  the liveness + readiness probes) and `/metrics` (Prometheus) on the
+  named `metrics` port. That port is switchboard's only inbound surface;
+  the NetworkPolicy admits it (kubelet probes bypass NetworkPolicy) and
+  denies everything else. Narrow the ingress `from` to your monitoring
+  namespace if Prometheus runs in-cluster. `serve` still exits non-zero on
+  a fatal error (bad token, adapter failure, metrics bind failure) so the
+  container also restarts on real failures.
 - **Progress mode** is `--progress-mode=indicator` in the base; change it
   there or per-channel at runtime via the `progress` chat command.

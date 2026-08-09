@@ -121,7 +121,7 @@ func TestIntegrationRealDaemonRoundTrip(t *testing.T) {
 		t.Fatalf("daemon.New: %v", err)
 	}
 	fake := &fakeSender{replies: make(chan chat.Reply, 4)}
-	router := NewRouter(dc, fake, ProgressOff, t.Logf)
+	router := NewRouter(dc, fake, ProgressOff, nil, t.Logf)
 
 	msg := chat.Message{Conversation: "C0:100.1", Caller: callerMail, Text: "ping from integration"}
 	if err := router.Handle(ctx, msg); err != nil {

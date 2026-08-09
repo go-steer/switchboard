@@ -110,6 +110,35 @@ slash_commands:
 `indicator` and `status` also need the bot's `chat:delete` scope to clear their
 transient messages.
 
+### Health & metrics
+
+`--metrics-addr=host:port` (empty by default, disabled) starts a small HTTP
+server with two endpoints:
+
+- `/healthz` — liveness probe, always `200 ok`; no dependency on the scrape path.
+- `/metrics` — Prometheus exposition of switchboard's counters and gauges.
+
+```
+switchboard serve --metrics-addr :9090   # or SWITCHBOARD_METRICS_ADDR=:9090
+```
+
+The exported series (all prefixed `switchboard_`):
+
+| Metric | Type | Labels | Meaning |
+|--------|------|--------|---------|
+| `switchboard_messages_total` | counter | `outcome` | inbound chat turns handled |
+| `switchboard_commands_total` | counter | — | chat control commands handled |
+| `switchboard_daemon_requests_total` | counter | `op`, `outcome` | core-agent requests (`create`/`inject`/`wake`) |
+| `switchboard_daemon_request_duration_seconds` | histogram | `op` | daemon request latency |
+| `switchboard_replies_sent_total` | counter | `outcome` | outbound sends to the platform |
+| `switchboard_agent_turns_relayed_total` | counter | — | completed agent turns relayed to chat |
+| `switchboard_stream_reconnects_total` | counter | — | SSE relay reconnects |
+| `switchboard_active_sessions` | gauge | — | conversation→session entries held |
+
+When the metrics server is disabled the collectors still accumulate in-process;
+they are just not exposed. The Kubernetes manifests set `--metrics-addr=:9090`
+and wire `/healthz` to the liveness + readiness probes.
+
 ### Container
 
 Images are published to **GHCR** and are multi-arch
@@ -154,8 +183,8 @@ cosign verify ghcr.io/go-steer/switchboard:v0.1.0 \
 Kustomize manifests live in [`deploy/`](deploy/): a platform-neutral `base` plus
 `overlays/slack` and `overlays/googlechat`. switchboard runs alongside core-agent
 in the `agent-triage` namespace, reads nothing from the Kubernetes API, and
-exposes no port (both platforms are outbound). After creating the prerequisite
-Secrets:
+exposes only `:9090` for `/healthz` + `/metrics` (both chat platforms are
+outbound). After creating the prerequisite Secrets:
 
 ```sh
 kubectl apply -k deploy/overlays/slack        # or overlays/googlechat
