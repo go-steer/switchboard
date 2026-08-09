@@ -1,0 +1,42 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Default-deny INGRESS for the switchboard pod. switchboard exposes no
+# listening port — both ingress paths are outbound pulls (Slack Socket
+# Mode is an outbound WebSocket; Google Chat is a Pub/Sub pull), and it
+# dials the core-agent daemon rather than being dialed. Nothing should
+# ever connect TO this pod, so an empty ingress rule denies all of it.
+#
+# Egress is deliberately unrestricted: switchboard dials the core-agent
+# Service (:7777) plus platform APIs (slack.com, pubsub.googleapis.com,
+# chat.googleapis.com), whose addresses are environment-specific; a wrong
+# egress pin here would silently break the gateway. If your policy needs
+# egress locked down, add a policyTypes: Egress block admitting the
+# daemon Service, kube-dns, and 443 to the platform APIs.
+#
+# If your CNI does not enforce NetworkPolicy this manifest is inert.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: switchboard
+  labels:
+    app.kubernetes.io/name: switchboard
+    app.kubernetes.io/component: gateway
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: switchboard
+      app.kubernetes.io/component: gateway
+  policyTypes: ["Ingress"]
+  ingress: [] # deny all ingress — switchboard serves nothing

@@ -1,0 +1,111 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# The switchboard Deployment: `switchboard serve` bridging one chat
+# platform onto the core-agent daemon. This base carries the
+# platform-NEUTRAL configuration — image, the daemon URL + bearer token,
+# and the progress mode. It is not meant to be applied on its own: a
+# platform overlay (overlays/slack or overlays/googlechat) appends the
+# --platform flag and that platform's env/secrets. Applying the base
+# alone would default to --platform=slack and crash-loop for want of the
+# Slack tokens.
+#
+# Runs as its OWN Deployment alongside core-agent (not a sidecar) so the
+# two scale and restart independently. Talks to the daemon via the
+# in-cluster core-agent Service on :7777; for a remote daemon, override
+# --daemon-url in an overlay.
+#
+# No liveness/readiness probe: switchboard exposes no HTTP surface. Its
+# liveness IS the process — serve() blocks on the platform stream and
+# exits non-zero on any fatal error (bad token, adapter failure), so the
+# container restarts on real failures via restartPolicy. A health
+# endpoint would be a code change, not a manifest one.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: switchboard
+  labels:
+    app.kubernetes.io/name: switchboard
+    app.kubernetes.io/component: gateway
+spec:
+  replicas: 1
+  # A chat conversation maps to one core-agent session held in an
+  # in-memory map (DESIGN.md: durability is a later phase). A second
+  # replica would split that map and break conversational continuity, so
+  # keep this at 1 until the session map is durable. Recreate avoids two
+  # instances briefly double-consuming the same Slack/Pub/Sub stream
+  # during a rollout.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: switchboard
+      app.kubernetes.io/component: gateway
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: switchboard
+        app.kubernetes.io/component: gateway
+    spec:
+      serviceAccountName: switchboard
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: switchboard
+          # Tag is pinned centrally by the kustomization `images:`
+          # transformer (base defaults to :main until the first tagged
+          # release; pin :vX.Y.Z in a production overlay).
+          image: ghcr.io/go-steer/switchboard:main
+          imagePullPolicy: IfNotPresent
+          # ENTRYPOINT is ["/switchboard", "serve"]; these args splice in
+          # behind `serve`. Platform-specific args are appended by the
+          # overlay.
+          args:
+            - "--daemon-url=http://core-agent.agent-triage.svc.cluster.local:7777"
+            - "--token-env=SWITCHBOARD_DAEMON_TOKEN"
+            - "--progress-mode=indicator"
+          env:
+            # The core-agent daemon bearer token. Never a bare flag
+            # (AGENTS.md) — it rides an env var sourced from a Secret the
+            # operator creates out-of-band (see deploy/README.md).
+            - name: SWITCHBOARD_DAEMON_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: switchboard-daemon-token
+                  key: token
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            # Writable /tmp so the root filesystem can stay read-only;
+            # HTTP/TLS clients may spool here. emptyDir is ephemeral —
+            # switchboard persists nothing (the session map is in-memory).
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            requests:
+              cpu: "25m"
+              memory: "64Mi"
+            limits:
+              cpu: "250m"
+              memory: "128Mi"
+      volumes:
+        - name: tmp
+          emptyDir: {}

@@ -7,6 +7,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- Kubernetes deploy manifests (`deploy/`, kustomize): a platform-neutral `base`
+  (ServiceAccount, deny-all-ingress NetworkPolicy, and a hardened single-replica
+  Deployment — non-root, read-only rootfs, all caps dropped, `RuntimeDefault`
+  seccomp) plus two overlays. `overlays/slack` appends `--platform=slack` and
+  mounts the Slack app/bot tokens from a Secret; `overlays/googlechat` appends
+  `--platform=googlechat` with the project/subscription and adds a Workload
+  Identity annotation for ADC (Pub/Sub subscribe + Chat bot scope). The
+  core-agent bearer token and Slack tokens ride env vars sourced from Secrets the
+  operator creates out-of-band — never flags. No Service or health probe:
+  switchboard exposes no listening port (both platforms are outbound), so
+  liveness is the process itself. `deploy/README.md` documents the prerequisites
+  (namespace, Secrets, Workload Identity) and `kubectl apply -k` usage. Mirrors
+  the k8s-lookout `deploy/` layout.
 - Image publishing (`.github/workflows/release-images.yml`): builds the
   distroless multicall image for `linux/amd64` and `linux/arm64` off the
   buildx-ready Dockerfile and pushes it to `ghcr.io/go-steer/switchboard`,
