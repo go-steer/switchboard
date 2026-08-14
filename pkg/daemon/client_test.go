@@ -16,6 +16,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -139,6 +140,50 @@ func TestNon2xxErrors(t *testing.T) {
 	})
 	if err := c.Wake(context.Background(), Session{App: "a", ID: "s"}, ""); err == nil {
 		t.Fatal("expected error on 500")
+	}
+}
+
+func TestStatusErrorTransient(t *testing.T) {
+	cases := []struct {
+		code int
+		want bool
+	}{
+		{http.StatusBadRequest, false},
+		{http.StatusNotFound, false},
+		{http.StatusConflict, false},
+		{http.StatusInternalServerError, true},
+		{http.StatusServiceUnavailable, true},
+	}
+	for _, tc := range cases {
+		c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "boom", tc.code)
+		})
+		err := c.Wake(context.Background(), Session{App: "a", ID: "s"}, "")
+		if err == nil {
+			t.Fatalf("status %d: want error", tc.code)
+		}
+		var se *StatusError
+		if !errors.As(err, &se) {
+			t.Fatalf("status %d: err = %v, want *StatusError", tc.code, err)
+		}
+		if se.StatusCode != tc.code {
+			t.Errorf("status %d: StatusError.StatusCode = %d", tc.code, se.StatusCode)
+		}
+		if se.Transient() != tc.want {
+			t.Errorf("status %d: Transient() = %v, want %v", tc.code, se.Transient(), tc.want)
+		}
+		if got := IsTransient(err); got != tc.want {
+			t.Errorf("status %d: IsTransient() = %v, want %v", tc.code, got, tc.want)
+		}
+	}
+}
+
+func TestIsTransientNonStatusError(t *testing.T) {
+	if IsTransient(nil) {
+		t.Error("IsTransient(nil) = true, want false")
+	}
+	if !IsTransient(errors.New("connection refused")) {
+		t.Error("IsTransient(network error) = false, want true (no structured rejection to say otherwise)")
 	}
 }
 
