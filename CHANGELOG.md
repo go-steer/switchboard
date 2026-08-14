@@ -7,6 +7,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- Thread-scoped error surfacing: a session-create/inject/wake failure now posts
+  a notice into the originating conversation instead of only logging, so a
+  turn that can't run doesn't just leave the thread silently dead. New
+  `daemon.StatusError` (carries the daemon's HTTP status) and
+  `daemon.IsTransient(err)` let the notice distinguish a retryable 5xx/network
+  failure from a terminal 4xx.
 - Health check + Prometheus metrics (`--metrics-addr`, default disabled): when
   set to a `host:port`, `serve` starts an HTTP server exposing `/healthz`
   (liveness, `200 ok`, no scrape dependency) and `/metrics`. The router
@@ -134,6 +140,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `block_kit.py`; mrkdwn stays the default.
 
 ### Fixed
+- Bumped the pinned Go toolchain to 1.26.6 (stdlib fixes for GO-2026-6089/-6090/
+  -6091/-5972/-5026/-6218; `govulncheck` was failing the build against 1.26.5).
 - Slack Block Kit rendering: bold/italic/strikethrough that wraps an inline code
   span (e.g. `` **Foo (`bar`)** ``) is now styled correctly instead of leaving the
   `**` delimiters literal — emphasis is resolved before code spans, treating code

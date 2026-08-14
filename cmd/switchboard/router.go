@@ -233,12 +233,14 @@ func (r *Router) Handle(ctx context.Context, msg chat.Message) (err error) {
 
 	entry, err := r.session(ctx, msg.Conversation, msg.Channel, msg.Caller)
 	if err != nil {
+		r.surfaceError(ctx, msg.Conversation, err)
 		return err
 	}
 	start := time.Now()
 	err = r.client.Inject(ctx, entry.sess, msg.Caller, msg.Text)
 	r.metrics.recordDaemon("inject", time.Since(start), err)
 	if err != nil {
+		r.surfaceError(ctx, msg.Conversation, err)
 		return err
 	}
 	// Post the progress message before waking: a reply can only follow wake, so
@@ -251,10 +253,34 @@ func (r *Router) Handle(ctx context.Context, msg chat.Message) (err error) {
 	if err != nil {
 		// The turn will never run, so the progress message would linger; clear it.
 		r.clearProgress(ctx, entry, msg.Conversation)
+		r.surfaceError(ctx, msg.Conversation, err)
 		return err
 	}
 	return nil
 }
+
+// surfaceError posts a thread-scoped notice when a turn fails before it ever
+// reaches the daemon's event stream (session creation, inject, or wake) — the
+// cases relay can never recover from, so without this the thread would just
+// go silent with only a server log to explain why. Distinguishes transient
+// failures (5xx, network — worth a retry) from terminal ones (4xx — retrying
+// the same message will fail the same way) via daemon.IsTransient. Best
+// effort: a failure to post is logged, not returned, since Handle's own error
+// is already the signal the caller acts on.
+func (r *Router) surfaceError(ctx context.Context, conv string, err error) {
+	text := errNoticeTerminal
+	if daemon.IsTransient(err) {
+		text = errNoticeTransient
+	}
+	if _, sendErr := r.out.Send(ctx, chat.Reply{Conversation: conv, Text: text}); sendErr != nil {
+		r.logf("handle %s: surface error: %v (original: %v)", conv, sendErr, err)
+	}
+}
+
+const (
+	errNoticeTransient = "⚠️ That turn didn't go through — the agent backend is having trouble. Please try again shortly."
+	errNoticeTerminal  = "⚠️ That turn didn't go through and retrying the same message won't help. Check the logs or contact an admin."
+)
 
 // startProgress posts the initial progress message for a turn (indicator and
 // status modes) and records it on the entry so relay can edit or clear it. A

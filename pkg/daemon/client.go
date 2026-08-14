@@ -371,5 +371,48 @@ func (c *Client) statusErr(resp *http.Response) error {
 	if msg == "" {
 		msg = resp.Status
 	}
-	return fmt.Errorf("daemon: %s %s: %s", resp.Request.Method, resp.Request.URL.Path, msg)
+	return &StatusError{
+		Method:     resp.Request.Method,
+		Path:       resp.Request.URL.Path,
+		StatusCode: resp.StatusCode,
+		Message:    msg,
+	}
+}
+
+// StatusError is a non-2xx response from the daemon. The status code lets a
+// caller distinguish a terminal client error (4xx: bad request, unknown
+// session) from a transient server-side failure (5xx) worth telling the user
+// to retry rather than treating as a lost cause.
+type StatusError struct {
+	Method     string
+	Path       string
+	StatusCode int
+	Message    string
+}
+
+func (e *StatusError) Error() string {
+	return fmt.Sprintf("daemon: %s %s: %s", e.Method, e.Path, e.Message)
+}
+
+// Transient reports whether the failure is the daemon's fault rather than the
+// request's: a 5xx means the same request could succeed on retry, a 4xx means
+// it won't.
+func (e *StatusError) Transient() bool {
+	return e.StatusCode >= 500
+}
+
+// IsTransient reports whether err is worth a chat-facing "try again" rather
+// than a hard failure notice. A *StatusError defers to its own Transient; any
+// other error (network failure, timeout, connection refused — the request
+// never got a structured rejection from the daemon) is treated as transient,
+// since it says nothing about the request itself being invalid.
+func IsTransient(err error) bool {
+	if err == nil {
+		return false
+	}
+	var se *StatusError
+	if errors.As(err, &se) {
+		return se.Transient()
+	}
+	return true
 }

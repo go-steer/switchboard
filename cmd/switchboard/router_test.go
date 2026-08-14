@@ -171,6 +171,56 @@ func TestRouterRoundTrip(t *testing.T) {
 	assertInjected(t, injected, "second")
 }
 
+// TestRouterHandleSurfacesErrors verifies that a daemon failure mid-turn
+// (inject or wake, after the session already exists) is reported into the
+// thread rather than only logged, and that the notice text distinguishes a
+// transient (5xx) failure — worth retrying — from a terminal (4xx) one.
+func TestRouterHandleSurfacesErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		injectCode int
+		wantText   string
+	}{
+		{"transient", http.StatusServiceUnavailable, errNoticeTransient},
+		{"terminal", http.StatusBadRequest, errNoticeTerminal},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mux := http.NewServeMux()
+			mux.HandleFunc("POST /sessions", func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusCreated)
+				fmt.Fprint(w, `{"app":"core-agent","sessionID":"s1"}`)
+			})
+			mux.HandleFunc("POST /sessions/{app}/{sid}/inject", func(w http.ResponseWriter, r *http.Request) {
+				http.Error(w, "boom", tc.injectCode)
+			})
+
+			srv := httptest.NewServer(mux)
+			defer srv.Close()
+
+			dc, err := daemon.New(daemon.Config{BaseURL: srv.URL, BearerToken: "tok", HTTPClient: srv.Client()})
+			if err != nil {
+				t.Fatalf("daemon.New: %v", err)
+			}
+			fake := &fakeSender{replies: make(chan chat.Reply, 4)}
+			router := NewRouter(dc, fake, ProgressOff, nil, nil)
+
+			msg := chat.Message{Conversation: "C0:100.1", Caller: "alice@example.com", Text: "hi"}
+			if err := router.Handle(context.Background(), msg); err == nil {
+				t.Fatal("Handle: want error, got nil")
+			}
+
+			select {
+			case rep := <-fake.replies:
+				if rep.Conversation != "C0:100.1" || rep.Text != tc.wantText {
+					t.Fatalf("error notice = %+v, want text %q", rep, tc.wantText)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("timed out waiting for error notice")
+			}
+		})
+	}
+}
+
 // TestRouterProgressIndicator verifies the indicator lifecycle: on wake the
 // router posts a placeholder, and when the agent's real reply arrives the
 // relay deletes that placeholder before posting the answer. The fake daemon
