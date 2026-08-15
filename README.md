@@ -21,7 +21,9 @@ picture (credentials, cron, GitOps, triage) lives in core-agent's
 
 ```
 Slack / Google Chat  ──▶  switchboard  ──▶  core-agent daemon (sessions + MCP + subagents)
-                                     (X-Asserted-Caller = the chat user)
+                             ▲       (X-Asserted-Caller = the chat user)
+                             │
+   another service ──────────┘  POST/PATCH /v1/messages (optional outbound ingress)
 ```
 
 Core-agent stays the distroless *brain* with no chat code; switchboard is the
@@ -110,6 +112,113 @@ slash_commands:
 `indicator` and `status` also need the bot's `chat:delete` scope to clear their
 transient messages.
 
+### Outbound ingress
+
+Everything above starts with someone in a thread. `--ingress-addr` opens the
+other direction: an authenticated HTTP surface that lets another service post a
+message — and edit it afterwards — with no inbound event to reply to. A
+scheduled digest, a monitoring escalation, an approval prompt raised at 3am.
+The scheduling stays with the caller; switchboard is still only the transport.
+
+```sh
+SWITCHBOARD_INGRESS_TOKEN=... switchboard serve \
+  --ingress-addr :8080 \
+  --ingress-allow C0123ABCD,C0456EFGH
+```
+
+| Flag | Meaning |
+|------|---------|
+| `--ingress-addr` | listener address (`host:port`); empty (default) = disabled |
+| `--ingress-token-env` | env var holding the caller's bearer token (default `SWITCHBOARD_INGRESS_TOKEN`) — deliberately **not** the daemon token: different direction, different trust |
+| `--ingress-allow` | comma-separated conversations callers may post into; empty = anywhere the bot can reach (`serve` warns) |
+
+**Post**, and keep the ref it hands back:
+
+```sh
+curl -sS localhost:8080/v1/messages \
+  -H "Authorization: Bearer $SWITCHBOARD_INGRESS_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: digest-2026-08-15' \
+  -d '{"conversation":"C0123ABCD","text":"*Cluster digest* — 5 subjects, 2 escalations"}'
+# 200 {"conversation":"C0123ABCD","id":"1723742401.001900"}
+```
+
+**Edit** it as later results land — the half that matters when the work is slow:
+post once, then refine, rather than a thread of partial posts.
+
+```sh
+curl -sS -X PATCH localhost:8080/v1/messages \
+  -H "Authorization: Bearer $SWITCHBOARD_INGRESS_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"conversation":"C0123ABCD","id":"1723742401.001900","text":"*Cluster digest* — done"}'
+# 204
+```
+
+**Append** a line instead, when the message is a growing timeline and the caller
+would rather not keep resending the whole body:
+
+```sh
+curl -sS -X PATCH localhost:8080/v1/messages \
+  -H "Authorization: Bearer $SWITCHBOARD_INGRESS_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"conversation":"C0123ABCD","id":"1723742401.001900","append":"• 12:07 kubelet restarted cleanly"}'
+# 204
+```
+
+`text` and `append` are alternatives; a PATCH must carry exactly one. Two things
+to know about `append`, both consequences of Slack having no "append" call of
+its own — an edit replaces the whole message, so switchboard has to know what is
+already there:
+
+- **It only works on messages this process posted.** The current text of the
+  last 1024 posted messages is held in memory; append to anything else — a
+  message from before a restart, or one posted by another replica — answers
+  `409`, and the caller should send the full `text`. Nothing is ever read back
+  from the platform, so an append cannot clobber an edit made in the Slack UI.
+- **It rolls over rather than truncating.** When the combined text would pass
+  Slack's single-message limit, switchboard posts the new line as a reply in the
+  same thread and answers `200` with the continuation's ref. Keep appending to
+  *that* ref from then on; the timeline continues under the original message
+  instead of silently losing its head.
+
+Details worth knowing:
+
+- **No `platform` field.** An instance bridges the one platform it was started
+  with, so the target is implied. Slack only for now (`--ingress-addr` with
+  `--platform googlechat` is refused at startup).
+- **`conversation` is the platform's conversation key.** For Slack that is a
+  channel ID (`C0123ABCD`) to post a new top-level message, or
+  `C0123ABCD:1723742401.001900` to post into an existing thread. The `id` a POST
+  returns is also the thread it rooted, so `"<channel>:<id>"` threads follow-ups
+  under it.
+- **`Idempotency-Key` is optional.** A POST carrying one that has been seen
+  posts nothing and returns the original ref, so a scheduler retrying a request
+  it never saw the answer to does not double-post. The map is in-memory and
+  bounded (last 1024 keys), and a *failed* post is never cached.
+- **Errors.** A `4xx` means *fix the request*; only `502`/`504` are worth
+  retrying unchanged.
+
+  | Status | Meaning |
+  |--------|---------|
+  | `400` | malformed body, or `text`/`append` not exactly one on PATCH |
+  | `401` | missing or wrong bearer token |
+  | `403` | conversation not allowlisted, or the platform refused (bot not in the channel, channel archived) |
+  | `404` | no such conversation or message |
+  | `405` | method other than POST/PATCH on `/v1/messages` |
+  | `409` | `Idempotency-Key` reused with a different body, or `append` to a message this process has no remembered text for |
+  | `413` | body over 1 MiB |
+  | `415` | `Content-Type` is not `application/json` |
+  | `501` | the platform cannot do this (editing, or `append` where the text limit is unknown) |
+  | `502` | the platform rejected the message for some other reason |
+  | `504` | timed out waiting on an identical in-flight request with the same `Idempotency-Key` |
+
+  Platform errors are logged in full and summarized to the caller; the
+  platform's own wording never reaches the response body.
+
+The listener is off unless `--ingress-addr` is set, and it is a *separate* port
+from `--metrics-addr`: metrics are unauthenticated and usually reachable by the
+whole scrape network, this is not.
+
 ### Health & metrics
 
 `--metrics-addr=host:port` (empty by default, disabled) starts a small HTTP
@@ -134,6 +243,7 @@ The exported series (all prefixed `switchboard_`):
 | `switchboard_agent_turns_relayed_total` | counter | — | completed agent turns relayed to chat |
 | `switchboard_stream_reconnects_total` | counter | — | SSE relay reconnects |
 | `switchboard_active_sessions` | gauge | — | conversation→session entries held |
+| `switchboard_ingress_requests_total` | counter | `op`, `outcome` | outbound-ingress requests (`post`/`patch`/`other`) |
 
 When the metrics server is disabled the collectors still accumulate in-process;
 they are just not exposed. The Kubernetes manifests set `--metrics-addr=:9090`
@@ -184,7 +294,8 @@ Kustomize manifests live in [`deploy/`](deploy/): a platform-neutral `base` plus
 `overlays/slack` and `overlays/googlechat`. switchboard runs alongside core-agent
 in the `agent-triage` namespace, reads nothing from the Kubernetes API, and
 exposes only `:9090` for `/healthz` + `/metrics` (both chat platforms are
-outbound). After creating the prerequisite Secrets:
+outbound; the outbound ingress is off unless you enable it — see
+[`deploy/README.md`](deploy/README.md)). After creating the prerequisite Secrets:
 
 ```sh
 kubectl apply -k deploy/overlays/slack        # or overlays/googlechat

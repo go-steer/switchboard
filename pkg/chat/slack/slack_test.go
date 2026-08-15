@@ -67,9 +67,21 @@ func TestConversationKeyRoundTrip(t *testing.T) {
 }
 
 func TestSplitConversationRejectsMalformed(t *testing.T) {
-	for _, bad := range []string{"", "no-colon", ":no-channel", "no-thread:"} {
+	for _, bad := range []string{"", ":no-channel"} {
 		if _, _, ok := splitConversation(bad); ok {
 			t.Errorf("splitConversation(%q) accepted, want rejected", bad)
+		}
+	}
+}
+
+// TestSplitConversationThreadless covers the outbound-ingress shape: a caller
+// with no thread to reply in names a bare channel, and egress reads that as
+// "post at the top level".
+func TestSplitConversationThreadless(t *testing.T) {
+	for _, key := range []string{"C0123", "C0123:"} {
+		channel, thread, ok := splitConversation(key)
+		if !ok || channel != "C0123" || thread != "" {
+			t.Errorf("split(%q) = %q, %q, %v; want C0123, \"\", true", key, channel, thread, ok)
 		}
 	}
 }

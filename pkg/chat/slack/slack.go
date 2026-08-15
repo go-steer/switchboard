@@ -252,8 +252,10 @@ func (a *Adapter) runMentionCommand(ctx context.Context, h chat.Handler, cmd cha
 	}
 }
 
-// Send renders the reply and posts it into its originating channel + thread,
-// returning a ref to the first posted message (for later Update/Delete). The
+// Send renders the reply and posts it into its originating channel + thread —
+// or at the top level of the channel when the conversation key carries no
+// thread, as an outbound-ingress post does — returning a ref to the first
+// posted message (for later Update/Delete). The
 // always-on baseline is Slack mrkdwn, split into several ordered in-thread
 // posts so no single message is truncated (escape=false because toMrkdwn has
 // already escaped Slack control characters). When RichBlocks is enabled it
@@ -277,16 +279,16 @@ func (a *Adapter) Send(ctx context.Context, r chat.Reply) (chat.MessageRef, erro
 			// The text fallback is for notifications/old clients only; clamp it
 			// so a very long turn does not bloat the payload (blocks carry the
 			// full content).
-			_, ts, err := a.api.PostMessageContext(ctx, channel,
+			opts := append(threadOpt(thread),
 				slack.MsgOptionBlocks(toSlackBlocks(blocks)...),
 				slack.MsgOptionText(clamp(rendered, maxSectionText), false),
-				slack.MsgOptionTS(thread),
 			)
+			_, ts, err := a.api.PostMessageContext(ctx, channel, opts...)
 			if err == nil {
 				return chat.MessageRef{Conversation: r.Conversation, ID: ts}, nil
 			}
 			if !isBlockRejection(err) {
-				return chat.MessageRef{}, fmt.Errorf("slack: post blocks to %s: %w", r.Conversation, err)
+				return chat.MessageRef{}, fmt.Errorf("slack: post blocks to %s: %w", r.Conversation, platformErr(err))
 			}
 			a.logf("slack: blocks rejected for %s (%v); retrying as text", r.Conversation, err)
 		}
@@ -297,18 +299,32 @@ func (a *Adapter) Send(ctx context.Context, r chat.Reply) (chat.MessageRef, erro
 		if strings.TrimSpace(chunk) == "" {
 			continue
 		}
-		_, ts, err := a.api.PostMessageContext(ctx, channel,
-			slack.MsgOptionText(chunk, false),
-			slack.MsgOptionTS(thread),
-		)
+		opts := append(threadOpt(thread), slack.MsgOptionText(chunk, false))
+		_, ts, err := a.api.PostMessageContext(ctx, channel, opts...)
 		if err != nil {
-			return ref, fmt.Errorf("slack: post to %s: %w", r.Conversation, err)
+			return ref, fmt.Errorf("slack: post to %s: %w", r.Conversation, platformErr(err))
 		}
 		if ref.ID == "" {
 			ref = chat.MessageRef{Conversation: r.Conversation, ID: ts}
 		}
+		// A thread-less post roots its own thread: adopt it so the rest of a
+		// chunked message replies under the first part instead of scattering
+		// across the channel.
+		if thread == "" {
+			thread = ts
+		}
 	}
 	return ref, nil
+}
+
+// threadOpt targets an existing thread, or nothing at all when the
+// conversation carries no thread — Slack's thread_ts must be omitted, not sent
+// empty, for a message to land at the top level of a channel.
+func threadOpt(thread string) []slack.MsgOption {
+	if thread == "" {
+		return nil
+	}
+	return []slack.MsgOption{slack.MsgOptionTS(thread)}
 }
 
 // Update replaces a previously posted message's content in place — the
@@ -337,7 +353,7 @@ func (a *Adapter) Update(ctx context.Context, ref chat.MessageRef, r chat.Reply)
 				return nil
 			}
 			if !isBlockRejection(err) {
-				return fmt.Errorf("slack: update blocks in %s: %w", ref.Conversation, err)
+				return fmt.Errorf("slack: update blocks in %s: %w", ref.Conversation, platformErr(err))
 			}
 			a.logf("slack: blocks rejected updating %s (%v); retrying as text", ref.Conversation, err)
 		}
@@ -346,7 +362,7 @@ func (a *Adapter) Update(ctx context.Context, ref chat.MessageRef, r chat.Reply)
 	if _, _, _, err := a.api.UpdateMessageContext(ctx, channel, ref.ID,
 		slack.MsgOptionText(clamp(rendered, slackTextLimit), false),
 	); err != nil {
-		return fmt.Errorf("slack: update %s: %w", ref.Conversation, err)
+		return fmt.Errorf("slack: update %s: %w", ref.Conversation, platformErr(err))
 	}
 	return nil
 }
@@ -363,7 +379,7 @@ func (a *Adapter) Delete(ctx context.Context, ref chat.MessageRef) error {
 		return fmt.Errorf("slack: malformed conversation key %q", ref.Conversation)
 	}
 	if _, _, err := a.api.DeleteMessageContext(ctx, channel, ref.ID); err != nil {
-		return fmt.Errorf("slack: delete %s: %w", ref.Conversation, err)
+		return fmt.Errorf("slack: delete %s: %w", ref.Conversation, platformErr(err))
 	}
 	return nil
 }
@@ -375,6 +391,56 @@ func clamp(s string, max int) string {
 	}
 	return s
 }
+
+// FitsOneMessage reports whether text renders into a single Slack message
+// rather than being split across several by Send. It renders the text to
+// measure it, because mrkdwn escaping can grow it (every "&" becomes
+// "&amp;") — a caller that needs one editable message cannot afford to
+// guess from the raw length. Implements chat.TextFitter.
+func (a *Adapter) FitsOneMessage(text string) bool {
+	return len(toMrkdwn(text)) <= slackTextLimit
+}
+
+// classify maps Slack's error codes onto the provider-neutral sentinels in
+// pkg/chat, so callers outside this package can tell a permanent failure from
+// a transient one without learning Slack's vocabulary. Anything unrecognized
+// (rate limits, transport failures, an error code Slack added since) stays
+// unclassified and is treated as retryable.
+func classify(err error) error {
+	var se slack.SlackErrorResponse
+	if !errors.As(err, &se) {
+		return nil
+	}
+	switch se.Err {
+	case "channel_not_found", "message_not_found", "thread_not_found", "user_not_found":
+		return chat.ErrNotFound
+	case "not_in_channel", "is_archived", "channel_is_archived", "cant_update_message",
+		"cant_delete_message", "message_not_editable", "restricted_action", "no_permission",
+		"access_denied", "ekm_access_denied", "not_allowed_token_type":
+		return chat.ErrDenied
+	}
+	return nil
+}
+
+// platformErr wraps a Slack failure with its classification, if it has one.
+// The result reads exactly like err (no sentinel noise in the log line) but
+// errors.Is finds chat.ErrNotFound / chat.ErrDenied through it.
+func platformErr(err error) error {
+	class := classify(err)
+	if class == nil {
+		return err
+	}
+	return classifiedError{err: err, class: class}
+}
+
+// classifiedError carries a platform error and its neutral classification.
+type classifiedError struct {
+	err   error
+	class error
+}
+
+func (e classifiedError) Error() string   { return e.err.Error() }
+func (e classifiedError) Unwrap() []error { return []error{e.err, e.class} }
 
 // isBlockRejection reports whether err is Slack rejecting the blocks payload
 // specifically (invalid_blocks / invalid_block(s)), as opposed to a transport
@@ -491,10 +557,15 @@ func conversationKey(channel, thread string) string {
 	return channel + ":" + thread
 }
 
-// splitConversation is the inverse of conversationKey.
+// splitConversation is the inverse of conversationKey. The thread may be
+// absent — a bare channel ID ("C0123"), or "C0123:" — which egress reads as
+// "post a new top-level message in this channel". That is the shape the
+// outbound ingress hands to Send when a caller posts with no thread to reply
+// in; every inbound key carries a thread. ok is false only when the channel is
+// missing.
 func splitConversation(key string) (channel, thread string, ok bool) {
-	channel, thread, ok = strings.Cut(key, ":")
-	if !ok || channel == "" || thread == "" {
+	channel, thread, _ = strings.Cut(key, ":")
+	if channel == "" {
 		return "", "", false
 	}
 	return channel, thread, true

@@ -16,9 +16,6 @@ package main
 
 import (
 	"context"
-	"errors"
-	"fmt"
-	"net"
 	"net/http"
 	"time"
 
@@ -35,14 +32,15 @@ import (
 type metrics struct {
 	registry *prometheus.Registry
 
-	messages       *prometheus.CounterVec   // ["outcome"] inbound chat turns handled
-	commands       prometheus.Counter       // chat control commands handled
-	daemonRequests *prometheus.CounterVec   // ["op","outcome"] create|inject|wake
-	daemonDuration *prometheus.HistogramVec // ["op"] daemon request latency
-	repliesSent    *prometheus.CounterVec   // ["outcome"] outbound sends to the chat platform
-	turnsRelayed   prometheus.Counter       // completed agent turns delivered to chat
-	reconnects     prometheus.Counter       // SSE relay reconnects
-	activeSessions prometheus.Gauge         // conversation→session entries currently held
+	messages        *prometheus.CounterVec   // ["outcome"] inbound chat turns handled
+	commands        prometheus.Counter       // chat control commands handled
+	daemonRequests  *prometheus.CounterVec   // ["op","outcome"] create|inject|wake
+	daemonDuration  *prometheus.HistogramVec // ["op"] daemon request latency
+	repliesSent     *prometheus.CounterVec   // ["outcome"] outbound sends to the chat platform
+	turnsRelayed    prometheus.Counter       // completed agent turns delivered to chat
+	reconnects      prometheus.Counter       // SSE relay reconnects
+	activeSessions  prometheus.Gauge         // conversation→session entries currently held
+	ingressRequests *prometheus.CounterVec   // ["op","outcome"] outbound-ingress HTTP requests
 }
 
 // newMetrics registers switchboard's collectors against a fresh registry and
@@ -85,6 +83,10 @@ func newMetrics() *metrics {
 			Name: "switchboard_active_sessions",
 			Help: "Conversation→session entries currently held in the in-memory map.",
 		}),
+		ingressRequests: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "switchboard_ingress_requests_total",
+			Help: "Outbound-ingress HTTP requests, by verb (post|patch|other) and outcome (ok|error).",
+		}, []string{"op", "outcome"}),
 	}
 	reg.MustRegister(
 		m.messages,
@@ -95,6 +97,7 @@ func newMetrics() *metrics {
 		m.turnsRelayed,
 		m.reconnects,
 		m.activeSessions,
+		m.ingressRequests,
 	)
 	return m
 }
@@ -160,6 +163,13 @@ func (m *metrics) sessionOpened() {
 	m.activeSessions.Inc()
 }
 
+func (m *metrics) recordIngress(op string, err error) {
+	if m == nil {
+		return
+	}
+	m.ingressRequests.WithLabelValues(op, outcome(err)).Inc()
+}
+
 // serveMetrics starts a small HTTP server exposing /metrics and /healthz on
 // addr. It blocks until ctx is cancelled; callers start it in a goroutine and
 // drive shutdown via ctx. When addr == "" the server is skipped entirely
@@ -179,29 +189,5 @@ func serveMetrics(ctx context.Context, addr string, m *metrics) error {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok\n"))
 	})
-	server := &http.Server{
-		Addr:              addr,
-		Handler:           mux,
-		ReadHeaderTimeout: 5 * time.Second,
-	}
-	// Bind synchronously so a port-in-use fails fast; then serve in a
-	// goroutine and let ctx cancellation drive graceful shutdown.
-	ln, err := net.Listen("tcp", addr)
-	if err != nil {
-		return fmt.Errorf("metrics: listen %s: %w", addr, err)
-	}
-	errCh := make(chan error, 1)
-	go func() { errCh <- server.Serve(ln) }()
-	select {
-	case <-ctx.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
-		_ = server.Shutdown(shutdownCtx)
-		return nil
-	case err := <-errCh:
-		if errors.Is(err, http.ErrServerClosed) {
-			return nil
-		}
-		return err
-	}
+	return serveHTTP(ctx, "metrics", addr, mux)
 }

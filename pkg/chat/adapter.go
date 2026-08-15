@@ -82,6 +82,31 @@ type MessageRef struct {
 // platform that lacks them.
 var ErrUnsupported = errors.New("chat: operation not supported by this platform")
 
+// ErrNotFound and ErrDenied classify a platform's refusal as permanent, so a
+// caller can tell "this will never work" from "try again later". An Adapter
+// wraps them alongside its own error (the platform's own wording stays in the
+// message; only the classification is portable) when the platform reports a
+// missing conversation or message, or refuses the operation outright — the
+// bot is not in the channel, the channel is archived, the message belongs to
+// someone else. Everything else is left unclassified and treated as
+// transient.
+var (
+	ErrNotFound = errors.New("chat: no such conversation or message")
+	ErrDenied   = errors.New("chat: the platform refused the operation")
+)
+
+// TextFitter is an optional Adapter capability: reporting whether a text fits
+// in a single platform message once the adapter has rendered it. Send already
+// splits anything longer across several messages, so this matters only to a
+// caller that must keep one editable message — the outbound ingress appending
+// to a running timeline, which rolls over into a new message rather than
+// letting the platform truncate one. An Adapter that does not implement it
+// simply never triggers that rollover.
+type TextFitter interface {
+	// FitsOneMessage reports whether text renders into a single message.
+	FitsOneMessage(text string) bool
+}
+
 // Command is a normalized gateway control command — a platform's native
 // slash command (Slack /switchboard, a Google Chat slash command) or a
 // recognized mention subcommand (@switchboard progress status). Unlike a
