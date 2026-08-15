@@ -7,6 +7,40 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- Outbound ingress (`--ingress-addr`, default disabled): an authenticated HTTP
+  surface that lets another service post — and later edit — a message in a
+  conversation with no inbound chat event to reply to (scheduled digests,
+  monitoring escalations, async approval prompts). `POST /v1/messages`
+  `{conversation, text}` returns the `{conversation, id}` ref;
+  `PATCH /v1/messages` `{conversation, id, text}` edits it in place (`501` on a
+  platform that cannot edit). Callers authenticate with a bearer token from
+  `--ingress-token-env` (default `SWITCHBOARD_INGRESS_TOKEN`) — separate from
+  the daemon token — and can be confined to a set of conversations with
+  `--ingress-allow`. An optional `Idempotency-Key` header makes a retried POST
+  return the original ref instead of double-posting. There is no `platform`
+  field: the instance's `--platform` implies the target. Slack only for now;
+  `--ingress-addr` with `--platform googlechat` is refused at startup. New
+  `switchboard_ingress_requests_total{op,outcome}` metric.
+- `PATCH /v1/messages` `{conversation, id, append}` adds a line to a message
+  instead of replacing it, so a caller keeping a running incident timeline does
+  not have to resend the whole body. Switchboard remembers the current text of
+  the messages it posted (bounded, in-memory, last 1024); an append to anything
+  it does not remember answers `409` and the caller sends full `text`. When the
+  combined text would pass the platform's single-message limit the addition is
+  posted as a reply in the same thread and answered `200` with the
+  continuation's ref, rather than truncating the timeline. `text` and `append`
+  are alternatives — a PATCH must carry exactly one.
+- `chat.ErrNotFound` and `chat.ErrDenied`: provider-neutral classifications of
+  a platform refusal, so the ingress can answer `404`/`403` for a permanent
+  failure instead of reporting everything as a retryable `502`. New optional
+  `chat.TextFitter` adapter capability (`FitsOneMessage`) backs the append
+  rollover; a provider that does not implement it answers `501` to `append`.
+- Slack egress accepts a thread-less conversation key (a bare channel ID),
+  posting a new top-level message and returning the ts it rooted — so an
+  ingress caller with no thread to reply in can post one and thread its
+  follow-ups under `"<channel>:<id>"`. A chunked thread-less message now keeps
+  its parts together under the first one instead of scattering across the
+  channel.
 - Thread-scoped error surfacing: a session-create/inject/wake failure now posts
   a notice into the originating conversation instead of only logging, so a
   turn that can't run doesn't just leave the thread silently dead. New

@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/go-steer/switchboard/internal/version"
@@ -100,6 +101,13 @@ func runServe(args []string) error {
 		"Pub/Sub subscription carrying Google Chat events (--platform googlechat)")
 	metricsAddr := fs.String("metrics-addr", envOr("SWITCHBOARD_METRICS_ADDR", ""),
 		"Prometheus /metrics + /healthz listener address (host:port); empty = disabled")
+	ingressAddr := fs.String("ingress-addr", envOr("SWITCHBOARD_INGRESS_ADDR", ""),
+		"outbound-ingress listener address (host:port) for POST/PATCH /v1/messages; empty = disabled")
+	ingressTokenEnv := fs.String("ingress-token-env", "SWITCHBOARD_INGRESS_TOKEN",
+		"env var holding the bearer token callers must present to the outbound ingress")
+	ingressAllow := fs.String("ingress-allow", envOr("SWITCHBOARD_INGRESS_ALLOW", ""),
+		"comma-separated conversations the outbound ingress may post into (channel IDs, or "+
+			"full channel:thread keys); empty = any conversation the bot can reach")
 	showVersion := fs.Bool("version", false, "print build identity and exit")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -122,6 +130,19 @@ func runServe(args []string) error {
 	progress, err := parseProgressMode(*progressMode)
 	if err != nil {
 		return err
+	}
+
+	// Validate the outbound-ingress config up front: a caller that cannot be
+	// authenticated, or a platform it does not support, should fail here rather
+	// than after the adapter has dialed a chat platform.
+	ingressToken := ""
+	if *ingressAddr != "" {
+		if *platform != "slack" {
+			return fmt.Errorf("--ingress-addr is Slack-only for now (got --platform %q)", *platform)
+		}
+		if ingressToken = os.Getenv(*ingressTokenEnv); ingressToken == "" {
+			return fmt.Errorf("no ingress token in $%s (set --ingress-token-env to the right var)", *ingressTokenEnv)
+		}
 	}
 
 	dc, err := daemon.New(daemon.Config{BaseURL: *daemonURL, BearerToken: token})
@@ -159,42 +180,94 @@ func runServe(args []string) error {
 	m := newMetrics()
 	router := NewRouter(dc, adapter, progress, m, logf)
 
+	// The outbound ingress posts through the same adapter egress the router
+	// replies with, so it is built once the adapter exists — and before
+	// anything starts, so a bad config fails at startup, not on the first
+	// caller.
+	var ing *ingress
+	if *ingressAddr != "" {
+		allow := splitList(*ingressAllow)
+		ing, err = newIngress(ingressConfig{
+			Token:   ingressToken,
+			Allow:   allow,
+			Out:     adapter,
+			Metrics: m,
+			Logf:    logf,
+		})
+		if err != nil {
+			return err
+		}
+		if len(allow) == 0 {
+			logf("warning: outbound ingress on %s may post into ANY conversation "+
+				"the bot can reach; narrow it with --ingress-allow", *ingressAddr)
+		}
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	// Serve /metrics + /healthz when an address is configured. A bind failure
-	// cancels ctx (stop closes the Done channel, unblocking adapter.Run) so the
-	// process exits rather than running without the health surface a deployment's
-	// probes depend on. metricsErr carries that failure so serve reports it as a
-	// non-zero exit; it holds nil on clean shutdown or when metrics are disabled.
-	metricsErr := make(chan error, 1)
-	if *metricsAddr != "" {
+	// Serve the optional listeners: /metrics + /healthz, and the outbound
+	// ingress. A bind failure cancels ctx (stop closes the Done channel,
+	// unblocking adapter.Run) so the process exits rather than running without
+	// a surface something depends on — a deployment's probes, or a caller's
+	// digests. srvErrs carries those failures so serve reports one as a
+	// non-zero exit.
+	srvErrs := make(chan error, 2)
+	listeners := 0
+	serveOptional := func(name, addr string, fn func() error) {
+		if addr == "" {
+			return
+		}
+		listeners++
 		go func() {
-			err := serveMetrics(ctx, *metricsAddr, m)
+			err := fn()
 			if err != nil {
-				logf("metrics server: %v", err)
+				logf("%s server: %v", name, err)
 				stop()
 			}
-			metricsErr <- err
+			srvErrs <- err
 		}()
-	} else {
-		metricsErr <- nil
 	}
+	serveOptional("metrics", *metricsAddr, func() error { return serveMetrics(ctx, *metricsAddr, m) })
+	serveOptional("ingress", *ingressAddr, func() error { return serveIngress(ctx, *ingressAddr, ing) })
 
 	fmt.Fprintf(os.Stderr, "%s: %s\n", prog, version.String(prog))
 	fmt.Fprintf(os.Stderr, "%s: bridging %s -> %s\n", prog, adapter.Name(), *daemonURL)
+	if ing != nil {
+		fmt.Fprintf(os.Stderr, "%s: outbound ingress on %s%s\n", prog, *ingressAddr, ingressPath)
+	}
 	runErr := adapter.Run(ctx, router)
 
-	// A metrics bind failure cancels ctx, so adapter.Run returns
-	// context.Canceled; surface the underlying metrics error as the real cause.
-	if err := <-metricsErr; err != nil {
-		return err
+	// A listener's bind failure cancels ctx, so adapter.Run returns
+	// context.Canceled; surface the underlying error as the real cause. Drain
+	// every listener so none is reported as the exit code before the one that
+	// actually failed.
+	var srvErr error
+	for range listeners {
+		if err := <-srvErrs; err != nil && srvErr == nil {
+			srvErr = err
+		}
+	}
+	if srvErr != nil {
+		return srvErr
 	}
 	if runErr != nil && !errors.Is(runErr, context.Canceled) {
 		return runErr
 	}
 	fmt.Fprintf(os.Stderr, "%s: shutting down\n", prog)
 	return nil
+}
+
+// splitList parses a comma-separated flag value into its non-empty, trimmed
+// entries.
+func splitList(s string) []string {
+	var out []string
+	for _, part := range strings.Split(s, ",") {
+		if p := strings.TrimSpace(part); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // parseCallerMode validates the --caller-id flag value.

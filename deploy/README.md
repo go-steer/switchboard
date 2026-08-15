@@ -99,3 +99,55 @@ e.g. `newTag: v0.1.0` — once the first release is cut.
   container also restarts on real failures.
 - **Progress mode** is `--progress-mode=indicator` in the base; change it
   there or per-channel at runtime via the `progress` chat command.
+- **Outbound ingress** (letting another in-cluster service post into a
+  conversation) is **off** in these manifests. Enabling it means opening a
+  second inbound surface, so it takes four deliberate steps in your own
+  overlay:
+
+  1. A Secret with the caller's bearer token — separate from the daemon
+     token — and an env var sourcing it:
+
+     ```sh
+     kubectl -n agent-triage create secret generic switchboard-ingress-token \
+       --from-literal=token="$(openssl rand -hex 32)"
+     ```
+
+  2. Deployment args + env + port:
+
+     ```yaml
+     args:
+       - "--ingress-addr=:8080"
+       - "--ingress-token-env=SWITCHBOARD_INGRESS_TOKEN"
+       - "--ingress-allow=C0123ABCD"     # confine it to known conversations
+     env:
+       - name: SWITCHBOARD_INGRESS_TOKEN
+         valueFrom:
+           secretKeyRef: {name: switchboard-ingress-token, key: token}
+     ports:
+       - {name: ingress, containerPort: 8080, protocol: TCP}
+     ```
+
+  3. A NetworkPolicy ingress rule admitting **only** the calling workload —
+     unlike the metrics port, this one should have a `from`:
+
+     ```yaml
+     - ports: [{port: ingress, protocol: TCP}]
+       from:
+         - podSelector:
+             matchLabels: {app.kubernetes.io/name: core-sre-agent}
+     ```
+
+  4. A Service, since there is none today, so callers have a name to dial:
+     `http://switchboard.agent-triage.svc.cluster.local:8080/v1/messages`.
+
+  Leave `--ingress-allow` unset only if callers really may post anywhere the
+  bot is a member; `serve` logs a warning when it is empty. Treat the allowlist
+  as the authorization model: a caller holding the token can edit *any* message
+  the bot posted in those conversations, including the router's own replies.
+
+  Two consequences for scaling: the ingress keeps the idempotency and
+  append-text maps **in this pod's memory**, so `append` and `Idempotency-Key`
+  only work against the replica that took the original POST. With the
+  single-replica Deployment in the base that is a non-issue; if you add
+  replicas, either front the ingress with a session-affinity Service or have
+  callers fall back to full `text` on the `409`.
