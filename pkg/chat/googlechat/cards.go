@@ -125,6 +125,10 @@ func ParseCardMode(s string) (CardMode, bool) {
 // through for Chat to render rather than translated first. Chat-only, and used
 // only by the opt-in answer card. Returns nil when the text reduces to nothing
 // (Chat rejects an empty widget).
+//
+// Links and fenced blocks were confirmed to render this way in the Card
+// Builder (see docs/googlechat-setup.md §A); that is the evidence this path
+// rests on, since nothing offline can check it.
 func markdownWidget(md string) *chatv1.GoogleAppsCardV1Widget {
 	md = strings.TrimSpace(md)
 	if md == "" {

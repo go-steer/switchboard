@@ -39,10 +39,12 @@ Worth looking at specifically:
 - `ack-with-choices.json` — the button row, and the escaped `&lt;off|…&gt;` in
   the `decoratedText`. Chat accepts only `<b> <i> <s> <a> <br>` there, so the
   angle brackets in the command's argument list have to arrive escaped.
-- `answer.json` — the only card using `textSyntax: MARKDOWN`. Confirm Chat's
-  markdown renderer handles `[label](url)` links and fenced code the way the
-  golden assumes; if it does not, that is a `toCardHTML` job instead and the
-  builder needs changing.
+- `answer.json` — the only card using `textSyntax: MARKDOWN`. Checked in the
+  Card Builder on 2026-08-17: `[label](url)` renders as a live hyperlink, and a
+  fenced block renders as monospace with its interior newlines and indentation
+  intact. That is what lets `answerCard` pass a model turn's own markup
+  through instead of translating it to HTML first — so a diff here that turns
+  a link literal is a regression worth chasing, not a rendering quirk.
 - `welcome.json` — the first thing anyone installing the app will see.
 
 ## B. Event replay
@@ -149,9 +151,29 @@ switchboard serve --platform googlechat \
   --daemon-url http://127.0.0.1:7777
 ```
 
-For the daemon, either a real core-agent or the echo-provider configuration that
-`cmd/switchboard/integration_test.go` already stands up — the echo provider is
-enough for every step of the demo below and needs no model credentials.
+`--daemon-url` needs a daemon behind it, and switchboard does not ship one. Even
+the echo provider is a core-agent flag, so a **built core-agent binary is a
+prerequisite** either way:
+
+```sh
+go build -o /tmp/core-agent ./cmd/core-agent   # in the core-agent repo
+```
+
+`--provider=echo` then needs no model credentials, which covers every step of
+the demo that is about the *gateway* — commands, buttons, progress modes, the
+welcome card. The two steps that turn on what the daemon actually says (2 and 7,
+markdown and a structured answer) need a reply carrying that markup, so run
+those against a real provider unless the echo provider gives it back to you.
+
+For the config that goes with the binary — bearer-table auth,
+`proxy_identities`, and the `.agents/config.json` layout — copy
+`cmd/switchboard/integration_test.go`, which stands the same thing up and is
+kept working by the integration suite:
+
+```sh
+CORE_AGENT_BIN=/tmp/core-agent go test -tags=integration ./cmd/switchboard \
+  -run Integration -v
+```
 
 ### Demo script
 
