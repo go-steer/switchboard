@@ -39,10 +39,12 @@ Worth looking at specifically:
 - `ack-with-choices.json` — the button row, and the escaped `&lt;off|…&gt;` in
   the `decoratedText`. Chat accepts only `<b> <i> <s> <a> <br>` there, so the
   angle brackets in the command's argument list have to arrive escaped.
-- `answer.json` — the only card using `textSyntax: MARKDOWN`. Confirm Chat's
-  markdown renderer handles `[label](url)` links and fenced code the way the
-  golden assumes; if it does not, that is a `toCardHTML` job instead and the
-  builder needs changing.
+- `answer.json` — the only card using `textSyntax: MARKDOWN`. Checked in the
+  Card Builder on 2026-08-17: `[label](url)` renders as a live hyperlink, and a
+  fenced block renders as monospace with its interior newlines and indentation
+  intact. That is what lets `answerCard` pass a model turn's own markup
+  through instead of translating it to HTML first — so a diff here that turns
+  a link literal is a regression worth chasing, not a rendering quirk.
 - `welcome.json` — the first thing anyone installing the app will see.
 
 ## B. Event replay
