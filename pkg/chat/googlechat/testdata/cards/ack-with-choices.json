@@ -1,0 +1,97 @@
+{
+  "sections": [
+    {
+      "widgets": [
+        {
+          "decoratedText": {
+            "startIcon": {
+              "materialIcon": {
+                "name": "tune"
+              }
+            },
+            "text": "Progress mode for this channel is \u003ci\u003eindicator\u003c/i\u003e. Change it with `progress \u0026lt;off|indicator|status|stream\u0026gt;`.",
+            "wrapText": true
+          }
+        },
+        {
+          "buttonList": {
+            "buttons": [
+              {
+                "onClick": {
+                  "action": {
+                    "function": "switchboard",
+                    "parameters": [
+                      {
+                        "key": "switchboard_command",
+                        "value": "progress"
+                      },
+                      {
+                        "key": "switchboard_arg",
+                        "value": "off"
+                      }
+                    ]
+                  }
+                },
+                "text": "off"
+              },
+              {
+                "onClick": {
+                  "action": {
+                    "function": "switchboard",
+                    "parameters": [
+                      {
+                        "key": "switchboard_command",
+                        "value": "progress"
+                      },
+                      {
+                        "key": "switchboard_arg",
+                        "value": "indicator"
+                      }
+                    ]
+                  }
+                },
+                "text": "indicator"
+              },
+              {
+                "onClick": {
+                  "action": {
+                    "function": "switchboard",
+                    "parameters": [
+                      {
+                        "key": "switchboard_command",
+                        "value": "progress"
+                      },
+                      {
+                        "key": "switchboard_arg",
+                        "value": "status"
+                      }
+                    ]
+                  }
+                },
+                "text": "status"
+              },
+              {
+                "onClick": {
+                  "action": {
+                    "function": "switchboard",
+                    "parameters": [
+                      {
+                        "key": "switchboard_command",
+                        "value": "progress"
+                      },
+                      {
+                        "key": "switchboard_arg",
+                        "value": "stream"
+                      }
+                    ]
+                  }
+                },
+                "text": "stream"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

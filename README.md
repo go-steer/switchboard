@@ -62,6 +62,7 @@ export SWITCHBOARD_DAEMON_TOKEN=…
 switchboard serve --platform googlechat \
   --google-project my-gcp-project \
   --google-subscription switchboard-chat-events \
+  --googlechat-commands 1=progress \
   --daemon-url http://127.0.0.1:7777
 # Message the app in a Chat space (or @-mention it in a room); the reply lands
 # in the same thread. The asserted caller is the sender's users/NNN resource name.
@@ -71,12 +72,60 @@ One-time setup: in the Chat API app configuration, set the **Connection
 settings** to *Cloud Pub/Sub* and point it at your topic, then create a pull
 subscription on that topic for switchboard to consume.
 
-To use the runtime progress control (below) on Google Chat, add a **slash
-command** in the same app configuration — name it `switchboard`, give it a
-command ID, and switchboard maps its invocation onto the same `chat.Command`
-seam as Slack's `/switchboard`. Chat strips the command word before delivery, so
+#### Workspace add-on mode
+
+Google is moving Chat apps from the Chat-API *interaction events* framework to
+**Google Workspace add-ons that extend Chat**, which changes the shape of every
+event: the payload arrives wrapped in a `chat` object with one of
+`messagePayload` / `appCommandPayload` / `buttonClickedPayload` /
+`addedToSpacePayload` rather than a flat event with a `type` discriminator.
+
+Switchboard **detects the dialect per event** and understands both. That matters
+because converting an app to add-on mode in the console is irreversible and
+applies to every user at once — so the rollout does not have to be synchronized
+with a switchboard deploy, and a rollback of switchboard does not strand the app.
+
+Pub/Sub remains a supported add-on architecture, so the no-public-webhook
+posture is unchanged. The trade-off it buys: an add-on served over Pub/Sub
+cannot open **dialogs** (those need a synchronous HTTP response), and updating a
+card means patching the whole hosting message. Card buttons still work — a click
+runs the same gateway command typing it would, and the hosting card is rewritten
+in place. Pub/Sub can redeliver, so click handling is idempotent.
+
+#### App commands
+
+Chat identifies an app command by the **numeric ID** you assign it in the API
+console, not by its name, and add-ons never report an invoked function name back.
+Map the IDs onto gateway verbs with `--googlechat-commands`:
+
+```sh
+--googlechat-commands "1=progress,2=help"
+```
+
+With no mapping, switchboard falls back to reading the verb from the command's
+argument text — so a single command named `switchboard` still works:
 `/switchboard progress status` arrives as the verb `progress` with argument
-`status`; the acknowledgment is posted back into the invoking thread.
+`status`. Either way the acknowledgment is posted back into the invoking thread
+(Chat has no ephemeral async reply).
+
+#### Cards
+
+`--googlechat-cards` chooses how much is rendered as `cardsV2`. Plain text is
+always sent as the message's fallback, and a card Chat rejects falls back to
+posting the text — a rich render never costs a reply.
+
+| Mode | Behavior |
+|------|----------|
+| `status` (default) | the gateway's own messages — progress, tool activity, error notices, command acks — render as small icon cards; a command ack offers its valid values as buttons |
+| `rich` | additionally lays a structured agent reply out as a card (a section per heading, dividers for rules, code fences kept verbatim); unstructured replies stay as text |
+| `off` | text only |
+
+Regardless of mode, replies are translated into Chat's text dialect
+(`**bold**` → `*bold*`, `[label](url)` → `<url|label>`, headings → bold), so
+markdown from the agent does not arrive with its delimiters showing.
+
+Full setup, card-preview and event-replay testing, and a demo script:
+[docs/googlechat-setup.md](docs/googlechat-setup.md).
 
 ### Long-turn feedback
 

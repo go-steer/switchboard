@@ -1,0 +1,19 @@
+{
+  "sections": [
+    {
+      "widgets": [
+        {
+          "decoratedText": {
+            "startIcon": {
+              "materialIcon": {
+                "name": "error"
+              }
+            },
+            "text": "That turn didn't go through — the daemon returned 503. Try again.",
+            "wrapText": true
+          }
+        }
+      ]
+    }
+  ]
+}

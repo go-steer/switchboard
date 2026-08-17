@@ -68,9 +68,14 @@ Workload Identity — no JSON key is mounted.
      --member "serviceAccount:PROJECT_ID.svc.id.goog[agent-triage/switchboard]"
    ```
 
-3. Edit `overlays/googlechat/patch-serviceaccount.yaml` (GSA email) and
+3. In the Chat API console, set **Connection settings** to *Cloud Pub/Sub*
+   pointed at your topic, and add the app commands you want (each gets a
+   numeric id). Either interaction framework works — switchboard detects the
+   Chat-API and Workspace add-on event dialects per event — so converting the
+   app to add-on mode does not have to be coordinated with a deploy.
+4. Edit `overlays/googlechat/patch-serviceaccount.yaml` (GSA email) and
    `overlays/googlechat/patch-deployment.yaml` (`PROJECT_ID`,
-   `SUBSCRIPTION_ID`), then:
+   `SUBSCRIPTION_ID`, and the `--googlechat-commands` id mapping), then:
 
    ```sh
    kubectl apply -k deploy/overlays/googlechat

@@ -1,0 +1,19 @@
+{
+  "kind": "command",
+  "commands": [
+    {
+      "name": "progress",
+      "args": [
+        "status"
+      ],
+      "channel": "spaces/AAQAXbGkY1s",
+      "caller": "users/106508980999999999999"
+    }
+  ],
+  "patches": [
+    {
+      "target": "spaces/AAQAXbGkY1s/messages/pQ4Lm9xZaBc.rS7Nv1yWcDe",
+      "card": "[tune:Progress mode for this channel is <b>status</b>.][buttons:off,indicator,status,stream]"
+    }
+  ]
+}

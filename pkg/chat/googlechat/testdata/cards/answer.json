@@ -1,0 +1,47 @@
+{
+  "sections": [
+    {
+      "header": "Deploy check",
+      "widgets": [
+        {
+          "textParagraph": {
+            "text": "Three things stood out.",
+            "textSyntax": "MARKDOWN"
+          }
+        }
+      ]
+    },
+    {
+      "header": "Findings",
+      "widgets": [
+        {
+          "textParagraph": {
+            "text": "The **readiness probe** hits `/healthz` on the wrong port. See [the manifest](https://example.com/deploy.yaml).",
+            "textSyntax": "MARKDOWN"
+          }
+        },
+        {
+          "textParagraph": {
+            "text": "```yaml\nreadinessProbe:\n  httpGet:\n    port: 8080\n```",
+            "textSyntax": "MARKDOWN"
+          }
+        },
+        {
+          "divider": {}
+        },
+        {
+          "textParagraph": {
+            "text": "**Next**",
+            "textSyntax": "MARKDOWN"
+          }
+        },
+        {
+          "textParagraph": {
+            "text": "Re-run after patching.",
+            "textSyntax": "MARKDOWN"
+          }
+        }
+      ]
+    }
+  ]
+}

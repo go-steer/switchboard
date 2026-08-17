@@ -104,8 +104,13 @@ Conventions worth knowing at agent prompt time:
 **Slack MVP.** `serve` boots the Slack adapter (Socket Mode) and the session
 router: an app-mention in a thread drives a core-agent session and the agent's
 reply lands back in the same thread, with multi-turn continuity per thread.
-Interactive hardening (long turns, backpressure, SSE reconnect) and Google Chat
-are the next phases (see `docs/DESIGN.md` §4). An optional outbound ingress
+**Google Chat.** The `googlechat` adapter pulls events from Pub/Sub and speaks
+both the Chat-API interaction-events dialect and the Workspace add-on dialect,
+detected per event; replies render as Chat text and, when `--googlechat-cards`
+allows, `cardsV2` (see `docs/DESIGN.md` §3.3).
+
+Interactive hardening (long turns, backpressure, SSE reconnect) is largely in
+place (see `docs/DESIGN.md` §4). An optional outbound ingress
 (`--ingress-addr`, Slack only) lets another service post a message with no
 inbound event to reply to, then edit it in place or append to it
 (`docs/DESIGN.md` §3.1). Frictionless thread replies

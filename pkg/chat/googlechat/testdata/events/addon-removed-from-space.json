@@ -1,0 +1,19 @@
+{
+  "chat": {
+    "user": {
+      "name": "users/106508980999999999999",
+      "type": "HUMAN"
+    },
+    "space": {
+      "name": "spaces/AAQAXbGkY1s"
+    },
+    "removedFromSpacePayload": {
+      "space": {
+        "name": "spaces/AAQAXbGkY1s"
+      }
+    }
+  },
+  "commonEventObject": {
+    "hostApp": "CHAT"
+  }
+}

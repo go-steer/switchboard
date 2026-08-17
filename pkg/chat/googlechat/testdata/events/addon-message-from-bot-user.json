@@ -1,0 +1,24 @@
+{
+  "chat": {
+    "user": {
+      "name": "users/1234567890",
+      "displayName": "switchboard",
+      "type": "BOT"
+    },
+    "space": {
+      "name": "spaces/AAQAXbGkY1s"
+    },
+    "messagePayload": {
+      "message": {
+        "name": "spaces/AAQAXbGkY1s/messages/own2.own2",
+        "text": "a reply with no sender on the message itself",
+        "thread": {
+          "name": "spaces/AAQAXbGkY1s/threads/nT8Kq2eVdRo"
+        }
+      },
+      "space": {
+        "name": "spaces/AAQAXbGkY1s"
+      }
+    }
+  }
+}

@@ -7,6 +7,57 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- Google Chat **Workspace add-on** support (`pkg/chat/googlechat`). Google is
+  migrating Chat apps from the Chat-API interaction-events framework to add-ons
+  that extend Chat, which changes the shape of every event. The adapter detects
+  the dialect **per event** and understands both, so the console conversion —
+  which is irreversible and applies to all users at once — needs no coordination
+  with a switchboard deploy. Pub/Sub remains the ingress, preserving the
+  no-public-webhook posture; the cost is no dialogs (they need a synchronous
+  response) and whole-message patches for card updates. Card clicks are
+  delivered over Pub/Sub and handled idempotently, since delivery may retry.
+- Google Chat `cardsV2` rendering, gated by `--googlechat-cards`
+  (`off` / `status` / `rich`, default `status`). `status` renders the gateway's
+  own messages — progress, tool activity, error notices, command acks — as small
+  icon cards, and offers a setting's valid values as buttons; `rich` also lays a
+  structured agent reply out as a card (a section per heading, dividers for
+  rules, code fences verbatim). Plain text is always sent as the message
+  fallback and a card Chat rejects falls back to posting the text, so a rich
+  render never costs a reply. Three levels rather than Slack's boolean because
+  gateway cards are short and authored here while an answer card lays out
+  arbitrary model output.
+- Google Chat replies are now translated into Chat's text dialect
+  (`**bold**` → `*bold*`, `[label](url)` → `<url|label>`, headings → bold,
+  rules, strikethrough, fences), mirroring the Slack `toMrkdwn` pass. Previously
+  markdown from the agent was posted raw and arrived with its delimiters
+  showing. Card widgets get a second pass into the small HTML subset Chat
+  accepts, with `&<>` escaped — a command ack quoting
+  `progress <off|indicator|status|stream>` would otherwise render as broken
+  markup.
+- `--googlechat-commands` (e.g. `"1=progress,2=help"`) maps Chat app-command IDs
+  onto gateway verbs. Chat identifies a command by the numeric ID configured in
+  the API console and never by its name, and add-ons never report an invoked
+  function name back, so the mapping is how a dedicated `/progress` command is
+  recognized. With no mapping the verb is still read from the command's argument
+  text, so a single `/switchboard progress status` command keeps working.
+- `docs/googlechat-setup.md`: Chat app + Pub/Sub setup, a demo script, and the
+  two testing layers that do not need a live app — golden card JSON in
+  `testdata/cards` (pasteable into Google's Card Builder to see a real render)
+  and an event-replay corpus in `testdata/events` that runs raw payloads through
+  the real dispatch path. Both regenerate with
+  `go test ./pkg/chat/googlechat -run 'Golden|Replay' -update`.
+- `--googlechat-log-events` logs every inbound payload verbatim, so real Chat
+  traffic can be captured as decoder fixtures — the one thing hand-written
+  fixtures cannot verify. Off by default: payloads carry message text and sender
+  identity.
+- `chat.Reply.Kind` classifies what the router is sending — agent turn, progress
+  placeholder, tool activity, error notice, command ack — so an adapter can
+  render the gateway's own chatter in the platform's idiom. Advisory: an adapter
+  that ignores it (Slack) behaves exactly as before.
+- `chat.CommandChoices`, an optional adapter-facing capability reporting the
+  values a gateway setting accepts. It is what lets the Google Chat adapter
+  offer `progress` as buttons with the router remaining the single source of
+  truth for the list.
 - Outbound ingress (`--ingress-addr`, default disabled): an authenticated HTTP
   surface that lets another service post — and later edit — a message in a
   conversation with no inbound chat event to reply to (scheduled digests,

@@ -1,0 +1,25 @@
+{
+  "chat": {
+    "user": {
+      "name": "users/106508980999999999999",
+      "type": "HUMAN"
+    },
+    "space": {
+      "name": "spaces/AAQAXbGkY1s",
+      "spaceType": "DIRECT_MESSAGE"
+    },
+    "appCommandPayload": {
+      "appCommandMetadata": {
+        "appCommandId": 1,
+        "appCommandType": "QUICK_COMMAND"
+      },
+      "space": {
+        "name": "spaces/AAQAXbGkY1s"
+      }
+    }
+  },
+  "commonEventObject": {
+    "hostApp": "CHAT",
+    "platform": "WEB"
+  }
+}

@@ -51,6 +51,31 @@ type Message struct {
 	Text string
 }
 
+// ReplyKind classifies what a Reply *is*, so an adapter can present it in
+// the platform's idiom rather than as one undifferentiated blob of text: a
+// progress placeholder can render as a card with a spinner, an error notice
+// in a warning colour, a command acknowledgment with buttons. It is
+// deliberately provider-neutral — the router says what a message means and
+// the adapter decides how that looks, which is the same division of labour
+// as the rest of this seam. An adapter that ignores Kind entirely still
+// behaves correctly: every Reply carries Text that says the same thing.
+type ReplyKind string
+
+const (
+	// KindAnswer is an agent turn — the answer itself. The zero value, so a
+	// Reply built without a Kind is treated as content.
+	KindAnswer ReplyKind = ""
+	// KindProgress is the transient "working on it" placeholder posted on
+	// wake and retired when the answer lands.
+	KindProgress ReplyKind = "progress"
+	// KindActivity names the tools an agent is currently running.
+	KindActivity ReplyKind = "activity"
+	// KindNotice is a gateway-level warning — a turn that could not run.
+	KindNotice ReplyKind = "notice"
+	// KindAck is a gateway command's acknowledgment (see Handler.HandleCommand).
+	KindAck ReplyKind = "ack"
+)
+
 // Reply is one outbound turn switchboard relays back into a conversation.
 type Reply struct {
 	// Conversation echoes Message.Conversation so the adapter posts into
@@ -60,6 +85,10 @@ type Reply struct {
 	// Text is the reply body in the platform's markup dialect (the
 	// adapter is responsible for any final formatting).
 	Text string
+
+	// Kind classifies the reply so an adapter can render it in the
+	// platform's idiom. The zero value (KindAnswer) is an agent turn.
+	Kind ReplyKind
 }
 
 // MessageRef identifies a reply already posted to a conversation so the
@@ -142,6 +171,24 @@ type Handler interface {
 	// subcommand). An error is returned only for an internal failure; an
 	// unknown or malformed command yields a helpful ack, not an error.
 	HandleCommand(ctx context.Context, cmd Command) (string, error)
+}
+
+// CommandChoices is an optional Handler capability: reporting the values a
+// gateway setting accepts. It exists so an adapter on a platform with
+// interactive controls can offer those values as buttons instead of asking
+// the invoker to type one — clicking a button re-invokes HandleCommand with
+// the chosen value as the single argument, which is exactly what typing it
+// would have done. The handler stays the authority on what a command means;
+// the adapter learns only the surface, so no platform gains a special case
+// in the router and no router vocabulary is hard-coded in an adapter.
+//
+// A Handler that does not implement it (or returns nil for a command it has
+// no fixed choices for) simply gets the text acknowledgment, which always
+// spells the options out anyway.
+type CommandChoices interface {
+	// Choices returns the accepted argument values for the named command,
+	// or nil when it takes none, is unknown, or is free-form.
+	Choices(name string) []string
 }
 
 // Adapter is a single chat platform's ingress + egress. Run blocks,

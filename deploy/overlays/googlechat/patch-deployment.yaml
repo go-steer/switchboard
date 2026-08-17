@@ -18,7 +18,9 @@
 # Application Default Credentials, which resolve through the Workload
 # Identity annotation this overlay adds to the ServiceAccount.
 #
-# EDIT the project id and subscription id below for your deployment.
+# EDIT the project id, subscription id, and app-command mapping below for
+# your deployment. The command ids are the numeric ids assigned in the Chat
+# API console — Chat identifies a command by id, never by name.
 - op: add
   path: /spec/template/spec/containers/0/args/-
   value: "--platform=googlechat"
@@ -28,3 +30,11 @@
 - op: add
   path: /spec/template/spec/containers/0/args/-
   value: "--google-subscription=SUBSCRIPTION_ID"
+- op: add
+  path: /spec/template/spec/containers/0/args/-
+  value: "--googlechat-commands=1=progress"
+# Card rendering: "status" (default, gateway messages only), "rich" (also lay
+# agent replies out as cards), or "off". Text is always sent as the fallback.
+- op: add
+  path: /spec/template/spec/containers/0/args/-
+  value: "--googlechat-cards=status"

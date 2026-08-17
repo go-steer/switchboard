@@ -1,0 +1,38 @@
+{
+  "chat": {
+    "user": {
+      "name": "users/106508980999999999999",
+      "displayName": "Ada Lovelace",
+      "type": "HUMAN"
+    },
+    "space": {
+      "name": "spaces/AAQAXbGkY1s",
+      "spaceType": "SPACE"
+    },
+    "appCommandPayload": {
+      "appCommandMetadata": {
+        "appCommandId": 1,
+        "appCommandType": "SLASH_COMMAND"
+      },
+      "message": {
+        "name": "spaces/AAQAXbGkY1s/messages/pQ4Lm9xZaBc.pQ4Lm9xZaBc",
+        "createTime": "2026-08-17T14:05:03.117Z",
+        "text": "/progress stream",
+        "argumentText": "stream",
+        "slashCommand": {
+          "commandId": "1"
+        },
+        "thread": {
+          "name": "spaces/AAQAXbGkY1s/threads/pQ4Lm9xZaBc"
+        }
+      },
+      "space": {
+        "name": "spaces/AAQAXbGkY1s"
+      }
+    }
+  },
+  "commonEventObject": {
+    "hostApp": "CHAT",
+    "platform": "WEB"
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "type": "MESSAGE",
+  "eventTime": "2026-08-17T14:02:11.482Z",
+  "space": {
+    "name": "spaces/AAQAXbGkY1s",
+    "type": "ROOM"
+  },
+  "user": {
+    "name": "users/106508980999999999999",
+    "displayName": "Ada Lovelace",
+    "type": "HUMAN"
+  },
+  "message": {
+    "name": "spaces/AAQAXbGkY1s/messages/nT8Kq2eVdRo.nT8Kq2eVdRo",
+    "sender": {
+      "name": "users/106508980999999999999",
+      "type": "HUMAN"
+    },
+    "createTime": "2026-08-17T14:02:11.482Z",
+    "text": "@switchboard what changed in the deploy overlay?",
+    "argumentText": " what changed in the deploy overlay?",
+    "thread": {
+      "name": "spaces/AAQAXbGkY1s/threads/nT8Kq2eVdRo"
+    },
+    "space": {
+      "name": "spaces/AAQAXbGkY1s"
+    }
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "chat": {
+    "space": {
+      "name": "spaces/AAQAXbGkY1s"
+    },
+    "messagePayload": {
+      "message": {
+        "name": "spaces/AAQAXbGkY1s/messages/own.own",
+        "sender": {
+          "name": "users/1234567890",
+          "displayName": "switchboard",
+          "type": "BOT"
+        },
+        "text": "a reply this gateway posted a moment ago",
+        "thread": {
+          "name": "spaces/AAQAXbGkY1s/threads/nT8Kq2eVdRo"
+        }
+      },
+      "space": {
+        "name": "spaces/AAQAXbGkY1s"
+      }
+    }
+  }
+}

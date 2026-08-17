@@ -12,137 +12,479 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// This file decodes what Chat delivers into one normalized inbound event.
+//
+// Chat speaks two dialects, and which one an app receives is a deployment
+// choice made in the Cloud console, not a code choice:
+//
+//   - Google Workspace add-on (the framework this gateway targets): every
+//     event is wrapped in a top-level "chat" object carrying exactly one
+//     payload — messagePayload, appCommandPayload, buttonClickedPayload,
+//     addedToSpacePayload, removedFromSpacePayload.
+//   - Chat API interaction events (the older framework, what the Pub/Sub MVP
+//     shipped against): a flat event with a "type" discriminator.
+//
+// Converting an app to an add-on is irreversible and takes effect for every
+// user at once, so an operator does it on their own schedule. Rather than make
+// that a flag they must remember to flip in lockstep, decode detects the
+// dialect per event — the add-on wrapper is unambiguous — and normalizes both
+// into the same inbound value. The rest of the package never learns which
+// dialect a turn arrived in.
 package googlechat
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
 	chatv1 "google.golang.org/api/chat/v1"
-
-	"github.com/go-steer/switchboard/pkg/chat"
 )
 
-// eventTypeMessage is the Google Chat event type for a user message directed at
-// the app (an @mention in a space, a slash command, or any message in a DM). It
-// is the only event type the MVP acts on; membership/space lifecycle events are
-// acked and ignored.
-const eventTypeMessage = "MESSAGE"
+// Legacy (interaction-events) event types the gateway acts on. The add-on
+// dialect has no type discriminator — the payload that is set *is* the type.
+const (
+	legacyTypeMessage      = "MESSAGE"
+	legacyTypeCardClicked  = "CARD_CLICKED"
+	legacyTypeAddedToSpace = "ADDED_TO_SPACE"
+	// APP_COMMAND is how the legacy dialect delivers a quick command, which
+	// has no message to ride along with. Slash commands arrive both ways
+	// depending on the app's configuration, so this path handles them too.
+	legacyTypeAppCommand = "APP_COMMAND"
+)
 
 // senderTypeBot marks a message authored by an app (including this one). Chat
 // does not normally deliver an app its own messages, but guarding on it keeps a
 // misconfiguration from looping the gateway against itself.
 const senderTypeBot = "BOT"
 
+// annotationUserMention is the Annotation.Type Chat sets on the span of a
+// message that @mentions a user or app.
+const annotationUserMention = "USER_MENTION"
+
 // chatTextLimit is Google Chat's per-message text ceiling (4096 characters); a
 // longer reply is split across several in-thread posts. Enforced in bytes,
 // which is conservative for multi-byte text (fewer runes than bytes).
 const chatTextLimit = 4096
 
-// decodeEvent parses the JSON body of a Pub/Sub message into a Chat event.
-func decodeEvent(data []byte) (*chatv1.DeprecatedEvent, error) {
-	var ev chatv1.DeprecatedEvent
+// eventKind is what an inbound event turned out to be, once the dialect is
+// stripped away.
+type eventKind int
+
+const (
+	// kindIgnore is anything the gateway does not act on — a lifecycle event
+	// it has no answer for, a bot's own message, a payload with nothing
+	// runnable in it.
+	kindIgnore eventKind = iota
+	// kindMessage is a human turn for the agent.
+	kindMessage
+	// kindCommand is a gateway control command (slash or quick command).
+	kindCommand
+	// kindButton is a click on a button the gateway put on one of its own
+	// cards. It carries a command like kindCommand, but also the message that
+	// hosts the card, so the card can be updated in place afterwards.
+	kindButton
+	// kindWelcome is the app being added to a space.
+	kindWelcome
+)
+
+// inbound is one decoded event, normalized across both dialects. Only the
+// fields relevant to its kind are populated.
+type inbound struct {
+	kind eventKind
+
+	// space and thread locate the conversation (thread may be empty in a
+	// flat space); caller is the sender's users/NNN resource name.
+	space, thread, caller string
+
+	// text is the human-readable turn body (kindMessage).
+	text string
+
+	// cmdID is the configured Chat command ID (kindCommand); 0 when the
+	// dialect did not carry one. cmdArgs is the argument text the user typed
+	// after the command word.
+	cmdID   int64
+	cmdArgs string
+
+	// messageName is the resource name of the message hosting the clicked
+	// card (kindButton) — what Update patches to reflect the new state.
+	messageName string
+
+	// params are the action parameters carried by a button click. Add-ons
+	// that extend Chat never populate commonEventObject.invokedFunction, so
+	// parameters is where a card action's identity has to live.
+	params map[string]string
+}
+
+// wireEvent is the union of the two dialects. Exactly one side is populated
+// for any real event: Chat (add-on) or the flat legacy fields.
+type wireEvent struct {
+	// Add-on dialect.
+	Chat   *addonChat                `json:"chat"`
+	Common *chatv1.CommonEventObject `json:"commonEventObject"`
+
+	// Legacy interaction-events dialect.
+	Type               string                    `json:"type"`
+	Message            *chatv1.Message           `json:"message"`
+	Space              *chatv1.Space             `json:"space"`
+	User               *chatv1.User              `json:"user"`
+	LegacyCommon       *chatv1.CommonEventObject `json:"common"`
+	AppCommandMetadata *addonCommandMetadata     `json:"appCommandMetadata"`
+}
+
+// addonChat is the "chat" wrapper of a Google Workspace add-on event object.
+// Exactly one payload is set.
+type addonChat struct {
+	User  *chatv1.User  `json:"user"`
+	Space *chatv1.Space `json:"space"`
+
+	MessagePayload          *addonMessagePayload    `json:"messagePayload"`
+	AppCommandPayload       *addonAppCommandPayload `json:"appCommandPayload"`
+	ButtonClickedPayload    *addonButtonPayload     `json:"buttonClickedPayload"`
+	AddedToSpacePayload     *addonAddedPayload      `json:"addedToSpacePayload"`
+	RemovedFromSpacePayload json.RawMessage         `json:"removedFromSpacePayload"`
+}
+
+type addonMessagePayload struct {
+	Message *chatv1.Message `json:"message"`
+	Space   *chatv1.Space   `json:"space"`
+}
+
+type addonAppCommandPayload struct {
+	AppCommandMetadata *addonCommandMetadata `json:"appCommandMetadata"`
+	Message            *chatv1.Message       `json:"message"`
+	Space              *chatv1.Space         `json:"space"`
+	Thread             *chatv1.Thread        `json:"thread"`
+}
+
+// addonCommandMetadata identifies the invoked command. The reference types
+// AppCommandMetadata.appCommandId as a bare int32 while the older
+// SlashCommand.commandId is an int64-format *string*, so the two carry the
+// same console-assigned number in different shapes. It is decoded through
+// commandID, which accepts either: a quoting mismatch must not fail the whole
+// event.
+type addonCommandMetadata struct {
+	AppCommandId   commandID `json:"appCommandId"`
+	AppCommandType string    `json:"appCommandType"`
+}
+
+// commandID is an int64 that unmarshals from a JSON number or a quoted one.
+type commandID int64
+
+// UnmarshalJSON never fails. An ID this code cannot read leaves the zero
+// value, which maps to no configured command and gets ignored — losing one
+// command is a better outcome than dropping the whole event, and it is the
+// same tolerance the quoted/unquoted split calls for.
+func (c *commandID) UnmarshalJSON(b []byte) error {
+	s := strings.TrimSpace(strings.Trim(strings.TrimSpace(string(b)), `"`))
+	if n, err := strconv.ParseInt(s, 10, 64); err == nil {
+		*c = commandID(n)
+	}
+	return nil
+}
+
+type addonButtonPayload struct {
+	Message *chatv1.Message `json:"message"`
+	Space   *chatv1.Space   `json:"space"`
+}
+
+type addonAddedPayload struct {
+	Space *chatv1.Space `json:"space"`
+	// InteractionAdd is true when the app was added by an @mention or a
+	// command, in which case Chat sends a *second* event carrying that
+	// message — so the welcome must not also answer this one, or the space
+	// gets two replies to one action.
+	InteractionAdd bool `json:"interactionAdd"`
+}
+
+// decodeEvent parses the JSON body of a Pub/Sub message into a normalized
+// event. A payload that parses but says nothing actionable decodes to
+// kindIgnore rather than an error: only malformed JSON is an error.
+func decodeEvent(data []byte) (inbound, error) {
+	var ev wireEvent
 	if err := json.Unmarshal(data, &ev); err != nil {
-		return nil, fmt.Errorf("googlechat: decode event: %w", err)
+		return inbound{}, fmt.Errorf("googlechat: decode event: %w", err)
 	}
-	return &ev, nil
+	if ev.Chat != nil {
+		return normalizeAddon(&ev), nil
+	}
+	return normalizeLegacy(&ev), nil
 }
 
-// isUserMessage reports whether ev is a human message the gateway should act on
-// (a MESSAGE event carrying a message, not authored by a bot/app). It gates both
-// the command and the agent-turn paths.
-func isUserMessage(ev *chatv1.DeprecatedEvent) bool {
-	if ev.Type != eventTypeMessage || ev.Message == nil {
-		return false
+// normalizeAddon reduces a Google Workspace add-on event object to an inbound.
+func normalizeAddon(ev *wireEvent) inbound {
+	c := ev.Chat
+	// The add-on dialect names the actor in chat.user, and a message payload
+	// may omit the message's own sender entirely — so this, not the message
+	// sender, is the guard that keeps the gateway from answering itself.
+	if c.User != nil && c.User.Type == senderTypeBot {
+		return inbound{}
 	}
-	if ev.Message.Sender != nil && ev.Message.Sender.Type == senderTypeBot {
-		return false
+	in := inbound{
+		space:  spaceNameOf(c.Space),
+		caller: userName(c.User),
 	}
-	return true
+	switch {
+	case c.MessagePayload != nil:
+		m := c.MessagePayload.Message
+		if in.space == "" {
+			in.space = spaceNameOf(c.MessagePayload.Space)
+		}
+		if isBotMessage(m) {
+			return inbound{}
+		}
+		in.space = orSpaceOf(in.space, m)
+		in.thread = threadOf(m)
+		in.caller = orSender(in.caller, m)
+		in.text = bodyText(m)
+		if in.space == "" || in.text == "" {
+			return inbound{}
+		}
+		in.kind = kindMessage
+		return in
+
+	case c.AppCommandPayload != nil:
+		p := c.AppCommandPayload
+		if in.space == "" {
+			in.space = spaceNameOf(p.Space)
+		}
+		in.space = orSpaceOf(in.space, p.Message)
+		in.thread = threadNameOf(p.Thread)
+		if in.thread == "" {
+			in.thread = threadOf(p.Message)
+		}
+		in.caller = orSender(in.caller, p.Message)
+		if p.AppCommandMetadata != nil {
+			in.cmdID = int64(p.AppCommandMetadata.AppCommandId)
+		}
+		// A slash command's arguments ride in the message's argumentText; a
+		// quick command has no message at all and is identified by its ID.
+		if p.Message != nil {
+			in.cmdArgs = strings.TrimSpace(p.Message.ArgumentText)
+		}
+		if in.space == "" {
+			return inbound{}
+		}
+		in.kind = kindCommand
+		return in
+
+	case c.ButtonClickedPayload != nil:
+		p := c.ButtonClickedPayload
+		if in.space == "" {
+			in.space = spaceNameOf(p.Space)
+		}
+		in.space = orSpaceOf(in.space, p.Message)
+		in.thread = threadOf(p.Message)
+		if p.Message != nil {
+			in.messageName = p.Message.Name
+		}
+		if ev.Common != nil {
+			in.params = ev.Common.Parameters
+		}
+		if in.space == "" || len(in.params) == 0 {
+			return inbound{} // not one of our buttons
+		}
+		in.kind = kindButton
+		return in
+
+	case c.AddedToSpacePayload != nil:
+		p := c.AddedToSpacePayload
+		if in.space == "" {
+			in.space = spaceNameOf(p.Space)
+		}
+		// The mention or command that added the app arrives as its own event;
+		// answering both would double-post into a brand new space.
+		if in.space == "" || p.InteractionAdd {
+			return inbound{}
+		}
+		in.kind = kindWelcome
+		return in
+	}
+	return inbound{}
 }
 
-// commandFromEvent extracts a gateway control command from a native slash-command
-// invocation, mapping Google Chat's command surface onto the neutral chat.Command
-// the router already understands (the same seam Slack's /switchboard uses). ok is
-// false for an ordinary message, which is an agent turn instead. The invoked
-// command word is carried out-of-band in message.slashCommand, so ArgumentText is
-// already just the verb and its arguments (e.g. "progress status").
-func commandFromEvent(ev *chatv1.DeprecatedEvent) (chat.Command, bool) {
-	m := ev.Message
-	if m == nil || m.SlashCommand == nil {
-		return chat.Command{}, false
+// normalizeLegacy reduces a Chat API interaction event to an inbound. Kept so
+// an operator can convert their app to an add-on when it suits them rather
+// than in lockstep with a switchboard rollout.
+func normalizeLegacy(ev *wireEvent) inbound {
+	in := inbound{
+		space:  spaceNameOf(ev.Space),
+		caller: userName(ev.User),
 	}
-	cmd := chat.Command{Channel: spaceName(ev), Caller: callerID(ev)}
-	if fields := strings.Fields(m.ArgumentText); len(fields) > 0 {
-		cmd.Name = strings.ToLower(fields[0])
-		cmd.Args = fields[1:]
+	switch ev.Type {
+	case legacyTypeMessage:
+		return legacyTurn(in, ev.Message)
+
+	case legacyTypeAppCommand:
+		// A quick command carries no message, so the space and the command ID
+		// come off the event itself. A slash command routed here still has one.
+		in.space = orSpaceOf(in.space, ev.Message)
+		in.thread = threadOf(ev.Message)
+		in.caller = orSender(in.caller, ev.Message)
+		if ev.AppCommandMetadata != nil {
+			in.cmdID = int64(ev.AppCommandMetadata.AppCommandId)
+		} else if ev.Message != nil && ev.Message.SlashCommand != nil {
+			in.cmdID = ev.Message.SlashCommand.CommandId
+		}
+		if ev.Message != nil {
+			in.cmdArgs = strings.TrimSpace(ev.Message.ArgumentText)
+		}
+		if in.space == "" {
+			return inbound{}
+		}
+		in.kind = kindCommand
+		return in
+
+	case legacyTypeCardClicked:
+		m := ev.Message
+		in.space = orSpaceOf(in.space, m)
+		in.thread = threadOf(m)
+		if m != nil {
+			in.messageName = m.Name
+		}
+		if ev.LegacyCommon != nil {
+			in.params = ev.LegacyCommon.Parameters
+		}
+		if in.space == "" || len(in.params) == 0 {
+			return inbound{}
+		}
+		in.kind = kindButton
+		return in
+
+	case legacyTypeAddedToSpace:
+		if in.space == "" {
+			return inbound{}
+		}
+		// The legacy dialect folds an @mention-add or command-add into this one
+		// event and inlines the triggering message, because — unlike the add-on
+		// dialect's interactionAdd — no second event follows. Answer the
+		// message if there is one; a bare add earns the welcome instead.
+		if turn := legacyTurn(in, ev.Message); turn.kind != kindIgnore {
+			return turn
+		}
+		in.kind = kindWelcome
+		return in
 	}
-	return cmd, true
+	return inbound{}
 }
 
-// messageFromEvent builds a normalized chat.Message (an agent turn) from a human
-// MESSAGE event. ok is false when there is nothing to run — no space, or no text
-// after stripping (e.g. an attachment-only message). Callers must have already
-// confirmed isUserMessage and that the event is not a command.
-func messageFromEvent(ev *chatv1.DeprecatedEvent) (chat.Message, bool) {
-	m := ev.Message
-	space := spaceName(ev)
-	if space == "" {
-		return chat.Message{}, false
+// legacyTurn reads a legacy message into either a gateway command or an agent
+// turn. Shared by MESSAGE and by the mention-add that inlines its message.
+func legacyTurn(in inbound, m *chatv1.Message) inbound {
+	if m == nil || isBotMessage(m) {
+		return inbound{}
 	}
-	// ArgumentText is the body with the app mention (and any slash command)
-	// stripped — the human-readable turn; fall back to raw Text if absent.
-	text := strings.TrimSpace(m.ArgumentText)
-	if text == "" {
-		text = strings.TrimSpace(m.Text)
+	in.space = orSpaceOf(in.space, m)
+	in.thread = threadOf(m)
+	in.caller = orSender(in.caller, m)
+	if in.space == "" {
+		return inbound{}
 	}
-	if text == "" {
-		return chat.Message{}, false
+	// A native slash command configures the gateway; anything else is an
+	// agent turn.
+	if m.SlashCommand != nil {
+		in.kind = kindCommand
+		in.cmdID = m.SlashCommand.CommandId
+		in.cmdArgs = strings.TrimSpace(m.ArgumentText)
+		return in
 	}
-	return chat.Message{
-		Conversation: conversationKey(space, threadName(ev)),
-		Channel:      space,
-		Caller:       callerID(ev),
-		Text:         text,
-	}, true
+	if in.text = bodyText(m); in.text == "" {
+		return inbound{}
+	}
+	in.kind = kindMessage
+	return in
 }
 
-// spaceName resolves the space resource name (spaces/AAAA) an event belongs to,
-// preferring the top-level Space and falling back to the message's own Space.
-func spaceName(ev *chatv1.DeprecatedEvent) string {
-	if ev.Space != nil && ev.Space.Name != "" {
-		return ev.Space.Name
+// isBotMessage reports whether a message was authored by an app.
+func isBotMessage(m *chatv1.Message) bool {
+	return m != nil && m.Sender != nil && m.Sender.Type == senderTypeBot
+}
+
+// bodyText is the human-readable turn body: argumentText (the message with the
+// app mention and any command word already stripped by Chat), falling back to
+// the raw text. Empty when there is nothing to run — an attachment-only
+// message, say.
+func bodyText(m *chatv1.Message) string {
+	if m == nil {
+		return ""
 	}
-	if ev.Message != nil && ev.Message.Space != nil {
-		return ev.Message.Space.Name
+	if t := strings.TrimSpace(m.ArgumentText); t != "" {
+		return t
+	}
+	// An empty argumentText on a message that mentions the app means the whole
+	// message *was* the mention. Falling back to text there would prompt the
+	// agent with the literal "@switchboard", so treat it as nothing to run.
+	// Without a mention (a DM) there is no argumentText to begin with.
+	if hasMention(m) {
+		return ""
+	}
+	return strings.TrimSpace(m.Text)
+}
+
+// hasMention reports whether Chat annotated the message with an @mention.
+func hasMention(m *chatv1.Message) bool {
+	for _, a := range m.Annotations {
+		if a != nil && a.Type == annotationUserMention {
+			return true
+		}
+	}
+	return false
+}
+
+// spaceNameOf reads a space's resource name (spaces/AAAA), tolerating a nil.
+func spaceNameOf(s *chatv1.Space) string {
+	if s == nil {
+		return ""
+	}
+	return s.Name
+}
+
+// threadNameOf reads a thread's resource name, tolerating a nil.
+func threadNameOf(t *chatv1.Thread) string {
+	if t == nil {
+		return ""
+	}
+	return t.Name
+}
+
+// userName reads a user's resource name (users/NNN), tolerating a nil.
+func userName(u *chatv1.User) string {
+	if u == nil {
+		return ""
+	}
+	return u.Name
+}
+
+// orSpaceOf falls back to the space a message says it belongs to.
+func orSpaceOf(space string, m *chatv1.Message) string {
+	if space != "" {
+		return space
+	}
+	if m != nil && m.Space != nil {
+		return m.Space.Name
 	}
 	return ""
 }
 
-// threadName resolves the thread resource name a message belongs to, or "" when
-// the space is unthreaded.
-func threadName(ev *chatv1.DeprecatedEvent) string {
-	if ev.Message != nil && ev.Message.Thread != nil {
-		return ev.Message.Thread.Name
+// orSender falls back to the message's sender for the caller identity.
+func orSender(caller string, m *chatv1.Message) string {
+	if caller != "" {
+		return caller
+	}
+	if m != nil && m.Sender != nil {
+		return m.Sender.Name
 	}
 	return ""
 }
 
-// callerID resolves the human sender's identity as the daemon's asserted-caller
-// value — the Google Chat user resource name (users/NNN). core-agent keys
-// per-caller MCP credentials off this; verified identity (email) is established
-// later by core-agent's own OAuth, so the gateway asserts only the stable
-// resource name. Prefers the event User, falling back to the message Sender.
-func callerID(ev *chatv1.DeprecatedEvent) string {
-	if ev.User != nil && ev.User.Name != "" {
-		return ev.User.Name
+// threadOf reads the thread a message belongs to, or "" in a flat space.
+func threadOf(m *chatv1.Message) string {
+	if m == nil || m.Thread == nil {
+		return ""
 	}
-	if ev.Message != nil && ev.Message.Sender != nil {
-		return ev.Message.Sender.Name
-	}
-	return ""
+	return m.Thread.Name
 }
 
 // conversationKey encodes space + thread into the stable chat.Message
@@ -156,9 +498,13 @@ func conversationKey(space, thread string) string {
 
 // splitConversation is the inverse of conversationKey. thread may be empty; ok
 // is false only when the space is missing (a malformed key).
+//
+// A bare space with no separator is accepted as a top-level conversation: the
+// ingress API documents a conversation as a full key *or* a bare channel, and
+// requiring a trailing colon there would make Google Chat the odd platform out.
 func splitConversation(key string) (space, thread string, ok bool) {
-	space, thread, found := strings.Cut(key, ":")
-	if !found || space == "" {
+	space, thread, _ = strings.Cut(key, ":")
+	if space == "" {
 		return "", "", false
 	}
 	return space, thread, true
@@ -170,6 +516,9 @@ func splitConversation(key string) (space, thread string, ok bool) {
 func chunk(s string, limit int) []string {
 	if len(s) <= limit {
 		return []string{s}
+	}
+	if limit < 1 {
+		return []string{s} // nothing sensible to split on
 	}
 	var out []string
 	for len(s) > limit {
@@ -195,4 +544,15 @@ func chunk(s string, limit int) []string {
 		out = append(out, s)
 	}
 	return out
+}
+
+// compactJSON renders a payload as one line for the event log, falling back to
+// the raw bytes when it is not JSON — a payload that failed to parse is exactly
+// the one worth seeing verbatim.
+func compactJSON(data []byte) string {
+	var buf bytes.Buffer
+	if err := json.Compact(&buf, data); err != nil {
+		return string(data)
+	}
+	return buf.String()
 }

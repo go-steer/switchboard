@@ -1,0 +1,11 @@
+{
+  "kind": "message",
+  "turns": [
+    {
+      "conversation": "spaces/AAQAXbGkY1s:spaces/AAQAXbGkY1s/threads/tR7Wz3nYqEf",
+      "channel": "spaces/AAQAXbGkY1s",
+      "caller": "users/106508980999999999999",
+      "text": "what changed in the deploy?"
+    }
+  ]
+}

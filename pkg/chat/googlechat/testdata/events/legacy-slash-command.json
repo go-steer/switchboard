@@ -1,0 +1,41 @@
+{
+  "type": "MESSAGE",
+  "eventTime": "2026-08-17T14:05:03.117Z",
+  "space": {
+    "name": "spaces/AAQAXbGkY1s",
+    "type": "ROOM"
+  },
+  "user": {
+    "name": "users/106508980999999999999",
+    "type": "HUMAN"
+  },
+  "message": {
+    "name": "spaces/AAQAXbGkY1s/messages/pQ4Lm9xZaBc.pQ4Lm9xZaBc",
+    "sender": {
+      "name": "users/106508980999999999999",
+      "type": "HUMAN"
+    },
+    "text": "/progress stream",
+    "argumentText": "stream",
+    "slashCommand": {
+      "commandId": "1"
+    },
+    "annotations": [
+      {
+        "type": "SLASH_COMMAND",
+        "slashCommand": {
+          "commandName": "/progress",
+          "commandId": "1",
+          "type": "INVOKE",
+          "bot": {
+            "name": "users/1234567890",
+            "type": "BOT"
+          }
+        }
+      }
+    ],
+    "thread": {
+      "name": "spaces/AAQAXbGkY1s/threads/pQ4Lm9xZaBc"
+    }
+  }
+}

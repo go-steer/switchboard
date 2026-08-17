@@ -1,0 +1,26 @@
+{
+  "type": "CARD_CLICKED",
+  "eventTime": "2026-08-17T14:05:04.902Z",
+  "space": {
+    "name": "spaces/AAQAXbGkY1s",
+    "type": "ROOM"
+  },
+  "user": {
+    "name": "users/106508980999999999999",
+    "type": "HUMAN"
+  },
+  "message": {
+    "name": "spaces/AAQAXbGkY1s/messages/pQ4Lm9xZaBc.rS7Nv1yWcDe",
+    "thread": {
+      "name": "spaces/AAQAXbGkY1s/threads/pQ4Lm9xZaBc"
+    }
+  },
+  "common": {
+    "hostApp": "CHAT",
+    "invokedFunction": "switchboard",
+    "parameters": {
+      "switchboard_command": "progress",
+      "switchboard_arg": "status"
+    }
+  }
+}

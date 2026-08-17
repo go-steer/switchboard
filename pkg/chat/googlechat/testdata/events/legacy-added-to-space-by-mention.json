@@ -1,0 +1,40 @@
+{
+  "type": "ADDED_TO_SPACE",
+  "eventTime": "2026-08-17T14:00:00.000Z",
+  "space": {
+    "name": "spaces/AAQAXbGkY1s",
+    "displayName": "deploy-review",
+    "type": "ROOM"
+  },
+  "user": {
+    "name": "users/106508980999999999999",
+    "type": "HUMAN"
+  },
+  "message": {
+    "name": "spaces/AAQAXbGkY1s/messages/tR7Wz3nYqEf.tR7Wz3nYqEf",
+    "sender": {
+      "name": "users/106508980999999999999",
+      "type": "HUMAN"
+    },
+    "text": "@switchboard what changed in the deploy?",
+    "argumentText": " what changed in the deploy?",
+    "annotations": [
+      {
+        "type": "USER_MENTION",
+        "startIndex": 0,
+        "length": 12,
+        "userMention": {
+          "user": {
+            "name": "users/1234567890",
+            "displayName": "switchboard",
+            "type": "BOT"
+          },
+          "type": "ADD"
+        }
+      }
+    ],
+    "thread": {
+      "name": "spaces/AAQAXbGkY1s/threads/tR7Wz3nYqEf"
+    }
+  }
+}
