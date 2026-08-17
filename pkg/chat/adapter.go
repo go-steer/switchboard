@@ -51,6 +51,37 @@ type Message struct {
 	Text string
 }
 
+// CallerMode selects how a platform user maps onto the daemon's
+// X-Asserted-Caller identity. It lives here rather than in one adapter
+// because the choice is the same question on every platform, and the
+// answer has to be consistent: the daemon keys per-caller credentials off
+// whatever arrives, so two adapters asserting different forms for the same
+// human would look like two people.
+type CallerMode string
+
+const (
+	// CallerEmail asserts the sender's email address, which is the form
+	// the daemon's per-caller credential lookup expects. An adapter that
+	// cannot obtain one for a given turn falls back to the platform ID
+	// rather than dropping the turn.
+	CallerEmail CallerMode = "email"
+	// CallerID asserts the raw platform user ID — a Slack U0123ABC, a
+	// Google Chat users/1234567890 — with no lookup and no extra scope.
+	CallerID CallerMode = "id"
+)
+
+// ParseCallerMode validates a caller-mode string, reporting whether it
+// named a mode.
+func ParseCallerMode(s string) (CallerMode, bool) {
+	switch CallerMode(s) {
+	case CallerEmail:
+		return CallerEmail, true
+	case CallerID:
+		return CallerID, true
+	}
+	return "", false
+}
+
 // ReplyKind classifies what a Reply *is*, so an adapter can present it in
 // the platform's idiom rather than as one undifferentiated blob of text: a
 // progress placeholder can render as a card with a spinner, an error notice

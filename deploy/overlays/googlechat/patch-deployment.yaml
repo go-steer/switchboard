@@ -38,3 +38,10 @@
 - op: add
   path: /spec/template/spec/containers/0/args/-
   value: "--googlechat-cards=status"
+# Asserted-caller form, stated explicitly because the daemon has to have it
+# provisioned: "email" from the event payload (same as the Slack overlay, so
+# one human is one identity across both), or "id" for the raw users/NNN
+# resource name. An event with no email falls back to the resource name.
+- op: add
+  path: /spec/template/spec/containers/0/args/-
+  value: "--caller-id=email"

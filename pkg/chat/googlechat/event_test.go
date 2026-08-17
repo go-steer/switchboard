@@ -327,6 +327,80 @@ func TestDecodeLegacyEvents(t *testing.T) {
 // unmarshaller: the two dialects carry the same number in different shapes
 // (bare int32 vs int64-format string), and an ID this code cannot read must
 // degrade to "no command" rather than drop the whole event.
+// TestDecodeKeepsEmail is the regression test for the reason wireUser exists:
+// the generated chat/v1 User type has no Email field, so decoding the actor
+// through it threw the address away silently — every turn asserted a users/NNN
+// no matter what the payload said. Both dialects name the actor in their own
+// place, and both must survive the trip.
+func TestDecodeKeepsEmail(t *testing.T) {
+	tests := []struct {
+		name       string
+		payload    string
+		wantCaller string
+		wantEmail  string
+	}{
+		{
+			name: "addon reads chat.user",
+			payload: `{
+				"chat": {
+					"user": {"name": "users/123", "email": "ada@example.com", "type": "HUMAN"},
+					"space": {"name": "spaces/AAA"},
+					"messagePayload": {"message": {"argumentText": "hi"}}
+				}
+			}`,
+			wantCaller: "users/123",
+			wantEmail:  "ada@example.com",
+		},
+		{
+			name: "addon command",
+			payload: `{
+				"chat": {
+					"user": {"name": "users/123", "email": "ada@example.com"},
+					"space": {"name": "spaces/AAA"},
+					"appCommandPayload": {"appCommandMetadata": {"appCommandId": 1}}
+				}
+			}`,
+			wantCaller: "users/123",
+			wantEmail:  "ada@example.com",
+		},
+		{
+			name: "legacy reads user",
+			payload: `{
+				"type": "MESSAGE",
+				"user": {"name": "users/123", "email": "ada@example.com", "type": "HUMAN"},
+				"space": {"name": "spaces/AAA"},
+				"message": {"argumentText": "hi"}
+			}`,
+			wantCaller: "users/123",
+			wantEmail:  "ada@example.com",
+		},
+		{
+			// The sender fallback recovers the resource name but not the
+			// address, because the message rides in the generated type. The
+			// adapter degrades to the resource name rather than dropping the
+			// turn — see callerOf.
+			name: "no actor leaves the email empty",
+			payload: `{
+				"chat": {
+					"space": {"name": "spaces/AAA"},
+					"messagePayload": {"message": {"argumentText": "hi", "sender": {"name": "users/77"}}}
+				}
+			}`,
+			wantCaller: "users/77",
+			wantEmail:  "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			in := mustDecode(t, tt.payload)
+			if in.caller != tt.wantCaller || in.email != tt.wantEmail {
+				t.Fatalf("caller/email = %q/%q, want %q/%q",
+					in.caller, in.email, tt.wantCaller, tt.wantEmail)
+			}
+		})
+	}
+}
+
 func TestDecodeBadCommandID(t *testing.T) {
 	unreadable := []string{`"not-a-number"`, `{}`, `1.5`, `99999999999999999999`, `""`, `null`}
 	for _, id := range unreadable {
@@ -350,8 +424,9 @@ func TestDecodeBadCommandID(t *testing.T) {
 func assertInbound(t *testing.T, got, want inbound) {
 	t.Helper()
 	if got.kind != want.kind || got.space != want.space || got.thread != want.thread ||
-		got.caller != want.caller || got.text != want.text || got.cmdID != want.cmdID ||
-		got.cmdArgs != want.cmdArgs || got.messageName != want.messageName {
+		got.caller != want.caller || got.email != want.email || got.text != want.text ||
+		got.cmdID != want.cmdID || got.cmdArgs != want.cmdArgs ||
+		got.messageName != want.messageName {
 		t.Fatalf("inbound = %+v, want %+v", got, want)
 	}
 	if len(got.params) != len(want.params) {

@@ -1,0 +1,101 @@
+{
+  "commonEventObject": {
+    "userLocale": "en",
+    "hostApp": "CHAT",
+    "platform": "WEB",
+    "timeZone": {
+      "id": "Etc/UTC",
+      "offset": 0
+    }
+  },
+  "chat": {
+    "user": {
+      "name": "users/106508980999999999999",
+      "displayName": "Ada Lovelace",
+      "avatarUrl": "https://lh3.googleusercontent.com/a/REDACTED",
+      "email": "ada@example.com",
+      "type": "HUMAN",
+      "domainId": "REDACTED"
+    },
+    "eventTime": "2026-08-17T20:49:11.806495Z",
+    "appCommandPayload": {
+      "appCommandMetadata": {
+        "appCommandId": 1,
+        "appCommandType": "SLASH_COMMAND"
+      },
+      "space": {
+        "name": "spaces/AAQAXbGkY1s",
+        "type": "DM",
+        "singleUserBotDm": true,
+        "spaceThreadingState": "THREADED_MESSAGES",
+        "spaceType": "DIRECT_MESSAGE",
+        "spaceHistoryState": "HISTORY_ON",
+        "lastActiveTime": "2026-07-31T18:05:23.034975Z",
+        "membershipCount": {
+          "joinedDirectHumanUserCount": 1
+        },
+        "spaceUri": "https://chat.google.com/dm/AAQAXbGkY1s"
+      },
+      "message": {
+        "name": "spaces/AAQAXbGkY1s/messages/Rc9vHt2sBn4.Rc9vHt2sBn4",
+        "sender": {
+          "name": "users/106508980999999999999",
+          "displayName": "Ada Lovelace",
+          "avatarUrl": "https://lh3.googleusercontent.com/a/REDACTED",
+          "email": "ada@example.com",
+          "type": "HUMAN",
+          "domainId": "REDACTED"
+        },
+        "createTime": "2026-08-17T20:49:11.806495Z",
+        "text": "/progress",
+        "annotations": [
+          {
+            "type": "SLASH_COMMAND",
+            "startIndex": 0,
+            "length": 9,
+            "slashCommand": {
+              "bot": {
+                "name": "users/103000000000000000001",
+                "displayName": "Switchboard",
+                "avatarUrl": "https://fonts.gstatic.com/s/i/short-term/release/googlesymbols/hub/default/48px.svg",
+                "type": "BOT"
+              },
+              "type": "INVOKE",
+              "commandName": "/progress",
+              "commandId": "1"
+            }
+          }
+        ],
+        "thread": {
+          "name": "spaces/AAQAXbGkY1s/threads/Rc9vHt2sBn4",
+          "retentionSettings": {
+            "state": "PERMANENT"
+          }
+        },
+        "space": {
+          "name": "spaces/AAQAXbGkY1s",
+          "type": "DM",
+          "singleUserBotDm": true,
+          "spaceThreadingState": "THREADED_MESSAGES",
+          "spaceType": "DIRECT_MESSAGE",
+          "spaceHistoryState": "HISTORY_ON",
+          "lastActiveTime": "2026-07-31T18:05:23.034975Z",
+          "membershipCount": {
+            "joinedDirectHumanUserCount": 1
+          },
+          "spaceUri": "https://chat.google.com/dm/AAQAXbGkY1s"
+        },
+        "slashCommand": {
+          "commandId": "1"
+        },
+        "retentionSettings": {
+          "state": "PERMANENT"
+        },
+        "messageHistoryState": "HISTORY_ON",
+        "formattedText": "/progress",
+        "markupSyntax": "MARKUP_SYNTAX_CHAT"
+      },
+      "configCompleteRedirectUri": "https://chat.google.com/api/bot_config_complete?token=REDACTED"
+    }
+  }
+}

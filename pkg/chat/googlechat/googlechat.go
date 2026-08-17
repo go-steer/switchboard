@@ -31,7 +31,8 @@
 //
 // A conversation is keyed on space + thread, so every mention in a thread
 // continues the same core-agent session. The caller asserted to the daemon is
-// the sender's user resource name (users/NNN); per-caller credential resolution
+// the sender's email address, or their user resource name (users/NNN) when the
+// event carried no email or CallerMode says so; per-caller credential resolution
 // and verified identity live in core-agent (W0), not here. All platform
 // specifics stay behind chat.Adapter so the router never imports this package.
 package googlechat
@@ -88,6 +89,9 @@ type Config struct {
 	// Cards selects how much of the output is rendered as cards. The zero
 	// value means CardsStatus (gateway messages as cards, answers as text).
 	Cards CardMode
+	// CallerMode selects which form of the sender's identity is asserted.
+	// The zero value means chat.CallerEmail.
+	CallerMode chat.CallerMode
 	// Commands maps a Chat app-command ID onto a gateway command verb. Chat
 	// identifies a slash or quick command by the numeric ID configured in the
 	// Chat API console, never by name, so this is how "/progress" (ID 2)
@@ -114,6 +118,7 @@ type Adapter struct {
 	sub       string
 	msg       messenger
 	cards     CardMode
+	caller    chat.CallerMode
 	cmds      map[int64]string
 	logEvents bool
 	logf      func(string, ...any)
@@ -135,6 +140,13 @@ func New(cfg Config) (*Adapter, error) {
 	if !ok {
 		return nil, fmt.Errorf("googlechat: invalid card mode %q (want off, status, or rich)", cfg.Cards)
 	}
+	caller := cfg.CallerMode
+	if caller == "" {
+		caller = chat.CallerEmail
+	}
+	if _, ok := chat.ParseCallerMode(string(caller)); !ok {
+		return nil, fmt.Errorf("googlechat: invalid caller mode %q (want email or id)", cfg.CallerMode)
+	}
 	logf := cfg.Logf
 	if logf == nil {
 		logf = func(string, ...any) {}
@@ -154,6 +166,7 @@ func New(cfg Config) (*Adapter, error) {
 		sub:       cfg.SubscriptionID,
 		msg:       restMessenger{svc: svc},
 		cards:     cards,
+		caller:    caller,
 		cmds:      cfg.Commands,
 		logEvents: cfg.LogEvents,
 		logf:      logf,
@@ -193,6 +206,7 @@ func (a *Adapter) dispatch(ctx context.Context, h chat.Handler, m *pubsub.Messag
 		a.logf("googlechat: %v", err)
 		return
 	}
+	in.caller = a.callerOf(in)
 	conv := conversationKey(in.space, in.thread)
 	switch in.kind {
 	case kindMessage:
@@ -212,6 +226,21 @@ func (a *Adapter) dispatch(ctx context.Context, h chat.Handler, m *pubsub.Messag
 	case kindWelcome:
 		a.welcome(ctx, h, conv)
 	}
+}
+
+// callerOf picks which form of the sender's identity to assert. Email is the
+// default because that is what the daemon keys per-caller credentials by, and
+// what the Slack adapter asserts — a human should not be two identities
+// depending on which chat window they used. The resource name is the fallback
+// whenever the event carried no email (an event with no chat.user, a payload
+// shape that omits the address), so a turn is never dropped for want of one.
+// Note that the daemon must have the asserted form provisioned either way; see
+// docs/googlechat-setup.md §C.
+func (a *Adapter) callerOf(in inbound) string {
+	if a.caller != chat.CallerID && in.email != "" {
+		return in.email
+	}
+	return in.caller
 }
 
 // commandOf turns a decoded command event into a gateway command. The verb

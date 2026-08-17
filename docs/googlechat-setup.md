@@ -79,22 +79,33 @@ verbatim on one line, prefixed `googlechat: event `:
   | sed 's/^googlechat: event //' > /tmp/events.jsonl
 ```
 
-Split that into one file per interaction under `testdata/events/`, scrub any
-real user text, and rerun `-run Replay -update`. **The diff against the
-hand-written goldens is the actual deliverable of layer C** — it is the only
-thing that can tell you the decoder was wrong.
+Split that into one file per interaction under `testdata/events/`, naming
+captured files `addon-live-*.json` so their provenance stays visible, and rerun
+`-run Replay -update`. **The diff against the hand-written goldens is the actual
+deliverable of layer C** — it is the only thing that can tell you the decoder
+was wrong.
+
+Scrub before committing. A real payload carries the sender's display name,
+email, avatar URL, and `domainId`; the space name and `spaceUri`; and a
+`configCompleteRedirectUri` with a token in the query string. Replace each value
+with something of the same shape — `addon-live-message.json` is the worked
+example — and change nothing else: the shape is the whole point.
 
 The flag is off by default because payloads carry message text and sender
 identity. Do not leave it on in production.
 
-Two add-on field names to check first, because they are transcribed from prose
-and appear nowhere in the generated client — nothing offline can confirm them:
+Two add-on field names were transcribed from prose and appear nowhere in the
+generated client, so nothing offline could confirm them:
 
-- `chat.addedToSpacePayload.interactionAdd`. If the real name differs it
-  decodes to `false`, and every @mention-add double-posts a welcome *and* an
-  answer into a brand-new space.
-- `chat.user`. For a quick command there is no message, so this is the only
-  source of the caller; a wrong name sends the daemon an empty caller.
+- `chat.addedToSpacePayload.interactionAdd`. **Still unconfirmed** — it takes an
+  @mention-add into a brand-new space. If the real name differs it decodes to
+  `false`, and every such add double-posts a welcome *and* an answer.
+- `chat.user`. **Confirmed** by `addon-live-message.json`, along with two things
+  the corpus had wrong: the actor object carries an `email`, which the generated
+  `chat/v1` `User` type has no field for and therefore silently dropped (hence
+  `wireUser` in `event.go`), and `appCommandMetadata.appCommandId` really does
+  arrive as a bare integer while the same message's `slashCommand.commandId` is
+  a quoted one.
 
 ## C. Live setup
 
@@ -103,8 +114,9 @@ and appear nowhere in the generated client — nothing offline can confirm them:
 - A **Google Workspace** account. Chat apps cannot be installed by a consumer
   gmail account — this is a hard gate.
 - A GCP project with the **Google Chat API** and **Pub/Sub** enabled.
-- `gcloud auth application-default login` locally, or workload identity
-  in-cluster. Credentials are never passed as flags.
+- A **service account** in that project, and ADC resolving to it. Not your own
+  `gcloud auth application-default login` — see
+  [Credentials](#credentials-app-auth). Credentials are never passed as flags.
 - A **built core-agent binary** and a bearer token for it. Switchboard is a
   gateway, not an agent; without a daemon behind `--daemon-url` it has nothing
   to say. See [The daemon side](#the-daemon-side) below.
@@ -134,6 +146,49 @@ configured and no events ever arrive. Confirm the exact principal in the Chat
 API configuration page rather than trusting a copy-pasted address — Google
 documents it on the Pub/Sub connection settings screen.
 
+### Credentials (app auth)
+
+Switchboard posts **as the Chat app**, which Chat calls app authentication and
+which only a service account can do. The adapter asks for the `chat.bot` scope
+(`googlechat.go`), and a user credential can never hold it: scopes on a user
+credential are fixed at login, and `chat.bot` is not grantable to a human
+account at all. `gcloud auth application-default login` therefore gets you a
+working Pub/Sub pull and a `403 ACCESS_TOKEN_SCOPE_INSUFFICIENT` on the first
+message the app tries to send.
+
+```sh
+gcloud iam service-accounts create switchboard-chat \
+  --display-name "switchboard Chat app" --project PROJECT_ID
+
+# ADC resolves to the SA for BOTH clients, so it needs the subscription too
+gcloud pubsub subscriptions add-iam-policy-binding switchboard-chat-sub \
+  --member serviceAccount:switchboard-chat@PROJECT_ID.iam.gserviceaccount.com \
+  --role roles/pubsub.subscriber --project PROJECT_ID
+
+gcloud iam service-accounts keys create /tmp/switchboard-chat.json \
+  --iam-account switchboard-chat@PROJECT_ID.iam.gserviceaccount.com
+export GOOGLE_APPLICATION_CREDENTIALS=/tmp/switchboard-chat.json
+```
+
+No Chat-specific IAM role is involved: what makes this service account *the
+app* is living in the project where the Chat API is configured.
+
+If org policy blocks service-account keys (`iam.disableServiceAccountKeyCreation`
+— common in a managed org), impersonate instead:
+
+```sh
+gcloud iam service-accounts add-iam-policy-binding \
+  switchboard-chat@PROJECT_ID.iam.gserviceaccount.com \
+  --member user:you@example.com \
+  --role roles/iam.serviceAccountTokenCreator --project PROJECT_ID
+
+gcloud auth application-default login \
+  --impersonate-service-account switchboard-chat@PROJECT_ID.iam.gserviceaccount.com
+```
+
+In-cluster, workload identity binds the same service account and none of this
+applies.
+
 ### Chat app configuration
 
 In the Google Cloud console, under the Chat API's **Configuration** page:
@@ -155,7 +210,7 @@ Two different credentials are in play, and they are easy to conflate:
 
 | Hop | Credential | Supplied by |
 |-----|------------|-------------|
-| Chat ↔ switchboard | GCP service account (ADC) | `gcloud auth application-default login`, or workload identity in-cluster |
+| Chat ↔ switchboard | GCP service account (ADC) | [Credentials](#credentials-app-auth) above |
 | switchboard → core-agent | static bearer token | `$SWITCHBOARD_DAEMON_TOKEN` (rename with `--token-env`) |
 
 The daemon token is **mandatory** — switchboard refuses to start without it
@@ -181,41 +236,54 @@ turn can flow:
   switchboard rather than the human who sent it. This is the one that fails
   quietly.
 
-`dev/demo/echo-daemon` writes all of that and runs the binary:
+`dev/demo/daemon` writes all of that and runs the binary:
 
 ```sh
-dev/demo/echo-daemon --bin /tmp/core-agent --port 7777
+dev/demo/daemon --bin /tmp/core-agent --port 7777
 ```
 
-It prints the `SWITCHBOARD_DAEMON_TOKEN` to export. Demo-only: it puts a token
-on disk, prints it, and runs with `permissions.mode=yolo`. The config it emits
-is the same shape `cmd/switchboard/integration_test.go` stands up, which is what
-keeps it from rotting:
+It prints the `SWITCHBOARD_DAEMON_TOKEN` to export, and keeps its config,
+bearer table, and session db in `./.demo-daemon` (git-ignored) so restarts do
+not rotate the token. Both files are rewritten on every run — change them with
+flags, not by editing. Demo-only: it puts a token on disk, prints it, and runs
+with `permissions.mode=yolo`. The config it emits is the same shape
+`cmd/switchboard/integration_test.go` stands up, which is what keeps it from
+rotting:
 
 ```sh
 CORE_AGENT_BIN=/tmp/core-agent go test -tags=integration ./cmd/switchboard \
   -run Integration -v
 ```
 
-One Chat-specific wrinkle. Switchboard asserts the sender's **Chat resource
-name** — `users/1234567890` — not an email, because Chat's `User` carries no
-email and resolving one is core-agent's job, not the gateway's. So the identity
-arriving at the daemon is a number you cannot know before the first message.
-With `allow_anonymous: false` an unregistered caller is what a first-turn
-rejection looks like: read the identity out of the daemon log and restart with
-it registered.
+The default model is `echo`, which needs no credentials and covers every demo
+step that exercises the *gateway* — commands, buttons, progress modes, the
+welcome card. Steps 2 and 7 turn on what the daemon actually says (markdown, a
+structured answer), so they want a real one:
 
 ```sh
-dev/demo/echo-daemon --bin /tmp/core-agent --caller users/1234567890
+dev/demo/daemon --bin /tmp/core-agent --model claude-opus-5 --provider anthropic
 ```
 
-Whether an unknown asserted caller is rejected or accepted as-is is core-agent
-behaviour, not switchboard's, so check it on turn one rather than assuming.
+The daemon inherits the shell's environment, so export the provider's API key
+in the same terminal. Anything after `--` is appended to core-agent's command
+line verbatim.
 
-Echo is enough for every demo step that exercises the *gateway* — commands,
-buttons, progress modes, the welcome card. Steps 2 and 7 turn on what the daemon
-actually says (markdown, a structured answer), so they need a reply carrying
-that markup; run those against a real provider unless echo gives it back to you.
+**Every human who talks to the app has to be in the bearer table.** With
+`allow_anonymous: false`, an identity the table does not know is rejected —
+confirmed against a live daemon, which answers `POST /sessions: asserted-caller
+header rejected: identity is not provisioned`, surfaced into the thread as an
+error card. Register the caller and restart:
+
+```sh
+dev/demo/daemon --bin /tmp/core-agent --caller you@example.com
+```
+
+Which identity to register depends on `--caller-id` (default `email`, matching
+Slack): the sender's email address from the event payload, or with
+`--caller-id id` the raw Chat resource name, `users/1234567890`. The resource
+name is the fallback when an event carries no email — and it is a number you
+cannot know before the first message, so the first rejection is where you learn
+it.
 
 ### Run it
 
@@ -224,7 +292,7 @@ behind NAT can serve a real Chat app. That property is the whole reason the
 add-on is served over Pub/Sub rather than HTTP.
 
 ```sh
-export SWITCHBOARD_DAEMON_TOKEN=…   # the one dev/demo/echo-daemon printed
+export SWITCHBOARD_DAEMON_TOKEN=…   # the one dev/demo/daemon printed
 /tmp/switchboard serve --platform googlechat \
   --google-project PROJECT_ID \
   --google-subscription switchboard-chat-sub \

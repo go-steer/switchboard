@@ -42,6 +42,13 @@ import (
 // Both dialects belong in the corpus. A payload the decoder ignores is worth
 // keeping too — "ignored" is a result, and a future change that starts
 // answering a bot's own message shows up as a diff.
+//
+// Fixtures named *-live-* are captured traffic rather than hand-written, kept
+// under their own prefix so the provenance stays visible. Scrub before
+// committing: a real payload carries the sender's name, address, avatar URL,
+// domain, space IDs, and a configCompleteRedirectUri bearing a token. Replace
+// them, keeping each value's shape, and leave everything else exactly as Chat
+// sent it — the shape is the whole point of the fixture.
 
 // replayResult is the observable outcome of one event: what reached the router
 // and what the gateway sent back.
