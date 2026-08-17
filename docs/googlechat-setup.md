@@ -74,7 +74,7 @@ Run the gateway with `--googlechat-log-events`. Every inbound payload is logged
 verbatim on one line, prefixed `googlechat: event `:
 
 ```sh
-switchboard serve --platform googlechat … --googlechat-log-events 2>&1 \
+/tmp/switchboard serve --platform googlechat … --googlechat-log-events 2>&1 \
   | grep -o 'googlechat: event .*' \
   | sed 's/^googlechat: event //' > /tmp/events.jsonl
 ```
@@ -108,6 +108,17 @@ and appear nowhere in the generated client — nothing offline can confirm them:
 - A **built core-agent binary** and a bearer token for it. Switchboard is a
   gateway, not an agent; without a daemon behind `--daemon-url` it has nothing
   to say. See [The daemon side](#the-daemon-side) below.
+- **switchboard itself**, built from this checkout — nothing below is on your
+  `PATH` by default:
+
+  ```sh
+  go build -o /tmp/switchboard ./cmd/switchboard
+  /tmp/switchboard version   # confirms the build identity you are testing
+  ```
+
+  The published image works too (`ghcr.io/go-steer/switchboard:main`), but a
+  local binary is easier to restart between demo steps, and several of them ask
+  you to.
 
 ### Pub/Sub
 
@@ -214,7 +225,7 @@ add-on is served over Pub/Sub rather than HTTP.
 
 ```sh
 export SWITCHBOARD_DAEMON_TOKEN=…   # the one dev/demo/echo-daemon printed
-switchboard serve --platform googlechat \
+/tmp/switchboard serve --platform googlechat \
   --google-project PROJECT_ID \
   --google-subscription switchboard-chat-sub \
   --googlechat-commands 1=progress \
