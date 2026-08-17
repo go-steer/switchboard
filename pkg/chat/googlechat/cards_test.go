@@ -208,6 +208,9 @@ func TestAnswerCardDeclines(t *testing.T) {
 		{"empty", "   "},
 		{"no structure worth a card", "just a paragraph of prose, nothing to lay out"},
 		{"only a fence", "```\ncode\n```"},
+		// A rule with nothing before it draws no divider, so it is not the
+		// structure that makes a card worth building.
+		{"leading rule over a bare paragraph", "---\n\njust a paragraph of prose"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -223,6 +226,34 @@ func TestAnswerCardDeclines(t *testing.T) {
 	}
 	if card := answerCard(b.String()); card != nil {
 		t.Fatalf("an over-budget answer should fall back to text")
+	}
+}
+
+// A header whose section has no body of its own used to be dropped along with
+// the empty section, silently losing content from a very ordinary shape. Chat
+// has no nested sections, so it is carried onto the next header instead.
+func TestAnswerCardKeepsHeadersWithNoBody(t *testing.T) {
+	card := answerCard("# Results\n\n## Passing\n\nall good\n")
+	if card == nil {
+		t.Fatalf("no card")
+	}
+	if len(card.Sections) != 1 {
+		t.Fatalf("sections = %d, want 1: %+v", len(card.Sections), card.Sections)
+	}
+	if got := card.Sections[0].Header; got != "Results — Passing" {
+		t.Fatalf("header = %q, want the parent carried onto the child", got)
+	}
+
+	// A header at the very end has no next section to be carried onto; it
+	// lands as a bold lead-in on the last one rather than disappearing.
+	card = answerCard("# Results\n\nall good\n\n## Trailing\n")
+	if card == nil {
+		t.Fatalf("no card for a trailing header")
+	}
+	last := card.Sections[len(card.Sections)-1]
+	body := last.Widgets[len(last.Widgets)-1].TextParagraph
+	if body == nil || !strings.Contains(body.Text, "Trailing") {
+		t.Fatalf("trailing header lost: %+v", last.Widgets)
 	}
 }
 

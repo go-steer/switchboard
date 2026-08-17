@@ -59,6 +59,9 @@ const (
 	// paragraph, but a widget this long is already collapsed behind "show
 	// more" in every client.
 	maxWidgetText = 3500
+	// maxCardHeader is the budget for a section header, which is one line in
+	// every client — a paragraph's worth of text there just gets clipped.
+	maxCardHeader = 200
 	// cardID names the single card on a message. Chat requires an id per card;
 	// it is only used to address the card within the message.
 	cardID = "switchboard"
@@ -354,12 +357,25 @@ func answerCard(markdown string) (card *chatv1.GoogleAppsCardV1Card) {
 			widgets++
 		}
 	}
+	// A header whose section turns out to have no body of its own — "# Results"
+	// immediately followed by "## Passing" — must not vanish with the empty
+	// section. Chat has no nested sections, so it is carried onto the next
+	// header instead of being dropped.
+	var pending []string
 	flushSection := func() {
 		flushPara()
-		if len(cur.Widgets) > 0 {
+		switch {
+		case len(cur.Widgets) > 0:
 			sections = append(sections, cur)
+			pending = nil
+		case cur.Header != "":
+			pending = append(pending, cur.Header)
 		}
 		cur = &chatv1.GoogleAppsCardV1Section{}
+	}
+	setHeader := func(title string) {
+		cur.Header = clamp(strings.Join(append(pending, title), " — "), maxCardHeader)
+		pending = nil
 	}
 
 	for i := 0; i < len(lines); i++ {
@@ -389,7 +405,7 @@ func answerCard(markdown string) (card *chatv1.GoogleAppsCardV1Card) {
 			// nested answer from fragmenting into a dozen title bars.
 			if len(m[1]) <= 2 {
 				flushSection()
-				cur.Header = clamp(title, maxWidgetText)
+				setHeader(title)
 				continue
 			}
 			flushPara()
@@ -400,11 +416,13 @@ func answerCard(markdown string) (card *chatv1.GoogleAppsCardV1Card) {
 			continue
 		}
 		if cardHRLineRE.MatchString(line) {
-			structure = true
 			flushPara()
+			// Only a rule that actually draws counts as structure; otherwise a
+			// leading "---" would make a bare paragraph look card-worthy.
 			if len(cur.Widgets) > 0 {
 				cur.Widgets = append(cur.Widgets, dividerWidget())
 				widgets++
+				structure = true
 			}
 			continue
 		}
@@ -415,6 +433,15 @@ func answerCard(markdown string) (card *chatv1.GoogleAppsCardV1Card) {
 		para = append(para, line)
 	}
 	flushSection()
+	// A header at the very end has no following section to be carried onto, so
+	// it lands as a bold lead-in on the last one rather than being lost.
+	if len(pending) > 0 && len(sections) > 0 {
+		last := sections[len(sections)-1]
+		if w := markdownWidget("**" + strings.Join(pending, " — ") + "**"); w != nil {
+			last.Widgets = append(last.Widgets, w)
+			widgets++
+		}
+	}
 
 	if len(sections) == 0 || widgets == 0 || widgets > maxCardWidgets {
 		return nil

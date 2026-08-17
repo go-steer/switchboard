@@ -126,9 +126,20 @@ func toChatText(content string) string {
 
 	// Defuse mentions before anything else, so a protected span below can never
 	// shelter a live <users/all>.
-	text = mentionRE.ReplaceAllStringFunc(text, func(m string) string {
-		return strings.TrimSuffix(strings.TrimPrefix(m, "<"), ">")
-	})
+	//
+	// To a fixed point, because a single pass is not enough: dropping the inner
+	// brackets of <<users/all>> leaves an outer pair that re-forms a live
+	// mention, and ReplaceAllStringFunc does not rescan its own output. Each
+	// changing pass strips at least one bracket, so this terminates.
+	for {
+		defused := mentionRE.ReplaceAllStringFunc(text, func(m string) string {
+			return strings.TrimSuffix(strings.TrimPrefix(m, "<"), ">")
+		})
+		if defused == text {
+			break
+		}
+		text = defused
+	}
 
 	// 1) Protect fenced code blocks; strip the language tag on a real opening
 	//    fence (one at line start), but never on a mid-line ```span```.
@@ -208,13 +219,22 @@ func toChatText(content string) string {
 // Patterns for the card dialect. They run over text that is already Chat
 // markup (the output of toChatText), so the delimiters are unambiguous.
 var (
-	chatBoldRE   = regexp.MustCompile(`\*([^*\n]+)\*`)
-	chatItalicRE = regexp.MustCompile(`_([^_\n]+)_`)
-	chatStrikeRE = regexp.MustCompile(`~([^~\n]+)~`)
+	// The \S guards match mdItalicRE's: without them a snake_case identifier
+	// (max_turns_reached) renders as emphasis, and these run over router text
+	// that is full of them.
+	chatBoldRE   = regexp.MustCompile(`\*(\S(?:[^*\n]*?\S)?)\*`)
+	chatItalicRE = regexp.MustCompile(`_(\S(?:[^_\n]*?\S)?)_`)
+	chatStrikeRE = regexp.MustCompile(`~(\S(?:[^~\n]*?\S)?)~`)
 	// <url|label>, the Chat text link toChatText emits.
 	chatLabelledLinkRE = regexp.MustCompile(`<((?:https?|mailto|tel):[^>|\n]+)\|([^>\n]*)>`)
-	htmlEscaper        = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;")
-	leadEmojiRE        = regexp.MustCompile(`^[\x{1F000}-\x{1FAFF}\x{2190}-\x{2BFF}\x{FE0F}\x{200D}]+\s*`)
+	// The double quote is escaped too, not just the angle-bracket trio: an
+	// unescaped " in a URL closes the href attribute and everything after it
+	// is parsed as further attributes. The apostrophe is deliberately left
+	// alone — every attribute here is double-quoted, so it is harmless, and
+	// escaping it would litter ordinary prose with entities.
+	htmlEscaper = strings.NewReplacer(
+		"&", "&amp;", "<", "&lt;", ">", "&gt;", `"`, "&quot;")
+	leadEmojiRE = regexp.MustCompile(`^[\x{1F000}-\x{1FAFF}\x{2190}-\x{2BFF}\x{FE0F}\x{200D}]+\s*`)
 )
 
 // toCardHTML converts Chat text markup into the small HTML subset a card's
@@ -247,19 +267,39 @@ func toCardHTML(text string) string {
 
 	text = htmlEscaper.Replace(text)
 
-	text = replaceFunc(chatBoldRE, text, func(s string, loc []int) string {
-		return ph.add("<b>" + s[loc[2]:loc[3]] + "</b>")
-	})
-	text = replaceFunc(chatItalicRE, text, func(s string, loc []int) string {
-		return ph.add("<i>" + s[loc[2]:loc[3]] + "</i>")
-	})
-	text = replaceFunc(chatStrikeRE, text, func(s string, loc []int) string {
-		return ph.add("<s>" + s[loc[2]:loc[3]] + "</s>")
-	})
+	// Emphasis, but only where a delimiter actually sits on a word boundary —
+	// otherwise max_turns_reached comes out as max<i>turns</i>reached, and the
+	// router's text is full of identifiers like it.
+	emphasize := func(re *regexp.Regexp, tag string) {
+		text = replaceFunc(re, text, func(s string, loc []int) string {
+			if insideWord(s, loc[0], loc[1]) {
+				return s[loc[0]:loc[1]]
+			}
+			return ph.add("<" + tag + ">" + s[loc[2]:loc[3]] + "</" + tag + ">")
+		})
+	}
+	emphasize(chatBoldRE, "b")
+	emphasize(chatItalicRE, "i")
+	emphasize(chatStrikeRE, "s")
 
 	// A card renders no literal newlines.
 	text = strings.ReplaceAll(text, "\n", "<br>")
 	return ph.restore(text)
+}
+
+// insideWord reports whether the span s[start:end] is bordered by a word
+// character on either side — the RE2-lookaround stand-in for "this delimiter
+// is part of an identifier, not emphasis".
+func insideWord(s string, start, end int) bool {
+	return (start > 0 && isWordByte(s[start-1])) || (end < len(s) && isWordByte(s[end]))
+}
+
+// ASCII only, deliberately: the identifiers this guards against (snake_case,
+// file.names) are ASCII, while treating every non-ASCII byte as a word
+// character would stop emphasis working in CJK text or next to a curly quote.
+func isWordByte(b byte) bool {
+	return b == '_' ||
+		('a' <= b && b <= 'z') || ('A' <= b && b <= 'Z') || ('0' <= b && b <= '9')
 }
 
 // stripLeadEmoji removes a leading emoji (and the space after it) from a
@@ -278,6 +318,9 @@ func clamp(s string, limit int) string {
 		return s
 	}
 	const ellipsis = "…" // 3 bytes
+	if limit < len(ellipsis) {
+		return "" // no room for even the marker; better empty than over budget
+	}
 	cut := runeBoundary(s, limit-len(ellipsis))
 	return strings.TrimRight(s[:cut], " ") + ellipsis
 }

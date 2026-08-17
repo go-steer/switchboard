@@ -10,7 +10,7 @@
     },
     "appCommandPayload": {
       "appCommandMetadata": {
-        "appCommandId": "1",
+        "appCommandId": 1,
         "appCommandType": "QUICK_COMMAND"
       },
       "space": {

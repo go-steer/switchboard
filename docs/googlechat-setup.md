@@ -85,6 +85,15 @@ thing that can tell you the decoder was wrong.
 The flag is off by default because payloads carry message text and sender
 identity. Do not leave it on in production.
 
+Two add-on field names to check first, because they are transcribed from prose
+and appear nowhere in the generated client — nothing offline can confirm them:
+
+- `chat.addedToSpacePayload.interactionAdd`. If the real name differs it
+  decodes to `false`, and every @mention-add double-posts a welcome *and* an
+  answer into a brand-new space.
+- `chat.user`. For a quick command there is no message, so this is the only
+  source of the caller; a wrong name sends the daemon an empty caller.
+
 ## C. Live setup
 
 ### Prerequisites

@@ -238,8 +238,25 @@ func TestSendEmptyPostsNothing(t *testing.T) {
 func TestSendMalformedConversation(t *testing.T) {
 	f := &fakeMessenger{}
 	a := newTestAdapter(f)
-	if _, err := a.Send(context.Background(), chat.Reply{Conversation: "no-colon", Text: "hi"}); err == nil {
-		t.Fatalf("expected error for malformed conversation key")
+	if _, err := a.Send(context.Background(), chat.Reply{Conversation: ":thread-only", Text: "hi"}); err == nil {
+		t.Fatalf("expected error for a conversation key with no space")
+	}
+}
+
+// A bare space is a legal conversation on the ingress API — the same call that
+// works for Slack has to work here, without a magic trailing colon.
+func TestSendBareSpacePostsTopLevel(t *testing.T) {
+	f := &fakeMessenger{}
+	a := newTestAdapter(f)
+	ref, err := a.Send(context.Background(), chat.Reply{Conversation: "spaces/AAA", Text: "hi"})
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if len(f.creates) != 1 || f.creates[0].parent != "spaces/AAA" || f.creates[0].thread != "" {
+		t.Fatalf("unexpected creates %+v", f.creates)
+	}
+	if ref.Conversation != "spaces/AAA" {
+		t.Fatalf("ref conversation = %q, want the key it was sent with", ref.Conversation)
 	}
 }
 
@@ -397,8 +414,8 @@ func TestUpdateAndDelete(t *testing.T) {
 	}
 	// The mask has to name every field the patch could be replacing, or a
 	// message that used to carry a card would keep it alongside the new text.
-	if !strings.Contains(f.patches[0].mask, "cardsV2") || !strings.Contains(f.patches[0].mask, "text") {
-		t.Fatalf("update mask %q must cover both shapes", f.patches[0].mask)
+	if f.patches[0].mask != patchMask {
+		t.Fatalf("update mask %q, want %q", f.patches[0].mask, patchMask)
 	}
 	if err := a.Delete(context.Background(), ref); err != nil {
 		t.Fatalf("Delete: %v", err)
@@ -423,6 +440,42 @@ func TestUpdateToCard(t *testing.T) {
 	}
 	if f.patches[0].text != "" {
 		t.Fatalf("a card patch must not also set visible text, got %q", f.patches[0].text)
+	}
+}
+
+// Chat accepts only a fixed set of paths in a messages.patch update mask, and
+// rejects the entire request with 400 if the mask names anything else. Naming
+// fallbackText — a real field on Message, but not an updatable one — broke
+// every in-place edit in all three card modes, so pin the mask against the
+// documented set rather than against a shape that merely looks plausible.
+func TestPatchMaskNamesOnlyUpdatablePaths(t *testing.T) {
+	// google.golang.org/api/chat/v1, SpacesMessagesPatchCall.UpdateMask.
+	updatable := map[string]bool{
+		"text": true, "attachment": true, "cards": true, "cardsV2": true,
+		"accessoryWidgets": true, "quotedMessageMetadata": true,
+	}
+
+	f := &fakeMessenger{}
+	a := newTestAdapter(f)
+	a.cards = CardsStatus
+	ref := chat.MessageRef{Conversation: "spaces/AAA:t", ID: "spaces/AAA/messages/M1"}
+
+	// Both arms of rewrite: the card patch and the plain-text patch.
+	if err := a.Update(context.Background(), ref, chat.Reply{Text: "x", Kind: chat.KindActivity}); err != nil {
+		t.Fatalf("Update to card: %v", err)
+	}
+	if err := a.Update(context.Background(), ref, chat.Reply{Text: "x"}); err != nil {
+		t.Fatalf("Update to text: %v", err)
+	}
+	if len(f.patches) != 2 {
+		t.Fatalf("expected two patches, got %d", len(f.patches))
+	}
+	for _, p := range f.patches {
+		for _, path := range strings.Split(p.mask, ",") {
+			if !updatable[path] {
+				t.Fatalf("mask %q names %q, which Chat does not accept in an update mask", p.mask, path)
+			}
+		}
 	}
 }
 

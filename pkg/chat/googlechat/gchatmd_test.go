@@ -117,6 +117,50 @@ func TestToCardHTMLRoundTripsRouterText(t *testing.T) {
 	}
 }
 
+// Stripping a mention's brackets rather than escaping them means one pass is
+// not enough: the outer brackets of a nested mention re-pair around the
+// survivor. A model turn must not be able to page a whole space.
+func TestToChatTextDefusesNestedMentions(t *testing.T) {
+	for _, in := range []string{
+		"<users/all>",
+		"<<users/all>>",
+		"<<<users/all>>>",
+		"<users/<users/all>>",
+		"ping <users/123456> now",
+	} {
+		got := toChatText(in)
+		if mentionRE.MatchString(got) {
+			t.Fatalf("toChatText(%q) = %q, which still contains a live mention", in, got)
+		}
+	}
+}
+
+// A double quote in a URL would otherwise close the href attribute and let
+// everything after it be parsed as further attributes.
+func TestToCardHTMLEscapesQuotesInLinks(t *testing.T) {
+	got := toCardHTML(toChatText(`<https://evil.example/x"onmouseover=alert(1)|click>`))
+	if strings.Contains(got, `x"on`) {
+		t.Fatalf("unescaped quote breaks out of href: %q", got)
+	}
+	if !strings.Contains(got, "&quot;onmouseover") {
+		t.Fatalf("quote not escaped: %q", got)
+	}
+}
+
+// The card emphasis pass runs over router text full of snake_case identifiers;
+// without the same neighbor guards toChatText uses, they render as emphasis.
+func TestToCardHTMLLeavesSnakeCaseAlone(t *testing.T) {
+	for _, in := range []string{
+		"turn failed: max_turns_reached in run_loop",
+		"2 * 3 and 4 * 5",
+	} {
+		got := toCardHTML(in)
+		if strings.Contains(got, "<i>") || strings.Contains(got, "<b>") {
+			t.Fatalf("toCardHTML(%q) = %q, want no emphasis", in, got)
+		}
+	}
+}
+
 func TestStripLeadEmoji(t *testing.T) {
 	tests := []struct{ in, want string }{
 		{"⏳ Working…", "Working…"},

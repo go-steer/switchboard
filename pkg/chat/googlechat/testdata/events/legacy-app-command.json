@@ -1,0 +1,16 @@
+{
+  "type": "APP_COMMAND",
+  "eventTime": "2026-08-17T14:06:11.402Z",
+  "space": {
+    "name": "spaces/AAQAXbGkY1s",
+    "type": "ROOM"
+  },
+  "user": {
+    "name": "users/106508980999999999999",
+    "type": "HUMAN"
+  },
+  "appCommandMetadata": {
+    "appCommandId": 1,
+    "appCommandType": "QUICK_COMMAND"
+  }
+}

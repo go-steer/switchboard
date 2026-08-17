@@ -288,10 +288,27 @@ func TestDecodeLegacyEvents(t *testing.T) {
 			want:    inbound{kind: kindWelcome, space: "spaces/AAA"},
 		},
 		{
-			name: "added to space by mention defers to the message it carries",
+			// No second event follows a legacy mention-add — the triggering
+			// message is inlined here — so this event has to answer it.
+			name: "added to space by mention answers the message it carries",
 			payload: `{"type": "ADDED_TO_SPACE", "space": {"name": "spaces/AAA"},
 				"message": {"argumentText": "hi", "sender": {"type": "HUMAN"}}}`,
-			want: inbound{},
+			want: inbound{kind: kindMessage, space: "spaces/AAA", text: "hi"},
+		},
+		{
+			name: "added to space by a command runs the command",
+			payload: `{"type": "ADDED_TO_SPACE", "space": {"name": "spaces/AAA"},
+				"message": {"argumentText": " status ", "sender": {"type": "HUMAN"},
+					"slashCommand": {"commandId": "1"}}}`,
+			want: inbound{kind: kindCommand, space: "spaces/AAA", cmdID: 1, cmdArgs: "status"},
+		},
+		{
+			// A quick command has no message, so APP_COMMAND is the only way it
+			// can arrive in this dialect.
+			name: "app command",
+			payload: `{"type": "APP_COMMAND", "space": {"name": "spaces/AAA"},
+				"user": {"name": "users/1"}, "appCommandMetadata": {"appCommandId": 2}}`,
+			want: inbound{kind: kindCommand, space: "spaces/AAA", caller: "users/1", cmdID: 2},
 		},
 		{
 			name:    "unknown type ignored",
@@ -306,19 +323,27 @@ func TestDecodeLegacyEvents(t *testing.T) {
 	}
 }
 
-// TestDecodeBadCommandIDDoesNotDropTheEvent guards the reason appCommandId has
-// its own unmarshaller: a value neither dialect agrees on must not fail the
-// whole decode and silently swallow the command.
+// TestDecodeBadCommandID guards the reason appCommandId has its own
+// unmarshaller: the two dialects carry the same number in different shapes
+// (bare int32 vs int64-format string), and an ID this code cannot read must
+// degrade to "no command" rather than drop the whole event.
 func TestDecodeBadCommandID(t *testing.T) {
-	if _, err := decodeEvent([]byte(`{"chat": {"space": {"name": "spaces/A"},
-		"appCommandPayload": {"appCommandMetadata": {"appCommandId": "not-a-number"}}}}`)); err == nil {
-		t.Fatalf("expected a decode error for a non-numeric appCommandId")
+	unreadable := []string{`"not-a-number"`, `{}`, `1.5`, `99999999999999999999`, `""`, `null`}
+	for _, id := range unreadable {
+		payload := `{"chat": {"space": {"name": "spaces/A"},
+			"appCommandPayload": {"appCommandMetadata": {"appCommandId": ` + id + `}}}}`
+		in := mustDecode(t, payload)
+		if in.kind != kindCommand || in.cmdID != 0 {
+			t.Fatalf("appCommandId %s: got %+v, want a command with id 0", id, in)
+		}
 	}
-	// The empty string Chat sends for "no command" is not an error.
-	in := mustDecode(t, `{"chat": {"space": {"name": "spaces/A"},
-		"appCommandPayload": {"appCommandMetadata": {"appCommandId": ""}}}}`)
-	if in.kind != kindCommand || in.cmdID != 0 {
-		t.Fatalf("empty command id: got %+v", in)
+	// Both shapes of a readable ID reach the same value.
+	for _, id := range []string{`3`, `"3"`} {
+		payload := `{"chat": {"space": {"name": "spaces/A"},
+			"appCommandPayload": {"appCommandMetadata": {"appCommandId": ` + id + `}}}}`
+		if in := mustDecode(t, payload); in.cmdID != 3 {
+			t.Fatalf("appCommandId %s: cmdID = %d, want 3", id, in.cmdID)
+		}
 	}
 }
 
@@ -356,8 +381,11 @@ func TestConversationKeyRoundTrip(t *testing.T) {
 			t.Fatalf("round-trip %q => (%q, %q), want (%q, %q)", key, space, thread, tt.space, tt.thread)
 		}
 	}
-	if _, _, ok := splitConversation("no-colon"); ok {
-		t.Fatalf("splitConversation of a key with no colon should not be ok")
+	// The ingress API accepts a bare channel as a conversation, so a key with
+	// no separator is a top-level post in that space, not a malformed key.
+	space, thread, ok := splitConversation("spaces/CCC")
+	if !ok || space != "spaces/CCC" || thread != "" {
+		t.Fatalf("bare space => (%q, %q, %v), want (spaces/CCC, \"\", true)", space, thread, ok)
 	}
 	if _, _, ok := splitConversation(":thread-only"); ok {
 		t.Fatalf("splitConversation with empty space should not be ok")

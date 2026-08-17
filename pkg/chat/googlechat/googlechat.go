@@ -56,13 +56,16 @@ import (
 // conversation-scoped gateway wants.
 const messageReplyOption = "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD"
 
-// Update masks for the two shapes a patched message can take. Chat replaces
-// only the named fields, so a card update must also clear the text field it is
-// replacing (and vice versa) or the message would carry both.
-const (
-	maskText = "text,cardsV2,fallbackText"
-	maskCard = "cardsV2,fallbackText,text"
-)
+// patchMask is the update mask every rewrite sends. Both fields are always
+// named: Chat clears a masked field the patch omits, so naming both is what
+// makes a card replace the text it supersedes, and vice versa.
+//
+// Only a fixed set of paths is updatable — text, attachment, cards, cards_v2,
+// accessory_widgets, quoted_message_metadata. fallbackText is a real field on
+// Message but is not among them, and naming it fails the whole request with
+// 400 INVALID_ARGUMENT. A patched card therefore keeps whatever fallback text
+// it was created with.
+const patchMask = "text,cardsV2"
 
 // messenger is the subset of the Chat REST surface the adapter's egress needs,
 // narrowed to an interface so Send/Update/Delete are testable with a fake and
@@ -417,7 +420,9 @@ func (a *Adapter) rewrite(ctx context.Context, name string, card *chatv1.GoogleA
 	if cards := singleCard(card); cards != nil {
 		// Chat clears any field named in the mask but absent from the message,
 		// so patching to a card also drops the text the message used to carry.
-		err := a.msg.patch(ctx, name, &chatv1.Message{CardsV2: cards, FallbackText: text}, maskCard)
+		// FallbackText is deliberately not sent: it is not maskable, so it
+		// would be ignored either way (see patchMask).
+		err := a.msg.patch(ctx, name, &chatv1.Message{CardsV2: cards}, patchMask)
 		if err == nil {
 			return nil
 		}
@@ -426,7 +431,7 @@ func (a *Adapter) rewrite(ctx context.Context, name string, card *chatv1.GoogleA
 		}
 		a.logf("googlechat: card rejected updating %s (%v); retrying as text", name, err)
 	}
-	if err := a.msg.patch(ctx, name, &chatv1.Message{Text: text}, maskText); err != nil {
+	if err := a.msg.patch(ctx, name, &chatv1.Message{Text: text}, patchMask); err != nil {
 		return fmt.Errorf("googlechat: update %s: %w", name, platformErr(err))
 	}
 	return nil

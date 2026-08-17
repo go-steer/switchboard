@@ -49,12 +49,20 @@ const (
 	legacyTypeMessage      = "MESSAGE"
 	legacyTypeCardClicked  = "CARD_CLICKED"
 	legacyTypeAddedToSpace = "ADDED_TO_SPACE"
+	// APP_COMMAND is how the legacy dialect delivers a quick command, which
+	// has no message to ride along with. Slash commands arrive both ways
+	// depending on the app's configuration, so this path handles them too.
+	legacyTypeAppCommand = "APP_COMMAND"
 )
 
 // senderTypeBot marks a message authored by an app (including this one). Chat
 // does not normally deliver an app its own messages, but guarding on it keeps a
 // misconfiguration from looping the gateway against itself.
 const senderTypeBot = "BOT"
+
+// annotationUserMention is the Annotation.Type Chat sets on the span of a
+// message that @mentions a user or app.
+const annotationUserMention = "USER_MENTION"
 
 // chatTextLimit is Google Chat's per-message text ceiling (4096 characters); a
 // longer reply is split across several in-thread posts. Enforced in bytes,
@@ -118,11 +126,12 @@ type wireEvent struct {
 	Common *chatv1.CommonEventObject `json:"commonEventObject"`
 
 	// Legacy interaction-events dialect.
-	Type         string                    `json:"type"`
-	Message      *chatv1.Message           `json:"message"`
-	Space        *chatv1.Space             `json:"space"`
-	User         *chatv1.User              `json:"user"`
-	LegacyCommon *chatv1.CommonEventObject `json:"common"`
+	Type               string                    `json:"type"`
+	Message            *chatv1.Message           `json:"message"`
+	Space              *chatv1.Space             `json:"space"`
+	User               *chatv1.User              `json:"user"`
+	LegacyCommon       *chatv1.CommonEventObject `json:"common"`
+	AppCommandMetadata *addonCommandMetadata     `json:"appCommandMetadata"`
 }
 
 // addonChat is the "chat" wrapper of a Google Workspace add-on event object.
@@ -150,11 +159,12 @@ type addonAppCommandPayload struct {
 	Thread             *chatv1.Thread        `json:"thread"`
 }
 
-// addonCommandMetadata identifies the invoked command. AppCommandId is an
-// int64 the reference documents as an "int64-format string", and the two
-// dialects disagree in practice about whether it is quoted, so it is decoded
-// through commandID, which accepts either — a quoting mismatch must not fail
-// the whole event.
+// addonCommandMetadata identifies the invoked command. The reference types
+// AppCommandMetadata.appCommandId as a bare int32 while the older
+// SlashCommand.commandId is an int64-format *string*, so the two carry the
+// same console-assigned number in different shapes. It is decoded through
+// commandID, which accepts either: a quoting mismatch must not fail the whole
+// event.
 type addonCommandMetadata struct {
 	AppCommandId   commandID `json:"appCommandId"`
 	AppCommandType string    `json:"appCommandType"`
@@ -163,16 +173,15 @@ type addonCommandMetadata struct {
 // commandID is an int64 that unmarshals from a JSON number or a quoted one.
 type commandID int64
 
+// UnmarshalJSON never fails. An ID this code cannot read leaves the zero
+// value, which maps to no configured command and gets ignored — losing one
+// command is a better outcome than dropping the whole event, and it is the
+// same tolerance the quoted/unquoted split calls for.
 func (c *commandID) UnmarshalJSON(b []byte) error {
-	s := strings.Trim(strings.TrimSpace(string(b)), `"`)
-	if s == "" || s == "null" {
-		return nil
+	s := strings.TrimSpace(strings.Trim(strings.TrimSpace(string(b)), `"`))
+	if n, err := strconv.ParseInt(s, 10, 64); err == nil {
+		*c = commandID(n)
 	}
-	n, err := strconv.ParseInt(s, 10, 64)
-	if err != nil {
-		return fmt.Errorf("googlechat: bad appCommandId %s: %w", b, err)
-	}
-	*c = commandID(n)
 	return nil
 }
 
@@ -207,6 +216,12 @@ func decodeEvent(data []byte) (inbound, error) {
 // normalizeAddon reduces a Google Workspace add-on event object to an inbound.
 func normalizeAddon(ev *wireEvent) inbound {
 	c := ev.Chat
+	// The add-on dialect names the actor in chat.user, and a message payload
+	// may omit the message's own sender entirely — so this, not the message
+	// sender, is the guard that keeps the gateway from answering itself.
+	if c.User != nil && c.User.Type == senderTypeBot {
+		return inbound{}
+	}
 	in := inbound{
 		space:  spaceNameOf(c.Space),
 		caller: userName(c.User),
@@ -300,28 +315,26 @@ func normalizeLegacy(ev *wireEvent) inbound {
 	}
 	switch ev.Type {
 	case legacyTypeMessage:
-		m := ev.Message
-		if m == nil || isBotMessage(m) {
-			return inbound{}
+		return legacyTurn(in, ev.Message)
+
+	case legacyTypeAppCommand:
+		// A quick command carries no message, so the space and the command ID
+		// come off the event itself. A slash command routed here still has one.
+		in.space = orSpaceOf(in.space, ev.Message)
+		in.thread = threadOf(ev.Message)
+		in.caller = orSender(in.caller, ev.Message)
+		if ev.AppCommandMetadata != nil {
+			in.cmdID = int64(ev.AppCommandMetadata.AppCommandId)
+		} else if ev.Message != nil && ev.Message.SlashCommand != nil {
+			in.cmdID = ev.Message.SlashCommand.CommandId
 		}
-		in.space = orSpaceOf(in.space, m)
-		in.thread = threadOf(m)
-		in.caller = orSender(in.caller, m)
+		if ev.Message != nil {
+			in.cmdArgs = strings.TrimSpace(ev.Message.ArgumentText)
+		}
 		if in.space == "" {
 			return inbound{}
 		}
-		// A native slash command configures the gateway; anything else is an
-		// agent turn.
-		if m.SlashCommand != nil {
-			in.kind = kindCommand
-			in.cmdID = m.SlashCommand.CommandId
-			in.cmdArgs = strings.TrimSpace(m.ArgumentText)
-			return in
-		}
-		if in.text = bodyText(m); in.text == "" {
-			return inbound{}
-		}
-		in.kind = kindMessage
+		in.kind = kindCommand
 		return in
 
 	case legacyTypeCardClicked:
@@ -344,16 +357,44 @@ func normalizeLegacy(ev *wireEvent) inbound {
 		if in.space == "" {
 			return inbound{}
 		}
-		// The legacy dialect folds an @mention-add into this one event and
-		// carries the message with it; the message path already answers that,
-		// so only a bare add earns a welcome.
-		if ev.Message != nil {
-			return inbound{}
+		// The legacy dialect folds an @mention-add or command-add into this one
+		// event and inlines the triggering message, because — unlike the add-on
+		// dialect's interactionAdd — no second event follows. Answer the
+		// message if there is one; a bare add earns the welcome instead.
+		if turn := legacyTurn(in, ev.Message); turn.kind != kindIgnore {
+			return turn
 		}
 		in.kind = kindWelcome
 		return in
 	}
 	return inbound{}
+}
+
+// legacyTurn reads a legacy message into either a gateway command or an agent
+// turn. Shared by MESSAGE and by the mention-add that inlines its message.
+func legacyTurn(in inbound, m *chatv1.Message) inbound {
+	if m == nil || isBotMessage(m) {
+		return inbound{}
+	}
+	in.space = orSpaceOf(in.space, m)
+	in.thread = threadOf(m)
+	in.caller = orSender(in.caller, m)
+	if in.space == "" {
+		return inbound{}
+	}
+	// A native slash command configures the gateway; anything else is an
+	// agent turn.
+	if m.SlashCommand != nil {
+		in.kind = kindCommand
+		in.cmdID = m.SlashCommand.CommandId
+		in.cmdArgs = strings.TrimSpace(m.ArgumentText)
+		return in
+	}
+	if in.text = bodyText(m); in.text == "" {
+		return inbound{}
+	}
+	in.kind = kindMessage
+	return in
 }
 
 // isBotMessage reports whether a message was authored by an app.
@@ -372,7 +413,24 @@ func bodyText(m *chatv1.Message) string {
 	if t := strings.TrimSpace(m.ArgumentText); t != "" {
 		return t
 	}
+	// An empty argumentText on a message that mentions the app means the whole
+	// message *was* the mention. Falling back to text there would prompt the
+	// agent with the literal "@switchboard", so treat it as nothing to run.
+	// Without a mention (a DM) there is no argumentText to begin with.
+	if hasMention(m) {
+		return ""
+	}
 	return strings.TrimSpace(m.Text)
+}
+
+// hasMention reports whether Chat annotated the message with an @mention.
+func hasMention(m *chatv1.Message) bool {
+	for _, a := range m.Annotations {
+		if a != nil && a.Type == annotationUserMention {
+			return true
+		}
+	}
+	return false
 }
 
 // spaceNameOf reads a space's resource name (spaces/AAAA), tolerating a nil.
@@ -440,9 +498,13 @@ func conversationKey(space, thread string) string {
 
 // splitConversation is the inverse of conversationKey. thread may be empty; ok
 // is false only when the space is missing (a malformed key).
+//
+// A bare space with no separator is accepted as a top-level conversation: the
+// ingress API documents a conversation as a full key *or* a bare channel, and
+// requiring a trailing colon there would make Google Chat the odd platform out.
 func splitConversation(key string) (space, thread string, ok bool) {
-	space, thread, found := strings.Cut(key, ":")
-	if !found || space == "" {
+	space, thread, _ = strings.Cut(key, ":")
+	if space == "" {
 		return "", "", false
 	}
 	return space, thread, true
@@ -454,6 +516,9 @@ func splitConversation(key string) (space, thread string, ok bool) {
 func chunk(s string, limit int) []string {
 	if len(s) <= limit {
 		return []string{s}
+	}
+	if limit < 1 {
+		return []string{s} // nothing sensible to split on
 	}
 	var out []string
 	for len(s) > limit {
