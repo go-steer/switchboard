@@ -13,6 +13,9 @@ dist/
 *.out
 coverage.*
 
+# Scratch config, session db, and bearer table written by dev/demo/daemon.
+.demo-daemon/
+
 # Editor / OS noise
 .idea/
 .vscode/
