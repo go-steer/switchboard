@@ -7,6 +7,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- `dev/demo/daemon` stands up a throwaway core-agent for local testing and
+  demos: bearer-table auth, switchboard registered in `proxy_identities` so
+  `X-Asserted-Caller` is honored, and a generated token printed for
+  `$SWITCHBOARD_DAEMON_TOKEN`. Switchboard is a gateway and ships no agent, so
+  every live walkthrough needed this config reconstructed by hand from
+  `cmd/switchboard/integration_test.go`. Defaults to the echo provider (no model
+  credentials); `--model`/`--provider` point it at a real one, since the demo
+  steps that exercise markdown and structured answers need something that
+  actually talks. Demo-only — it writes a token to disk and runs the agent in
+  `yolo` permission mode.
+
 - Google Chat **Workspace add-on** support (`pkg/chat/googlechat`). Google is
   migrating Chat apps from the Chat-API interaction-events framework to add-ons
   that extend Chat, which changes the shape of every event. The adapter detects
@@ -224,7 +235,27 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   a rich render can never lose a message. Ported from hermes-agent's
   `block_kit.py`; mrkdwn stays the default.
 
+### Changed
+- Google Chat now asserts the sender's **email address** as `X-Asserted-Caller`,
+  matching what the Slack adapter has always done and what the daemon keys
+  per-caller credentials by; `--caller-id id` restores the raw `users/NNN`
+  resource name, and an event carrying no email falls back to it. One human
+  reaching an agent from two chat platforms was previously two identities to
+  provision. The address was on the wire all along: the generated `chat/v1`
+  `User` type has no `Email` field, so decoding the actor through it threw the
+  address away — `pkg/chat/googlechat/testdata/events/addon-live-message.json`
+  is the captured payload that shows it.
+
 ### Fixed
+- Every inbound message ran **two** agent turns and posted the answer twice.
+  The router injected and then woke the session, but the daemon's inject
+  already requests a wake as part of queueing the message, so the explicit
+  wake started a second turn — with an empty prompt, since the inbox had just
+  been drained. The router now injects only. This affected both adapters
+  (`Router.Handle` is shared), so Slack duplicated replies too; it was easy to
+  miss because the second turn's answer is often near-identical to the first.
+  The real-daemon integration test now asserts one message yields one reply —
+  the fake daemon in the unit tests replays a fixed script and cannot show it.
 - Bumped the pinned Go toolchain to 1.26.6 (stdlib fixes for GO-2026-6089/-6090/
   -6091/-5972/-5026/-6218; `govulncheck` was failing the build against 1.26.5).
 - Slack Block Kit rendering: bold/italic/strikethrough that wraps an inline code

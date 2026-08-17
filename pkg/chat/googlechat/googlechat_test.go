@@ -648,6 +648,94 @@ func TestDispatchRoutesMessageToHandle(t *testing.T) {
 	}
 }
 
+// TestDispatchCallerMode pins which identity reaches the daemon. It matters
+// operationally, not cosmetically: core-agent rejects a turn outright when the
+// asserted caller is not provisioned, so an adapter that quietly switched forms
+// would take the gateway down for every user at once.
+func TestDispatchCallerMode(t *testing.T) {
+	const withEmail = `{
+		"chat": {
+			"user": {"name": "users/7", "email": "ada@example.com"},
+			"space": {"name": "spaces/AAA"},
+			"messagePayload": {"message": {"argumentText": "hello there"}}
+		}
+	}`
+	const withoutEmail = `{
+		"chat": {
+			"user": {"name": "users/7"},
+			"space": {"name": "spaces/AAA"},
+			"messagePayload": {"message": {"argumentText": "hello there"}}
+		}
+	}`
+
+	tests := []struct {
+		name    string
+		mode    chat.CallerMode
+		payload string
+		want    string
+	}{
+		{"email is the default", chat.CallerEmail, withEmail, "ada@example.com"},
+		{"id opts out of the lookup", chat.CallerID, withEmail, "users/7"},
+		{"no email degrades to the resource name", chat.CallerEmail, withoutEmail, "users/7"},
+		{"id is unaffected by a missing email", chat.CallerID, withoutEmail, "users/7"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := &fakeHandler{}
+			a := newTestAdapter(&fakeMessenger{})
+			a.caller = tt.mode
+			a.dispatch(context.Background(), h, &pubsub.Message{Data: []byte(tt.payload)})
+
+			if len(h.msgs) != 1 {
+				t.Fatalf("want 1 turn, got %+v", h.msgs)
+			}
+			if h.msgs[0].Caller != tt.want {
+				t.Fatalf("caller = %q, want %q", h.msgs[0].Caller, tt.want)
+			}
+		})
+	}
+}
+
+// TestDispatchCallerModeAppliesToCommands: a command is attributed too, and the
+// gateway would look inconsistent — one identity for turns, another for the
+// /progress that configures them — if the rewrite lived on the message path.
+func TestDispatchCallerModeAppliesToCommands(t *testing.T) {
+	h := &fakeHandler{ack: "ok"}
+	a := newTestAdapter(&fakeMessenger{})
+	a.cmds = map[int64]string{1: "progress"}
+
+	payload := []byte(`{
+		"chat": {
+			"user": {"name": "users/7", "email": "ada@example.com"},
+			"space": {"name": "spaces/AAA"},
+			"appCommandPayload": {
+				"appCommandMetadata": {"appCommandId": 1},
+				"message": {"argumentText": "status"}
+			}
+		}
+	}`)
+	a.dispatch(context.Background(), h, &pubsub.Message{Data: payload})
+
+	if len(h.cmds) != 1 || h.cmds[0].Caller != "ada@example.com" {
+		t.Fatalf("want the command attributed to the email, got %+v", h.cmds)
+	}
+}
+
+// TestNewDefaultsAndValidatesCallerMode: the zero Config must not silently mean
+// "no mode", and a typo in --caller-id must fail at startup rather than assert
+// something the daemon has never heard of.
+func TestNewDefaultsAndValidatesCallerMode(t *testing.T) {
+	if got := (&Adapter{}).callerOf(inbound{caller: "users/7", email: "ada@example.com"}); got != "ada@example.com" {
+		t.Fatalf("zero-value mode = %q, want the email", got)
+	}
+	_, err := New(Config{
+		ProjectID: "p", SubscriptionID: "s", CallerMode: chat.CallerMode("nickname"),
+	})
+	if err == nil || !strings.Contains(err.Error(), "caller mode") {
+		t.Fatalf("New with a bogus caller mode: err = %v, want a caller-mode complaint", err)
+	}
+}
+
 // TestDispatchAckOffersChoicesAsButtons is the point of the CommandChoices
 // capability: the values come from the handler, so this package hard-codes no
 // router vocabulary.

@@ -1,0 +1,17 @@
+{
+  "kind": "command",
+  "commands": [
+    {
+      "name": "progress",
+      "channel": "spaces/AAQAXbGkY1s",
+      "caller": "ada@example.com"
+    }
+  ],
+  "posts": [
+    {
+      "target": "spaces/AAQAXbGkY1s|spaces/AAQAXbGkY1s/threads/Rc9vHt2sBn4",
+      "fallback": "Progress mode for this channel is _status_.",
+      "card": "[tune:Progress mode for this channel is <b>status</b>.][buttons:off,indicator,status,stream]"
+    }
+  ]
+}

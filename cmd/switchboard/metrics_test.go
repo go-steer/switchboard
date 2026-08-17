@@ -121,7 +121,7 @@ func TestServeMetricsBindError(t *testing.T) {
 }
 
 // TestRouterRecordsMetrics drives one inbound turn end to end against a fake
-// daemon and asserts the router incremented the create/inject/wake, message,
+// daemon and asserts the router incremented the create/inject, message,
 // reply, turn-relayed, and active-session collectors.
 func TestRouterRecordsMetrics(t *testing.T) {
 	const agentEvent = `{"seq":1,"event":{"Content":{"parts":[{"text":"the answer"}],"role":"model"},"Partial":false}}`
@@ -174,10 +174,14 @@ func TestRouterRecordsMetrics(t *testing.T) {
 	if got := testutil.ToFloat64(m.messages.WithLabelValues("ok")); got != 1 {
 		t.Errorf("messages{ok} = %v, want 1", got)
 	}
-	for _, op := range []string{"create", "inject", "wake"} {
+	for _, op := range []string{"create", "inject"} {
 		if got := testutil.ToFloat64(m.daemonRequests.WithLabelValues(op, "ok")); got != 1 {
 			t.Errorf("daemon_requests{%s,ok} = %v, want 1", op, got)
 		}
+	}
+	// Handle does not wake — inject already does. No wake observation at all.
+	if got := testutil.ToFloat64(m.daemonRequests.WithLabelValues("wake", "ok")); got != 0 {
+		t.Errorf("daemon_requests{wake,ok} = %v, want 0", got)
 	}
 	if got := testutil.ToFloat64(m.turnsRelayed); got != 1 {
 		t.Errorf("turns_relayed = %v, want 1", got)

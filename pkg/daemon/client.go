@@ -138,15 +138,18 @@ func (c *Client) CreateSession(ctx context.Context, assertedCaller string) (Sess
 	return Session{App: out.App, ID: out.SessionID}, nil
 }
 
-// Inject queues a user message on the session's inbox. assertedCaller
-// attributes this turn to the originating chat user.
+// Inject queues a user message on the session's inbox and, as part of that,
+// runs a turn — the daemon requests its own wake on inject, so callers must
+// not follow this with Wake or the session runs the turn twice.
+// assertedCaller attributes this turn to the originating chat user.
 func (c *Client) Inject(ctx context.Context, sess Session, assertedCaller, text string) error {
 	body := map[string]string{"message": text}
 	return c.do(ctx, http.MethodPost, sess.path("/inject"), assertedCaller, body, nil)
 }
 
-// Wake nudges a sleeping session to run a turn (e.g. after an inject on
-// a session that has gone idle).
+// Wake runs a turn on a session with no new input to give it. It is not the
+// companion to Inject — see Inject — but part of the daemon's frozen verb set
+// and the way to rouse a session that has gone idle on its own.
 func (c *Client) Wake(ctx context.Context, sess Session, assertedCaller string) error {
 	return c.do(ctx, http.MethodPost, sess.path("/wake"), assertedCaller, struct{}{}, nil)
 }

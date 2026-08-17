@@ -1,0 +1,77 @@
+{
+  "commonEventObject": {
+    "userLocale": "en",
+    "hostApp": "CHAT",
+    "platform": "WEB",
+    "timeZone": {
+      "id": "Etc/UTC",
+      "offset": 0
+    }
+  },
+  "chat": {
+    "user": {
+      "name": "users/106508980999999999999",
+      "displayName": "Ada Lovelace",
+      "avatarUrl": "https://lh3.googleusercontent.com/a/REDACTED",
+      "email": "ada@example.com",
+      "type": "HUMAN",
+      "domainId": "REDACTED"
+    },
+    "eventTime": "2026-08-17T21:10:33.137455Z",
+    "messagePayload": {
+      "space": {
+        "name": "spaces/AAQAXbGkY1s",
+        "type": "DM",
+        "singleUserBotDm": true,
+        "spaceThreadingState": "THREADED_MESSAGES",
+        "spaceType": "DIRECT_MESSAGE",
+        "spaceHistoryState": "HISTORY_ON",
+        "lastActiveTime": "2026-08-17T21:10:33.137455Z",
+        "membershipCount": {
+          "joinedDirectHumanUserCount": 1
+        },
+        "spaceUri": "https://chat.google.com/dm/AAQAXbGkY1s"
+      },
+      "message": {
+        "name": "spaces/AAQAXbGkY1s/messages/Lk4mZq7wPd0.Lk4mZq7wPd0",
+        "sender": {
+          "name": "users/106508980999999999999",
+          "displayName": "Ada Lovelace",
+          "avatarUrl": "https://lh3.googleusercontent.com/a/REDACTED",
+          "email": "ada@example.com",
+          "type": "HUMAN",
+          "domainId": "REDACTED"
+        },
+        "createTime": "2026-08-17T21:10:33.137455Z",
+        "text": "who are you?",
+        "thread": {
+          "name": "spaces/AAQAXbGkY1s/threads/Lk4mZq7wPd0",
+          "retentionSettings": {
+            "state": "PERMANENT"
+          }
+        },
+        "space": {
+          "name": "spaces/AAQAXbGkY1s",
+          "type": "DM",
+          "singleUserBotDm": true,
+          "spaceThreadingState": "THREADED_MESSAGES",
+          "spaceType": "DIRECT_MESSAGE",
+          "spaceHistoryState": "HISTORY_ON",
+          "lastActiveTime": "2026-08-17T21:10:33.137455Z",
+          "membershipCount": {
+            "joinedDirectHumanUserCount": 1
+          },
+          "spaceUri": "https://chat.google.com/dm/AAQAXbGkY1s"
+        },
+        "argumentText": "who are you?",
+        "retentionSettings": {
+          "state": "PERMANENT"
+        },
+        "messageHistoryState": "HISTORY_ON",
+        "formattedText": "who are you?",
+        "markupSyntax": "MARKUP_SYNTAX_CHAT"
+      },
+      "configCompleteRedirectUri": "https://chat.google.com/api/bot_config_complete?token=REDACTED"
+    }
+  }
+}

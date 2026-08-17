@@ -37,17 +37,18 @@ import (
 )
 
 // CallerMode selects how a Slack user maps onto the daemon's
-// X-Asserted-Caller identity.
-type CallerMode string
+// X-Asserted-Caller identity. Aliased to the provider-neutral type so
+// every adapter is configured by the same flag with the same meaning.
+type CallerMode = chat.CallerMode
 
 const (
 	// CallerEmail resolves the user's email via users.info (needs the
 	// users:read.email scope) and asserts that. Default; matches the
 	// daemon's usual per-caller credential keying.
-	CallerEmail CallerMode = "email"
+	CallerEmail = chat.CallerEmail
 	// CallerID asserts the raw Slack user ID (e.g. U0123ABC) with no
 	// extra API call or scope.
-	CallerID CallerMode = "id"
+	CallerID = chat.CallerID
 )
 
 // Config constructs an Adapter. Tokens are loaded from env by the caller

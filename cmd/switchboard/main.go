@@ -90,7 +90,7 @@ func runServe(args []string) error {
 	botTokenEnv := fs.String("slack-bot-token-env", "SWITCHBOARD_SLACK_BOT_TOKEN",
 		"env var holding the Slack bot user OAuth token (xoxb-...)")
 	callerID := fs.String("caller-id", "email",
-		"how to derive X-Asserted-Caller from a Slack user: \"email\" (users.info) or \"id\" (raw user ID)")
+		"how to derive X-Asserted-Caller: \"email\" (Slack users.info, Chat event payload) or \"id\" (raw platform user ID)")
 	richBlocks := fs.Bool("slack-rich-blocks", false,
 		"render replies as Slack Block Kit (headers, lists, tables, code); mrkdwn text is always sent as the fallback")
 	progressMode := fs.String("progress-mode", "indicator",
@@ -191,6 +191,7 @@ func runServe(args []string) error {
 			ProjectID:      *googleProject,
 			SubscriptionID: *googleSub,
 			Cards:          cardMode,
+			CallerMode:     callerMode,
 			Commands:       appCommands,
 			LogEvents:      *googleLogEvents,
 			Logf:           logf,
@@ -294,16 +295,16 @@ func splitList(s string) []string {
 	return out
 }
 
-// parseCallerMode validates the --caller-id flag value.
-func parseCallerMode(s string) (slack.CallerMode, error) {
-	switch slack.CallerMode(s) {
-	case slack.CallerEmail:
-		return slack.CallerEmail, nil
-	case slack.CallerID:
-		return slack.CallerID, nil
-	default:
+// parseCallerMode validates the --caller-id flag value. One flag serves
+// every platform: the daemon keys per-caller credentials off whatever is
+// asserted, so the same human must not be an email on Slack and a resource
+// name on Chat.
+func parseCallerMode(s string) (chat.CallerMode, error) {
+	mode, ok := chat.ParseCallerMode(s)
+	if !ok {
 		return "", fmt.Errorf("invalid --caller-id %q (want \"email\" or \"id\")", s)
 	}
+	return mode, nil
 }
 
 // parseProgressMode validates the --progress-mode flag value.

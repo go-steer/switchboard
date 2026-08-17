@@ -99,6 +99,12 @@ type inbound struct {
 	// flat space); caller is the sender's users/NNN resource name.
 	space, thread, caller string
 
+	// email is the sender's address when the event carried one — the
+	// add-on dialect does, on chat.user. Decoding keeps both forms and
+	// leaves the choice between them to CallerMode, so which identity is
+	// asserted stays a configuration question rather than a decoding one.
+	email string
+
 	// text is the human-readable turn body (kindMessage).
 	text string
 
@@ -129,15 +135,27 @@ type wireEvent struct {
 	Type               string                    `json:"type"`
 	Message            *chatv1.Message           `json:"message"`
 	Space              *chatv1.Space             `json:"space"`
-	User               *chatv1.User              `json:"user"`
+	User               *wireUser                 `json:"user"`
 	LegacyCommon       *chatv1.CommonEventObject `json:"common"`
 	AppCommandMetadata *addonCommandMetadata     `json:"appCommandMetadata"`
+}
+
+// wireUser is the actor on an event. It exists because the generated
+// chat/v1 User type has no Email field at all, while real add-on payloads
+// carry one on chat.user — and an email is what the daemon's per-caller
+// credential lookup is keyed by, so decoding through the generated type
+// silently throws away the useful half of the identity. Confirmed against
+// live traffic on 2026-08-17; see docs/googlechat-setup.md §C.
+type wireUser struct {
+	Name  string `json:"name"`
+	Email string `json:"email"`
+	Type  string `json:"type"`
 }
 
 // addonChat is the "chat" wrapper of a Google Workspace add-on event object.
 // Exactly one payload is set.
 type addonChat struct {
-	User  *chatv1.User  `json:"user"`
+	User  *wireUser     `json:"user"`
 	Space *chatv1.Space `json:"space"`
 
 	MessagePayload          *addonMessagePayload    `json:"messagePayload"`
@@ -225,6 +243,7 @@ func normalizeAddon(ev *wireEvent) inbound {
 	in := inbound{
 		space:  spaceNameOf(c.Space),
 		caller: userName(c.User),
+		email:  userEmail(c.User),
 	}
 	switch {
 	case c.MessagePayload != nil:
@@ -312,6 +331,7 @@ func normalizeLegacy(ev *wireEvent) inbound {
 	in := inbound{
 		space:  spaceNameOf(ev.Space),
 		caller: userName(ev.User),
+		email:  userEmail(ev.User),
 	}
 	switch ev.Type {
 	case legacyTypeMessage:
@@ -450,11 +470,21 @@ func threadNameOf(t *chatv1.Thread) string {
 }
 
 // userName reads a user's resource name (users/NNN), tolerating a nil.
-func userName(u *chatv1.User) string {
+func userName(u *wireUser) string {
 	if u == nil {
 		return ""
 	}
 	return u.Name
+}
+
+// userEmail reads a user's email address, tolerating a nil. Empty when the
+// dialect did not carry one, which is the signal to fall back to the
+// resource name rather than assert nothing.
+func userEmail(u *wireUser) string {
+	if u == nil {
+		return ""
+	}
+	return u.Email
 }
 
 // orSpaceOf falls back to the space a message says it belongs to.

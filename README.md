@@ -65,7 +65,8 @@ switchboard serve --platform googlechat \
   --googlechat-commands 1=progress \
   --daemon-url http://127.0.0.1:7777
 # Message the app in a Chat space (or @-mention it in a room); the reply lands
-# in the same thread. The asserted caller is the sender's users/NNN resource name.
+# in the same thread. The asserted caller is the sender's email, as on Slack;
+# --caller-id id asserts the raw users/NNN resource name instead.
 ```
 
 One-time setup: in the Chat API app configuration, set the **Connection
@@ -286,7 +287,7 @@ The exported series (all prefixed `switchboard_`):
 |--------|------|--------|---------|
 | `switchboard_messages_total` | counter | `outcome` | inbound chat turns handled |
 | `switchboard_commands_total` | counter | — | chat control commands handled |
-| `switchboard_daemon_requests_total` | counter | `op`, `outcome` | core-agent requests (`create`/`inject`/`wake`) |
+| `switchboard_daemon_requests_total` | counter | `op`, `outcome` | core-agent requests (`create`/`inject`) |
 | `switchboard_daemon_request_duration_seconds` | histogram | `op` | daemon request latency |
 | `switchboard_replies_sent_total` | counter | `outcome` | outbound sends to the platform |
 | `switchboard_agent_turns_relayed_total` | counter | — | completed agent turns relayed to chat |

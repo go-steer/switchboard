@@ -239,8 +239,14 @@ func (r *Router) progressCommand(cmd chat.Command) string {
 }
 
 // Handle processes one inbound turn: ensure a session exists for the
-// conversation (creating it and its relay subscription on the first
-// turn), then inject the message and wake the session to run it.
+// conversation (creating it and its relay subscription on the first turn),
+// then inject the message, which is what runs the turn.
+//
+// Inject alone — no wake. The daemon's inject already requests a wake as part
+// of queueing the message, so pairing the two verbs signalled twice and ran
+// two turns for one message: the real one, then a second with an empty prompt
+// whose reply landed in the thread as a duplicate. Wake is for rousing a
+// session with nothing new to say, which is not this path.
 func (r *Router) Handle(ctx context.Context, msg chat.Message) (err error) {
 	// One counter per inbound turn, tallied by outcome on the way out.
 	defer func() { r.metrics.recordMessage(err) }()
@@ -250,20 +256,14 @@ func (r *Router) Handle(ctx context.Context, msg chat.Message) (err error) {
 		r.surfaceError(ctx, msg.Conversation, err)
 		return err
 	}
+	// Post the progress message before injecting: inject starts the turn, so a
+	// fast reply would otherwise beat the placeholder into the thread and strand
+	// it there ("Working…" below the answer, with nothing left to clear it). A
+	// no-op in off and stream modes.
+	r.startProgress(ctx, entry, msg.Conversation)
 	start := time.Now()
 	err = r.client.Inject(ctx, entry.sess, msg.Caller, msg.Text)
 	r.metrics.recordDaemon("inject", time.Since(start), err)
-	if err != nil {
-		r.surfaceError(ctx, msg.Conversation, err)
-		return err
-	}
-	// Post the progress message before waking: a reply can only follow wake, so
-	// placing it first guarantees relay sees it before delivering the turn (no
-	// orphaned "Working…" from a fast reply). A no-op in off and stream modes.
-	r.startProgress(ctx, entry, msg.Conversation)
-	start = time.Now()
-	err = r.client.Wake(ctx, entry.sess, msg.Caller)
-	r.metrics.recordDaemon("wake", time.Since(start), err)
 	if err != nil {
 		// The turn will never run, so the progress message would linger; clear it.
 		r.clearProgress(ctx, entry, msg.Conversation)
@@ -274,7 +274,7 @@ func (r *Router) Handle(ctx context.Context, msg chat.Message) (err error) {
 }
 
 // surfaceError posts a thread-scoped notice when a turn fails before it ever
-// reaches the daemon's event stream (session creation, inject, or wake) — the
+// reaches the daemon's event stream (session creation or inject) — the
 // cases relay can never recover from, so without this the thread would just
 // go silent with only a server log to explain why. Distinguishes transient
 // failures (5xx, network — worth a retry) from terminal ones (4xx — retrying
