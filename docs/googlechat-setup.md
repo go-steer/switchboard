@@ -105,6 +105,9 @@ and appear nowhere in the generated client — nothing offline can confirm them:
 - A GCP project with the **Google Chat API** and **Pub/Sub** enabled.
 - `gcloud auth application-default login` locally, or workload identity
   in-cluster. Credentials are never passed as flags.
+- A **built core-agent binary** and a bearer token for it. Switchboard is a
+  gateway, not an agent; without a daemon behind `--daemon-url` it has nothing
+  to say. See [The daemon side](#the-daemon-side) below.
 
 ### Pub/Sub
 
@@ -135,6 +138,74 @@ In the Google Cloud console, under the Chat API's **Configuration** page:
    from the argument text.
 5. Visibility: make it available to yourself or a test group.
 
+### The daemon side
+
+Two different credentials are in play, and they are easy to conflate:
+
+| Hop | Credential | Supplied by |
+|-----|------------|-------------|
+| Chat ↔ switchboard | GCP service account (ADC) | `gcloud auth application-default login`, or workload identity in-cluster |
+| switchboard → core-agent | static bearer token | `$SWITCHBOARD_DAEMON_TOKEN` (rename with `--token-env`) |
+
+The daemon token is **mandatory** — switchboard refuses to start without it
+(`cmd/switchboard/main.go`), and `daemon.New` rejects an empty one. It rides as
+`Authorization: Bearer …` on all four verbs. Never pass it as a flag value.
+
+`--daemon-url` needs a daemon behind it and switchboard ships none. Even the
+echo provider is a *core-agent* flag, so a built core-agent binary is a
+prerequisite either way:
+
+```sh
+go build -o /tmp/core-agent ./cmd/core-agent   # in a core-agent checkout
+```
+
+Three things have to line up in the daemon's `.agents/config.json` before a
+turn can flow:
+
+- `attach.multi_session.enabled` and a `listen` address matching `--daemon-url`.
+- `auth.kind = "bearer_table"` with a table file holding switchboard's identity
+  and the token it presents.
+- **`proxy_identities` listing that identity.** Without it the token still
+  authenticates, `X-Asserted-Caller` is ignored, and every turn is attributed to
+  switchboard rather than the human who sent it. This is the one that fails
+  quietly.
+
+`dev/demo/echo-daemon` writes all of that and runs the binary:
+
+```sh
+dev/demo/echo-daemon --bin /tmp/core-agent --port 7777
+```
+
+It prints the `SWITCHBOARD_DAEMON_TOKEN` to export. Demo-only: it puts a token
+on disk, prints it, and runs with `permissions.mode=yolo`. The config it emits
+is the same shape `cmd/switchboard/integration_test.go` stands up, which is what
+keeps it from rotting:
+
+```sh
+CORE_AGENT_BIN=/tmp/core-agent go test -tags=integration ./cmd/switchboard \
+  -run Integration -v
+```
+
+One Chat-specific wrinkle. Switchboard asserts the sender's **Chat resource
+name** — `users/1234567890` — not an email, because Chat's `User` carries no
+email and resolving one is core-agent's job, not the gateway's. So the identity
+arriving at the daemon is a number you cannot know before the first message.
+With `allow_anonymous: false` an unregistered caller is what a first-turn
+rejection looks like: read the identity out of the daemon log and restart with
+it registered.
+
+```sh
+dev/demo/echo-daemon --bin /tmp/core-agent --caller users/1234567890
+```
+
+Whether an unknown asserted caller is rejected or accepted as-is is core-agent
+behaviour, not switchboard's, so check it on turn one rather than assuming.
+
+Echo is enough for every demo step that exercises the *gateway* — commands,
+buttons, progress modes, the welcome card. Steps 2 and 7 turn on what the daemon
+actually says (markdown, a structured answer), so they need a reply carrying
+that markup; run those against a real provider unless echo gives it back to you.
+
 ### Run it
 
 Switchboard pulls from Pub/Sub, so it needs no inbound network path — a laptop
@@ -142,37 +213,13 @@ behind NAT can serve a real Chat app. That property is the whole reason the
 add-on is served over Pub/Sub rather than HTTP.
 
 ```sh
-export SWITCHBOARD_DAEMON_TOKEN=…
+export SWITCHBOARD_DAEMON_TOKEN=…   # the one dev/demo/echo-daemon printed
 switchboard serve --platform googlechat \
   --google-project PROJECT_ID \
   --google-subscription switchboard-chat-sub \
   --googlechat-commands 1=progress \
   --googlechat-log-events \
   --daemon-url http://127.0.0.1:7777
-```
-
-`--daemon-url` needs a daemon behind it, and switchboard does not ship one. Even
-the echo provider is a core-agent flag, so a **built core-agent binary is a
-prerequisite** either way:
-
-```sh
-go build -o /tmp/core-agent ./cmd/core-agent   # in the core-agent repo
-```
-
-`--provider=echo` then needs no model credentials, which covers every step of
-the demo that is about the *gateway* — commands, buttons, progress modes, the
-welcome card. The two steps that turn on what the daemon actually says (2 and 7,
-markdown and a structured answer) need a reply carrying that markup, so run
-those against a real provider unless the echo provider gives it back to you.
-
-For the config that goes with the binary — bearer-table auth,
-`proxy_identities`, and the `.agents/config.json` layout — copy
-`cmd/switchboard/integration_test.go`, which stands the same thing up and is
-kept working by the integration suite:
-
-```sh
-CORE_AGENT_BIN=/tmp/core-agent go test -tags=integration ./cmd/switchboard \
-  -run Integration -v
 ```
 
 ### Demo script

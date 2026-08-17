@@ -1,0 +1,177 @@
+#!/usr/bin/env bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Stand up a throwaway core-agent daemon that switchboard can talk to —
+# echo provider, no model credentials, bearer-table auth with switchboard
+# registered as a proxy identity. This is the daemon side of the live demo
+# in docs/googlechat-setup.md; the config it writes is the same shape
+# cmd/switchboard/integration_test.go stands up, so the integration suite
+# is what keeps it honest.
+#
+# For demos and local testing only. It writes a bearer token to disk and
+# prints it to the terminal, runs the agent with permissions.mode=yolo,
+# and puts everything in a scratch directory. None of that belongs in a
+# deployment.
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: dev/demo/echo-daemon [options]
+
+Options:
+  --bin PATH        core-agent binary (default: $CORE_AGENT_BIN)
+  --workdir DIR     scratch dir for config + session db (default: a fresh mktemp dir)
+  --port N          port the daemon listens on, loopback only (default: 7777)
+  --caller IDENTITY register a caller switchboard may assert; repeatable
+  -h, --help        this
+
+The token comes from $SWITCHBOARD_DAEMON_TOKEN if set, otherwise a random
+one is generated and printed. Export the same value for switchboard.
+
+Build the binary first, in a core-agent checkout:
+
+  go build -o /tmp/core-agent ./cmd/core-agent
+EOF
+}
+
+bin="${CORE_AGENT_BIN:-}"
+workdir=""
+port=7777
+callers=()
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --bin) bin="${2:?--bin needs a path}"; shift 2 ;;
+    --workdir) workdir="${2:?--workdir needs a path}"; shift 2 ;;
+    --port) port="${2:?--port needs a number}"; shift 2 ;;
+    --caller) callers+=("${2:?--caller needs an identity}"); shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+if [[ -z $bin ]]; then
+  echo "no core-agent binary: pass --bin or set \$CORE_AGENT_BIN" >&2
+  echo "  go build -o /tmp/core-agent ./cmd/core-agent   # in a core-agent checkout" >&2
+  exit 2
+fi
+if [[ ! -x $bin ]]; then
+  echo "not an executable: $bin" >&2
+  exit 2
+fi
+if [[ ! $port =~ ^[0-9]+$ ]] || (( port < 1 || port > 65535 )); then
+  echo "not a port: $port" >&2
+  exit 2
+fi
+
+# The identity strings land inside JSON string literals unescaped, so
+# refuse anything that would need escaping rather than emitting a broken
+# config. Chat resource names (users/123), emails, and sa:names all pass.
+bot_identity="sa:switchboard-bot"
+for id in "$bot_identity" ${callers+"${callers[@]}"}; do
+  if [[ ! $id =~ ^[A-Za-z0-9._:@/+-]+$ ]]; then
+    echo "identity has characters that need JSON escaping: $id" >&2
+    exit 2
+  fi
+done
+
+token="${SWITCHBOARD_DAEMON_TOKEN:-}"
+generated=0
+if [[ -z $token ]]; then
+  token="tok_$(od -An -tx1 -N18 /dev/urandom | tr -d ' \n')"
+  generated=1
+fi
+
+if [[ -z $workdir ]]; then
+  workdir="$(mktemp -d -t switchboard-demo.XXXXXX)"
+else
+  mkdir -p "$workdir"
+fi
+workdir="$(cd "$workdir" && pwd)"
+mkdir -p "$workdir/.agents"
+
+users_file="$workdir/users.json"
+config_file="$workdir/.agents/config.json"
+
+# Callers get placeholder tokens: switchboard never presents them, it
+# asserts the identity instead. They exist so the asserted identity is one
+# the daemon already knows, which is what allow_anonymous=false requires.
+# Distinct per caller, because a bearer table is a token -> identity
+# lookup and a shared token would be ambiguous.
+rows="    { \"identity\": \"$bot_identity\", \"token\": \"$token\" }"
+n=0
+for id in ${callers+"${callers[@]}"}; do
+  n=$((n + 1))
+  rows+=",
+    { \"identity\": \"$id\", \"token\": \"tok_unused_caller_$n\" }"
+done
+
+umask 077
+cat >"$users_file" <<EOF
+{
+  "version": 1,
+  "users": [
+$rows
+  ]
+}
+EOF
+chmod 600 "$users_file" # umask is advisory if the file already existed
+
+cat >"$config_file" <<EOF
+{
+  "version": 1,
+  "model": { "name": "echo" },
+  "permissions": { "mode": "yolo" },
+  "attach": {
+    "listen": "127.0.0.1:$port",
+    "multi_session": {
+      "enabled": true,
+      "auth": { "kind": "bearer_table", "table_file": "$users_file" },
+      "proxy_identities": ["$bot_identity"],
+      "default_identity": "anon",
+      "allow_anonymous": false
+    }
+  }
+}
+EOF
+
+cat >&2 <<EOF
+core-agent (echo provider) on 127.0.0.1:$port
+  workdir  $workdir
+  config   $config_file
+  users    $users_file
+
+Point switchboard at it with:
+
+  export SWITCHBOARD_DAEMON_TOKEN=$token
+  switchboard serve … --daemon-url http://127.0.0.1:$port
+
+EOF
+if (( generated )); then
+  echo "The token above was generated for this run; it is not a secret worth keeping." >&2
+fi
+if (( ${#callers[@]} == 0 )); then
+  cat >&2 <<'EOF'
+No --caller identities registered. Switchboard asserts the platform's own
+identity for the human who sent the message — a Google Chat resource name
+(users/1234567890), not an email. If turns are rejected, take the identity
+from the daemon log and rerun with --caller users/1234567890.
+
+EOF
+fi
+
+cd "$workdir"
+exec "$bin" --provider=echo --no-repl \
+  --session-db --session-db-path="$workdir/session.db"

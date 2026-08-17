@@ -7,6 +7,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- `dev/demo/echo-daemon` stands up a throwaway core-agent for local testing and
+  demos: echo provider (no model credentials), bearer-table auth, switchboard
+  registered in `proxy_identities` so `X-Asserted-Caller` is honored, and a
+  generated token printed for `$SWITCHBOARD_DAEMON_TOKEN`. Switchboard is a
+  gateway and ships no agent, so every live walkthrough needed this config
+  reconstructed by hand from `cmd/switchboard/integration_test.go`. Demo-only —
+  it writes a token to disk and runs the agent in `yolo` permission mode.
 - Google Chat **Workspace add-on** support (`pkg/chat/googlechat`). Google is
   migrating Chat apps from the Chat-API interaction-events framework to add-ons
   that extend Chat, which changes the shape of every event. The adapter detects
