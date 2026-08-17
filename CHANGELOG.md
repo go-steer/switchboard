@@ -247,6 +247,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   is the captured payload that shows it.
 
 ### Fixed
+- Every inbound message ran **two** agent turns and posted the answer twice.
+  The router injected and then woke the session, but the daemon's inject
+  already requests a wake as part of queueing the message, so the explicit
+  wake started a second turn — with an empty prompt, since the inbox had just
+  been drained. The router now injects only. This affected both adapters
+  (`Router.Handle` is shared), so Slack duplicated replies too; it was easy to
+  miss because the second turn's answer is often near-identical to the first.
+  The real-daemon integration test now asserts one message yields one reply —
+  the fake daemon in the unit tests replays a fixed script and cannot show it.
 - Bumped the pinned Go toolchain to 1.26.6 (stdlib fixes for GO-2026-6089/-6090/
   -6091/-5972/-5026/-6218; `govulncheck` was failing the build against 1.26.5).
 - Slack Block Kit rendering: bold/italic/strikethrough that wraps an inline code

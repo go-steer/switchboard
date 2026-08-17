@@ -42,8 +42,9 @@ import (
 // TestIntegrationRealDaemonRoundTrip stands up a real multi-session
 // core-agent daemon (echo provider, bearer-table auth, switchboard as a
 // proxy identity) and drives the router through the full inbound path:
-// create → inject → wake → SSE relay, asserting the agent's turn comes
-// back through the sender attributed to the asserted caller.
+// create → inject → SSE relay, asserting the agent's turn comes back through
+// the sender attributed to the asserted caller — exactly once, since inject
+// is what runs the turn.
 func TestIntegrationRealDaemonRoundTrip(t *testing.T) {
 	bin := os.Getenv("CORE_AGENT_BIN")
 	if bin == "" {
@@ -139,6 +140,16 @@ func TestIntegrationRealDaemonRoundTrip(t *testing.T) {
 		t.Logf("real daemon relayed reply: %q", rep.Text)
 	case <-time.After(15 * time.Second):
 		t.Fatal("timed out waiting for a relayed reply from the real daemon")
+	}
+
+	// One inbound message, one reply. Regression guard for the duplicate turn:
+	// inject already asks the daemon to wake, so a Handle that also woke ran the
+	// turn twice and posted the answer twice. Only a real daemon shows this —
+	// the fake in router_test.go replays a fixed SSE script either way.
+	select {
+	case rep := <-fake.replies:
+		t.Fatalf("second reply for one message: %q", rep.Text)
+	case <-time.After(3 * time.Second):
 	}
 }
 

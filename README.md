@@ -287,7 +287,7 @@ The exported series (all prefixed `switchboard_`):
 |--------|------|--------|---------|
 | `switchboard_messages_total` | counter | `outcome` | inbound chat turns handled |
 | `switchboard_commands_total` | counter | — | chat control commands handled |
-| `switchboard_daemon_requests_total` | counter | `op`, `outcome` | core-agent requests (`create`/`inject`/`wake`) |
+| `switchboard_daemon_requests_total` | counter | `op`, `outcome` | core-agent requests (`create`/`inject`) |
 | `switchboard_daemon_request_duration_seconds` | histogram | `op` | daemon request latency |
 | `switchboard_replies_sent_total` | counter | `outcome` | outbound sends to the platform |
 | `switchboard_agent_turns_relayed_total` | counter | — | completed agent turns relayed to chat |

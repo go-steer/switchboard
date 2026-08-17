@@ -84,9 +84,11 @@ func (f *fakeSender) deletedRefs() []chat.MessageRef {
 }
 
 // TestRouterRoundTrip drives the full inbound path against a fake daemon:
-// a first turn creates a session, injects, wakes, and relays the agent's
-// SSE output back through the sender; a second turn on the same
-// conversation reuses the session (no second create).
+// a first turn creates a session, injects, and relays the agent's SSE output
+// back through the sender; a second turn on the same conversation reuses the
+// session (no second create). The wake route is registered and asserted
+// untouched: inject already wakes the session, so a wake here would run the
+// turn a second time and duplicate the reply in the thread.
 func TestRouterRoundTrip(t *testing.T) {
 	var creates, injects, wakes atomic.Int64
 	injected := make(chan string, 4)
@@ -164,15 +166,15 @@ func TestRouterRoundTrip(t *testing.T) {
 	if got := injects.Load(); got != 2 {
 		t.Errorf("injects = %d, want 2", got)
 	}
-	if got := wakes.Load(); got != 2 {
-		t.Errorf("wakes = %d, want 2", got)
+	if got := wakes.Load(); got != 0 {
+		t.Errorf("wakes = %d, want 0 (inject already wakes; a second signal runs a duplicate turn)", got)
 	}
 	assertInjected(t, injected, "first")
 	assertInjected(t, injected, "second")
 }
 
 // TestRouterHandleSurfacesErrors verifies that a daemon failure mid-turn
-// (inject or wake, after the session already exists) is reported into the
+// (a failed inject, after the session already exists) is reported into the
 // thread rather than only logged, and that the notice text distinguishes a
 // transient (5xx) failure — worth retrying — from a terminal (4xx) one.
 func TestRouterHandleSurfacesErrors(t *testing.T) {

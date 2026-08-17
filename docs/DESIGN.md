@@ -40,9 +40,14 @@ Four verbs, all already shipped by core-agent (`pkg/daemon`):
 | Verb | Endpoint | Purpose |
 |------|----------|---------|
 | create | `POST /sessions` | open a session for a new conversation; returns `session_id` |
-| inject | `POST /sessions/<sid>/inject` | queue a user turn on the session inbox |
-| wake | `POST /sessions/<sid>/wake` | nudge an idle session to run a turn |
+| inject | `POST /sessions/<sid>/inject` | queue a user turn on the session inbox **and run it** |
+| wake | `POST /sessions/<sid>/wake` | run a turn with no new input to give the session |
 | stream | `GET /sessions/<sid>/events` (SSE) | read the session's output turns |
+
+Inject requests a wake itself, so the two are alternatives, not a pair: an
+inbound chat message is one inject and nothing else. Sending both signals the
+session twice and runs a second, empty-prompted turn whose reply duplicates the
+first in the thread.
 
 Auth is a static `Bearer` token (switchboard → daemon). **Per-turn attribution**
 rides `X-Asserted-Caller`: switchboard sets it to the platform identity of the
@@ -55,8 +60,8 @@ honored.
 
 ```
    Slack  ──Socket Mode──┐                        ┌─ POST /sessions
-                         │   ┌───────────────┐    ├─ POST /sessions/<sid>/inject
-                         ├──▶│  switchboard   │───▶├─ POST /sessions/<sid>/wake
+                         │   ┌───────────────┐    │
+                         ├──▶│  switchboard   │───▶├─ POST /sessions/<sid>/inject
                          │   │  router        │    └─ GET  /sessions/<sid>/events (SSE)
    Google Chat ─Pub/Sub──┘   └───────────────┘         │
                                      ▲                   │
@@ -72,7 +77,7 @@ honored.
 - **`pkg/daemon`** — the thin wire client for the four verbs above.
 - **router** (`cmd/switchboard`) — owns the **conversation → session** map
   (a Slack channel+thread or a Google Chat space+thread ⇒ one session), forwards
-  inbound turns via inject/wake, subscribes to the SSE stream, and relays output
+  inbound turns via inject, subscribes to the SSE stream, and relays output
   turns back through the adapter.
 
 ### 3.1 Outbound ingress
