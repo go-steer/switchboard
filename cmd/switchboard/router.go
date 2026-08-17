@@ -205,6 +205,20 @@ func (r *Router) HandleCommand(_ context.Context, cmd chat.Command) (string, err
 const commandHelp = "Try `progress <off|indicator|status|stream>` to set this " +
 	"channel's long-turn feedback, or `progress` to see the current mode."
 
+// Router reports its commands' accepted values, so an adapter on a platform
+// with interactive controls can render them as buttons.
+var _ chat.CommandChoices = (*Router)(nil)
+
+// Choices implements chat.CommandChoices: the values `progress` accepts. The
+// list is derived from the same constants parseProgressMode validates against,
+// so a mode added there cannot go missing from the buttons.
+func (r *Router) Choices(name string) []string {
+	if name != "progress" {
+		return nil
+	}
+	return []string{string(ProgressOff), string(ProgressIndicator), string(ProgressStatus), string(ProgressStream)}
+}
+
 // progressCommand reads or sets the calling channel's progress mode. With no
 // argument it reports the mode in effect; with one it validates and records an
 // override. It is channel-scoped, so a command with no channel is refused.
@@ -272,7 +286,7 @@ func (r *Router) surfaceError(ctx context.Context, conv string, err error) {
 	if daemon.IsTransient(err) {
 		text = errNoticeTransient
 	}
-	if _, sendErr := r.out.Send(ctx, chat.Reply{Conversation: conv, Text: text}); sendErr != nil {
+	if _, sendErr := r.out.Send(ctx, chat.Reply{Conversation: conv, Text: text, Kind: chat.KindNotice}); sendErr != nil {
 		r.logf("handle %s: surface error: %v (original: %v)", conv, sendErr, err)
 	}
 }
@@ -292,7 +306,7 @@ func (r *Router) startProgress(ctx context.Context, e *sessionEntry, conv string
 	if mode := r.progressFor(e.channel); mode != ProgressIndicator && mode != ProgressStatus {
 		return
 	}
-	ref, err := r.out.Send(ctx, chat.Reply{Conversation: conv, Text: workingText})
+	ref, err := r.out.Send(ctx, chat.Reply{Conversation: conv, Text: workingText, Kind: chat.KindProgress})
 	r.metrics.recordReply(err)
 	if err != nil {
 		r.logf("progress %s: post: %v", conv, err)
@@ -343,13 +357,13 @@ func (r *Router) postActivity(ctx context.Context, e *sessionEntry, conv string,
 	text := activityText(tools)
 	if mode == ProgressStatus {
 		if ref := e.currentProgress(); ref.ID != "" {
-			if err := r.out.Update(ctx, ref, chat.Reply{Conversation: conv, Text: text}); err != nil {
+			if err := r.out.Update(ctx, ref, chat.Reply{Conversation: conv, Text: text, Kind: chat.KindActivity}); err != nil {
 				r.logf("relay %s: status activity: %v", conv, err)
 			}
 			return
 		}
 	}
-	_, err := r.out.Send(ctx, chat.Reply{Conversation: conv, Text: text})
+	_, err := r.out.Send(ctx, chat.Reply{Conversation: conv, Text: text, Kind: chat.KindActivity})
 	r.metrics.recordReply(err)
 	if err != nil {
 		r.logf("relay %s: activity: %v", conv, err)

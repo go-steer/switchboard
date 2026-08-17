@@ -1,0 +1,13 @@
+{
+  "type": "ADDED_TO_SPACE",
+  "eventTime": "2026-08-17T14:00:00.000Z",
+  "space": {
+    "name": "spaces/AAQAXbGkY1s",
+    "displayName": "deploy-review",
+    "type": "ROOM"
+  },
+  "user": {
+    "name": "users/106508980999999999999",
+    "type": "HUMAN"
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "chat": {
+    "user": {
+      "name": "users/106508980999999999999",
+      "type": "HUMAN"
+    },
+    "space": {
+      "name": "spaces/AAQAXbGkY1s",
+      "spaceType": "SPACE"
+    },
+    "buttonClickedPayload": {
+      "message": {
+        "name": "spaces/AAQAXbGkY1s/messages/pQ4Lm9xZaBc.rS7Nv1yWcDe",
+        "createTime": "2026-08-17T14:05:04.902Z",
+        "thread": {
+          "name": "spaces/AAQAXbGkY1s/threads/pQ4Lm9xZaBc"
+        }
+      },
+      "space": {
+        "name": "spaces/AAQAXbGkY1s"
+      }
+    }
+  },
+  "commonEventObject": {
+    "hostApp": "CHAT",
+    "platform": "WEB",
+    "invokedFunction": "",
+    "parameters": {
+      "switchboard_command": "progress",
+      "switchboard_arg": "status"
+    }
+  }
+}

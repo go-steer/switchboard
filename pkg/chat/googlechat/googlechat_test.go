@@ -18,313 +18,55 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"testing"
 
 	"cloud.google.com/go/pubsub"
 	chatv1 "google.golang.org/api/chat/v1"
+	"google.golang.org/api/googleapi"
 
 	"github.com/go-steer/switchboard/pkg/chat"
 )
 
-func mustDecode(t *testing.T, payload string) *chatv1.DeprecatedEvent {
-	t.Helper()
-	ev, err := decodeEvent([]byte(payload))
-	if err != nil {
-		t.Fatalf("decodeEvent: %v", err)
-	}
-	return ev
-}
-
-func TestDecodeEventMalformed(t *testing.T) {
-	if _, err := decodeEvent([]byte(`{"type": "MESSAGE", `)); err == nil {
-		t.Fatalf("expected error for malformed json")
-	}
-}
-
-func TestIsUserMessage(t *testing.T) {
-	tests := []struct {
-		name    string
-		payload string
-		want    bool
-	}{
-		{
-			name:    "human message",
-			payload: `{"type": "MESSAGE", "message": {"argumentText": "hi", "sender": {"type": "HUMAN"}}}`,
-			want:    true,
-		},
-		{
-			name:    "non-message event",
-			payload: `{"type": "ADDED_TO_SPACE", "space": {"name": "spaces/X"}}`,
-			want:    false,
-		},
-		{
-			name:    "message event with no message",
-			payload: `{"type": "MESSAGE"}`,
-			want:    false,
-		},
-		{
-			name:    "bot sender",
-			payload: `{"type": "MESSAGE", "message": {"argumentText": "loop?", "sender": {"type": "BOT"}}}`,
-			want:    false,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := isUserMessage(mustDecode(t, tt.payload)); got != tt.want {
-				t.Fatalf("isUserMessage = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
-func TestMessageFromEvent(t *testing.T) {
-	tests := []struct {
-		name    string
-		payload string
-		wantOK  bool
-		wantMsg chat.Message
-	}{
-		{
-			name: "message with argument text",
-			payload: `{
-				"type": "MESSAGE",
-				"user": {"name": "users/123", "type": "HUMAN"},
-				"space": {"name": "spaces/AAA"},
-				"message": {
-					"name": "spaces/AAA/messages/M1",
-					"argumentText": " hello there ",
-					"text": "@switchboard hello there",
-					"thread": {"name": "spaces/AAA/threads/T1"},
-					"sender": {"name": "users/123", "type": "HUMAN"}
-				}
-			}`,
-			wantOK: true,
-			wantMsg: chat.Message{
-				Conversation: "spaces/AAA:spaces/AAA/threads/T1",
-				Channel:      "spaces/AAA",
-				Caller:       "users/123",
-				Text:         "hello there",
-			},
-		},
-		{
-			name: "falls back to text when argumentText empty",
-			payload: `{
-				"type": "MESSAGE",
-				"user": {"name": "users/9"},
-				"space": {"name": "spaces/B"},
-				"message": {"text": "  plain body  ", "thread": {"name": "spaces/B/threads/T"}}
-			}`,
-			wantOK: true,
-			wantMsg: chat.Message{
-				Conversation: "spaces/B:spaces/B/threads/T",
-				Channel:      "spaces/B",
-				Caller:       "users/9",
-				Text:         "plain body",
-			},
-		},
-		{
-			name: "caller falls back to message sender",
-			payload: `{
-				"type": "MESSAGE",
-				"space": {"name": "spaces/C"},
-				"message": {"argumentText": "hi", "sender": {"name": "users/77", "type": "HUMAN"}}
-			}`,
-			wantOK: true,
-			wantMsg: chat.Message{
-				Conversation: "spaces/C:",
-				Channel:      "spaces/C",
-				Caller:       "users/77",
-				Text:         "hi",
-			},
-		},
-		{
-			name:    "empty text ignored",
-			payload: `{"type": "MESSAGE", "space": {"name": "spaces/E"}, "message": {"argumentText": "   ", "text": ""}}`,
-			wantOK:  false,
-		},
-		{
-			name:    "no space ignored",
-			payload: `{"type": "MESSAGE", "message": {"argumentText": "hi"}}`,
-			wantOK:  false,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			msg, ok := messageFromEvent(mustDecode(t, tt.payload))
-			if ok != tt.wantOK {
-				t.Fatalf("ok = %v, want %v", ok, tt.wantOK)
-			}
-			if tt.wantOK && msg != tt.wantMsg {
-				t.Fatalf("message = %+v, want %+v", msg, tt.wantMsg)
-			}
-		})
-	}
-}
-
-func TestCommandFromEvent(t *testing.T) {
-	tests := []struct {
-		name    string
-		payload string
-		wantOK  bool
-		wantCmd chat.Command
-	}{
-		{
-			name: "slash command with verb and arg",
-			payload: `{
-				"type": "MESSAGE",
-				"user": {"name": "users/5"},
-				"space": {"name": "spaces/AAA"},
-				"message": {
-					"argumentText": "progress status",
-					"slashCommand": {"commandId": "1"},
-					"thread": {"name": "spaces/AAA/threads/T1"}
-				}
-			}`,
-			wantOK: true,
-			wantCmd: chat.Command{
-				Channel: "spaces/AAA",
-				Caller:  "users/5",
-				Name:    "progress",
-				Args:    []string{"status"},
-			},
-		},
-		{
-			name: "slash command verb only",
-			payload: `{
-				"type": "MESSAGE",
-				"space": {"name": "spaces/AAA"},
-				"message": {"argumentText": "PROGRESS", "slashCommand": {"commandId": "1"}}
-			}`,
-			wantOK: true,
-			wantCmd: chat.Command{
-				Channel: "spaces/AAA",
-				Name:    "progress", // lower-cased
-			},
-		},
-		{
-			name: "bare slash command",
-			payload: `{
-				"type": "MESSAGE",
-				"space": {"name": "spaces/AAA"},
-				"message": {"argumentText": "", "slashCommand": {"commandId": "1"}}
-			}`,
-			wantOK: true,
-			wantCmd: chat.Command{
-				Channel: "spaces/AAA",
-			},
-		},
-		{
-			name:    "ordinary message is not a command",
-			payload: `{"type": "MESSAGE", "space": {"name": "spaces/AAA"}, "message": {"argumentText": "progress status"}}`,
-			wantOK:  false,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cmd, ok := commandFromEvent(mustDecode(t, tt.payload))
-			if ok != tt.wantOK {
-				t.Fatalf("ok = %v, want %v", ok, tt.wantOK)
-			}
-			if !tt.wantOK {
-				return
-			}
-			if cmd.Channel != tt.wantCmd.Channel || cmd.Caller != tt.wantCmd.Caller || cmd.Name != tt.wantCmd.Name {
-				t.Fatalf("cmd = %+v, want %+v", cmd, tt.wantCmd)
-			}
-			if strings.Join(cmd.Args, ",") != strings.Join(tt.wantCmd.Args, ",") {
-				t.Fatalf("cmd.Args = %v, want %v", cmd.Args, tt.wantCmd.Args)
-			}
-		})
-	}
-}
-
-func TestConversationKeyRoundTrip(t *testing.T) {
-	tests := []struct {
-		space, thread string
-	}{
-		{"spaces/AAA", "spaces/AAA/threads/T1"},
-		{"spaces/BBB", ""}, // unthreaded space
-	}
-	for _, tt := range tests {
-		key := conversationKey(tt.space, tt.thread)
-		space, thread, ok := splitConversation(key)
-		if !ok {
-			t.Fatalf("splitConversation(%q) not ok", key)
-		}
-		if space != tt.space || thread != tt.thread {
-			t.Fatalf("round-trip %q => (%q, %q), want (%q, %q)", key, space, thread, tt.space, tt.thread)
-		}
-	}
-	if _, _, ok := splitConversation("no-colon"); ok {
-		t.Fatalf("splitConversation of a key with no colon should not be ok")
-	}
-	if _, _, ok := splitConversation(":thread-only"); ok {
-		t.Fatalf("splitConversation with empty space should not be ok")
-	}
-}
-
-func TestChunk(t *testing.T) {
-	if got := chunk("short", 100); len(got) != 1 || got[0] != "short" {
-		t.Fatalf("short string should be one chunk, got %v", got)
-	}
-
-	// Prefers a newline break within the window.
-	body := "line one\nline two\nline three"
-	got := chunk(body, 12)
-	for _, c := range got {
-		if len(c) > 12 {
-			t.Fatalf("chunk %q exceeds limit 12", c)
-		}
-	}
-	if strings.Join(got, "") != body {
-		t.Fatalf("chunks do not reassemble: %q", strings.Join(got, ""))
-	}
-	if got[0] != "line one\n" {
-		t.Fatalf("first chunk should break on newline, got %q", got[0])
-	}
-
-	// Multi-byte runes are never split (each rune is 3 bytes here).
-	multi := strings.Repeat("世", 10) // 30 bytes
-	parts := chunk(multi, 7)         // limit not a multiple of 3
-	if strings.Join(parts, "") != multi {
-		t.Fatalf("multi-byte chunks do not reassemble")
-	}
-	for _, p := range parts {
-		if len(p) > 7 {
-			t.Fatalf("chunk %q exceeds limit 7", p)
-		}
-		if !utf8ValidWhole(p) {
-			t.Fatalf("chunk %q split a multi-byte rune", p)
-		}
-	}
-}
-
-func utf8ValidWhole(s string) bool {
-	for _, r := range s {
-		if r == '�' {
-			return false
-		}
-	}
-	return true
-}
-
 // fakeMessenger records egress calls for the Send/Update/Delete tests.
 type fakeMessenger struct {
-	creates   []createCall
-	patches   []patchCall
-	deletes   []string
-	n         int
+	creates []createCall
+	patches []patchCall
+	deletes []string
+	n       int
+	// createErr fails every create; cardErr fails only the ones carrying a
+	// card, which is how the card-rejection fallback is exercised.
 	createErr error
+	cardErr   error
+	patchErr  error
 	// assignThread, when set, is the thread the fake reports each created
 	// message landed in — simulating Chat assigning a thread in a flat space.
 	assignThread string
 }
 
-type createCall struct{ parent, text, thread string }
-type patchCall struct{ name, text string }
+type createCall struct {
+	parent, text, thread, fallback string
+	card                           *chatv1.GoogleAppsCardV1Card
+}
+
+type patchCall struct {
+	name, text, mask string
+	card             *chatv1.GoogleAppsCardV1Card
+}
+
+func cardOf(msg *chatv1.Message) *chatv1.GoogleAppsCardV1Card {
+	if len(msg.CardsV2) == 0 {
+		return nil
+	}
+	return msg.CardsV2[0].Card
+}
 
 func (f *fakeMessenger) create(_ context.Context, parent string, msg *chatv1.Message) (*chatv1.Message, error) {
+	card := cardOf(msg)
+	if card != nil && f.cardErr != nil {
+		return nil, f.cardErr
+	}
 	if f.createErr != nil {
 		return nil, f.createErr
 	}
@@ -332,7 +74,9 @@ func (f *fakeMessenger) create(_ context.Context, parent string, msg *chatv1.Mes
 	if msg.Thread != nil {
 		thread = msg.Thread.Name
 	}
-	f.creates = append(f.creates, createCall{parent: parent, text: msg.Text, thread: thread})
+	f.creates = append(f.creates, createCall{
+		parent: parent, text: msg.Text, thread: thread, fallback: msg.FallbackText, card: card,
+	})
 	f.n++
 	out := &chatv1.Message{Name: fmt.Sprintf("spaces/AAA/messages/M%d", f.n)}
 	if f.assignThread != "" {
@@ -341,8 +85,15 @@ func (f *fakeMessenger) create(_ context.Context, parent string, msg *chatv1.Mes
 	return out, nil
 }
 
-func (f *fakeMessenger) patch(_ context.Context, name, text string) error {
-	f.patches = append(f.patches, patchCall{name: name, text: text})
+func (f *fakeMessenger) patch(_ context.Context, name string, msg *chatv1.Message, mask string) error {
+	card := cardOf(msg)
+	if card != nil && f.cardErr != nil {
+		return f.cardErr
+	}
+	if f.patchErr != nil {
+		return f.patchErr
+	}
+	f.patches = append(f.patches, patchCall{name: name, text: msg.Text, mask: mask, card: card})
 	return nil
 }
 
@@ -351,8 +102,14 @@ func (f *fakeMessenger) delete(_ context.Context, name string) error {
 	return nil
 }
 
+// newTestAdapter builds an adapter with cards off — the plain-text baseline
+// most egress tests care about. Card behaviour is opted into per test.
 func newTestAdapter(m messenger) *Adapter {
-	return &Adapter{msg: m, logf: func(string, ...any) {}}
+	return &Adapter{msg: m, cards: CardsOff, logf: func(string, ...any) {}}
+}
+
+func apiErr(code int) error {
+	return &googleapi.Error{Code: code, Message: http.StatusText(code)}
 }
 
 func TestSendThreadsAndReturnsFirstRef(t *testing.T) {
@@ -374,6 +131,22 @@ func TestSendThreadsAndReturnsFirstRef(t *testing.T) {
 	}
 	if ref.ID != "spaces/AAA/messages/M1" || ref.Conversation != "spaces/AAA:spaces/AAA/threads/T1" {
 		t.Fatalf("unexpected ref %+v", ref)
+	}
+}
+
+// TestSendRendersChatMarkup checks the always-on baseline translates a model
+// turn's markdown into Chat's dialect rather than posting the delimiters raw.
+func TestSendRendersChatMarkup(t *testing.T) {
+	f := &fakeMessenger{}
+	a := newTestAdapter(f)
+	if _, err := a.Send(context.Background(), chat.Reply{
+		Conversation: "spaces/AAA:t",
+		Text:         "**bold** and [docs](https://example.com)",
+	}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if got := f.creates[0].text; got != "*bold* and <https://example.com|docs>" {
+		t.Fatalf("text = %q", got)
 	}
 }
 
@@ -478,6 +251,128 @@ func TestSendPropagatesCreateError(t *testing.T) {
 	}
 }
 
+// TestSendGatewayCard checks a router-classified reply renders as a card with
+// the plain text kept as the fallback — never both as visible content.
+func TestSendGatewayCard(t *testing.T) {
+	f := &fakeMessenger{}
+	a := newTestAdapter(f)
+	a.cards = CardsStatus
+	if _, err := a.Send(context.Background(), chat.Reply{
+		Conversation: "spaces/AAA:t",
+		Text:         "⏳ Working…",
+		Kind:         chat.KindProgress,
+	}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	c := f.creates[0]
+	if c.card == nil {
+		t.Fatalf("a progress reply should render as a card in status mode")
+	}
+	if c.text != "" {
+		t.Fatalf("a card message must not also carry visible text, got %q", c.text)
+	}
+	if c.fallback != "⏳ Working…" {
+		t.Fatalf("fallback = %q", c.fallback)
+	}
+}
+
+// TestSendAnswerIsTextUntilRichMode: the default renders the gateway's own
+// messages as cards but leaves model output as text.
+func TestSendAnswerCardsOnlyInRichMode(t *testing.T) {
+	const answer = "# Findings\n\nsomething\n\n## More\n\ndetail\n"
+	for _, tt := range []struct {
+		mode     CardMode
+		wantCard bool
+	}{
+		{CardsOff, false},
+		{CardsStatus, false},
+		{CardsRich, true},
+	} {
+		f := &fakeMessenger{}
+		a := newTestAdapter(f)
+		a.cards = tt.mode
+		if _, err := a.Send(context.Background(), chat.Reply{Conversation: "spaces/AAA:t", Text: answer}); err != nil {
+			t.Fatalf("%s: Send: %v", tt.mode, err)
+		}
+		if got := f.creates[0].card != nil; got != tt.wantCard {
+			t.Fatalf("%s: card = %v, want %v", tt.mode, got, tt.wantCard)
+		}
+	}
+}
+
+// TestSendFallsBackWhenChatRejectsACard is the rule that a rich render must
+// never cost a reply.
+func TestSendFallsBackWhenChatRejectsACard(t *testing.T) {
+	f := &fakeMessenger{cardErr: apiErr(http.StatusBadRequest)}
+	a := newTestAdapter(f)
+	a.cards = CardsStatus
+	ref, err := a.Send(context.Background(), chat.Reply{
+		Conversation: "spaces/AAA:t",
+		Text:         "⚠️ That turn didn't go through.",
+		Kind:         chat.KindNotice,
+	})
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if len(f.creates) != 1 || f.creates[0].card != nil {
+		t.Fatalf("expected one text create after the card was rejected, got %+v", f.creates)
+	}
+	if f.creates[0].text == "" || ref.ID == "" {
+		t.Fatalf("the reply must survive as text: %+v", f.creates[0])
+	}
+}
+
+// TestSendDoesNotRetryANonCardFailure: a 403 would fail the text post too, so
+// retrying just doubles the damage.
+func TestSendDoesNotRetryANonCardFailure(t *testing.T) {
+	f := &fakeMessenger{cardErr: apiErr(http.StatusForbidden)}
+	a := newTestAdapter(f)
+	a.cards = CardsStatus
+	_, err := a.Send(context.Background(), chat.Reply{
+		Conversation: "spaces/AAA:t", Text: "nope", Kind: chat.KindNotice,
+	})
+	if err == nil {
+		t.Fatalf("expected the error to propagate")
+	}
+	if !errors.Is(err, chat.ErrDenied) {
+		t.Fatalf("a 403 should classify as chat.ErrDenied, got %v", err)
+	}
+	if len(f.creates) != 0 {
+		t.Fatalf("must not retry as text, got %+v", f.creates)
+	}
+}
+
+func TestClassify(t *testing.T) {
+	tests := []struct {
+		code int
+		want error
+	}{
+		{http.StatusNotFound, chat.ErrNotFound},
+		{http.StatusGone, chat.ErrNotFound},
+		{http.StatusForbidden, chat.ErrDenied},
+		{http.StatusUnauthorized, chat.ErrDenied},
+		{http.StatusTooManyRequests, nil},
+		{http.StatusInternalServerError, nil},
+	}
+	for _, tt := range tests {
+		got := platformErr(apiErr(tt.code))
+		if tt.want == nil {
+			if errors.Is(got, chat.ErrNotFound) || errors.Is(got, chat.ErrDenied) {
+				t.Fatalf("%d should stay unclassified (retryable), got %v", tt.code, got)
+			}
+			continue
+		}
+		if !errors.Is(got, tt.want) {
+			t.Fatalf("%d should classify as %v, got %v", tt.code, tt.want, got)
+		}
+	}
+	// An unclassified error reads exactly like the original.
+	plain := errors.New("boom")
+	if platformErr(plain) != plain {
+		t.Fatalf("an unclassifiable error should pass through unchanged")
+	}
+}
+
 func TestUpdateAndDelete(t *testing.T) {
 	f := &fakeMessenger{}
 	a := newTestAdapter(f)
@@ -500,6 +395,11 @@ func TestUpdateAndDelete(t *testing.T) {
 	if len(f.patches) != 1 || f.patches[0].name != ref.ID || f.patches[0].text != "working" {
 		t.Fatalf("unexpected patch %+v", f.patches)
 	}
+	// The mask has to name every field the patch could be replacing, or a
+	// message that used to carry a card would keep it alongside the new text.
+	if !strings.Contains(f.patches[0].mask, "cardsV2") || !strings.Contains(f.patches[0].mask, "text") {
+		t.Fatalf("update mask %q must cover both shapes", f.patches[0].mask)
+	}
 	if err := a.Delete(context.Background(), ref); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
@@ -508,12 +408,31 @@ func TestUpdateAndDelete(t *testing.T) {
 	}
 }
 
+func TestUpdateToCard(t *testing.T) {
+	f := &fakeMessenger{}
+	a := newTestAdapter(f)
+	a.cards = CardsStatus
+	ref := chat.MessageRef{Conversation: "spaces/AAA:t", ID: "spaces/AAA/messages/M1"}
+	if err := a.Update(context.Background(), ref, chat.Reply{
+		Text: "🔧 Running `bash`", Kind: chat.KindActivity,
+	}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if len(f.patches) != 1 || f.patches[0].card == nil {
+		t.Fatalf("expected a card patch, got %+v", f.patches)
+	}
+	if f.patches[0].text != "" {
+		t.Fatalf("a card patch must not also set visible text, got %q", f.patches[0].text)
+	}
+}
+
 // fakeHandler records the turns and commands dispatch routes to the router.
 type fakeHandler struct {
-	msgs []chat.Message
-	cmds []chat.Command
-	ack  string
-	err  error
+	msgs    []chat.Message
+	cmds    []chat.Command
+	ack     string
+	err     error
+	choices []string
 }
 
 func (h *fakeHandler) Handle(_ context.Context, m chat.Message) error {
@@ -526,21 +445,30 @@ func (h *fakeHandler) HandleCommand(_ context.Context, c chat.Command) (string, 
 	return h.ack, h.err
 }
 
-// pubsubMessage wraps a payload as the Pub/Sub message dispatch consumes. Ack is
-// a no-op in tests; the summary only cares that the payload routes correctly.
+// choiceHandler adds the optional chat.CommandChoices capability, which is what
+// turns an acknowledgment into a card with buttons.
+type choiceHandler struct{ fakeHandler }
+
+func (h *choiceHandler) Choices(name string) []string {
+	if name != "progress" {
+		return nil
+	}
+	return h.choices
+}
+
 func TestDispatchRoutesCommandToHandleCommand(t *testing.T) {
 	f := &fakeMessenger{}
 	h := &fakeHandler{ack: "progress mode set to status"}
 	a := newTestAdapter(f)
 
 	payload := []byte(`{
-		"type": "MESSAGE",
-		"user": {"name": "users/5"},
-		"space": {"name": "spaces/AAA"},
-		"message": {
-			"argumentText": "progress status",
-			"slashCommand": {"commandId": "1"},
-			"thread": {"name": "spaces/AAA/threads/T1"}
+		"chat": {
+			"user": {"name": "users/5"},
+			"space": {"name": "spaces/AAA"},
+			"appCommandPayload": {
+				"appCommandMetadata": {"appCommandId": "1", "appCommandType": "SLASH_COMMAND"},
+				"message": {"argumentText": "progress status", "thread": {"name": "spaces/AAA/threads/T1"}}
+			}
 		}
 	}`)
 	a.dispatch(context.Background(), h, &pubsub.Message{Data: payload})
@@ -555,6 +483,9 @@ func TestDispatchRoutesCommandToHandleCommand(t *testing.T) {
 	if cmd.Name != "progress" || cmd.Channel != "spaces/AAA" || cmd.Caller != "users/5" {
 		t.Fatalf("unexpected command %+v", cmd)
 	}
+	if strings.Join(cmd.Args, ",") != "status" {
+		t.Fatalf("unexpected args %v", cmd.Args)
+	}
 	// The ack posts back into the invoking thread.
 	if len(f.creates) != 1 {
 		t.Fatalf("want 1 ack post, got %d", len(f.creates))
@@ -565,15 +496,68 @@ func TestDispatchRoutesCommandToHandleCommand(t *testing.T) {
 	}
 }
 
+// TestDispatchMapsConfiguredCommandID: Chat identifies a command by the numeric
+// ID configured in the console, so a dedicated /progress command carries its
+// argument alone and the verb comes from the mapping.
+func TestDispatchMapsConfiguredCommandID(t *testing.T) {
+	f := &fakeMessenger{}
+	h := &fakeHandler{ack: "ok"}
+	a := newTestAdapter(f)
+	a.cmds = map[int64]string{2: "progress"}
+
+	payload := []byte(`{
+		"chat": {
+			"space": {"name": "spaces/AAA"},
+			"appCommandPayload": {
+				"appCommandMetadata": {"appCommandId": "2", "appCommandType": "SLASH_COMMAND"},
+				"message": {"argumentText": "stream"}
+			}
+		}
+	}`)
+	a.dispatch(context.Background(), h, &pubsub.Message{Data: payload})
+
+	if len(h.cmds) != 1 {
+		t.Fatalf("want 1 command, got %d", len(h.cmds))
+	}
+	if h.cmds[0].Name != "progress" || strings.Join(h.cmds[0].Args, ",") != "stream" {
+		t.Fatalf("unexpected command %+v", h.cmds[0])
+	}
+}
+
+// TestDispatchQuickCommandCarriesNoText: a quick command has no message at all,
+// so the mapping is the only thing that can name it.
+func TestDispatchQuickCommand(t *testing.T) {
+	f := &fakeMessenger{}
+	h := &fakeHandler{ack: "ok"}
+	a := newTestAdapter(f)
+	a.cmds = map[int64]string{9: "progress"}
+
+	payload := []byte(`{
+		"chat": {
+			"space": {"name": "spaces/AAA"},
+			"appCommandPayload": {"appCommandMetadata": {"appCommandId": 9, "appCommandType": "QUICK_COMMAND"}}
+		}
+	}`)
+	a.dispatch(context.Background(), h, &pubsub.Message{Data: payload})
+
+	if len(h.cmds) != 1 || h.cmds[0].Name != "progress" || len(h.cmds[0].Args) != 0 {
+		t.Fatalf("unexpected commands %+v", h.cmds)
+	}
+}
+
 func TestDispatchEmptyAckPostsNothing(t *testing.T) {
 	f := &fakeMessenger{}
 	h := &fakeHandler{ack: ""}
 	a := newTestAdapter(f)
 
 	payload := []byte(`{
-		"type": "MESSAGE",
-		"space": {"name": "spaces/AAA"},
-		"message": {"argumentText": "progress", "slashCommand": {"commandId": "1"}}
+		"chat": {
+			"space": {"name": "spaces/AAA"},
+			"appCommandPayload": {
+				"appCommandMetadata": {"appCommandId": "1"},
+				"message": {"argumentText": "progress"}
+			}
+		}
 	}`)
 	a.dispatch(context.Background(), h, &pubsub.Message{Data: payload})
 
@@ -591,17 +575,223 @@ func TestDispatchRoutesMessageToHandle(t *testing.T) {
 	a := newTestAdapter(f)
 
 	payload := []byte(`{
-		"type": "MESSAGE",
-		"user": {"name": "users/7"},
-		"space": {"name": "spaces/AAA"},
-		"message": {"argumentText": "hello there", "thread": {"name": "spaces/AAA/threads/T1"}}
+		"chat": {
+			"user": {"name": "users/7"},
+			"space": {"name": "spaces/AAA"},
+			"messagePayload": {
+				"message": {"argumentText": "hello there", "thread": {"name": "spaces/AAA/threads/T1"}}
+			}
+		}
 	}`)
 	a.dispatch(context.Background(), h, &pubsub.Message{Data: payload})
 
 	if len(h.msgs) != 1 || len(h.cmds) != 0 {
 		t.Fatalf("want 1 turn and no command, got msgs=%+v cmds=%+v", h.msgs, h.cmds)
 	}
-	if h.msgs[0].Text != "hello there" || h.msgs[0].Caller != "users/7" {
-		t.Fatalf("unexpected turn %+v", h.msgs[0])
+	got := h.msgs[0]
+	if got.Text != "hello there" || got.Caller != "users/7" || got.Channel != "spaces/AAA" ||
+		got.Conversation != "spaces/AAA:spaces/AAA/threads/T1" {
+		t.Fatalf("unexpected turn %+v", got)
+	}
+}
+
+// TestDispatchAckOffersChoicesAsButtons is the point of the CommandChoices
+// capability: the values come from the handler, so this package hard-codes no
+// router vocabulary.
+func TestDispatchAckOffersChoicesAsButtons(t *testing.T) {
+	f := &fakeMessenger{}
+	h := &choiceHandler{}
+	h.ack = "Progress mode for this channel is *off*."
+	h.choices = []string{"off", "indicator", "status", "stream"}
+	a := newTestAdapter(f)
+	a.cards = CardsStatus
+
+	payload := []byte(`{
+		"chat": {
+			"space": {"name": "spaces/AAA"},
+			"appCommandPayload": {
+				"appCommandMetadata": {"appCommandId": "1"},
+				"message": {"argumentText": "progress"}
+			}
+		}
+	}`)
+	a.dispatch(context.Background(), h, &pubsub.Message{Data: payload})
+
+	if len(f.creates) != 1 || f.creates[0].card == nil {
+		t.Fatalf("expected an ack card, got %+v", f.creates)
+	}
+	var buttons int
+	for _, w := range f.creates[0].card.Sections[0].Widgets {
+		if w.ButtonList != nil {
+			buttons = len(w.ButtonList.Buttons)
+		}
+	}
+	if buttons != 4 {
+		t.Fatalf("want a button per choice, got %d", buttons)
+	}
+}
+
+// TestDispatchButtonClickRunsTheCommandAndPatchesTheCard covers the whole
+// interactive round trip a Pub/Sub add-on can do: no dialog, no synchronous
+// response — the click runs the command and the hosting card is rewritten.
+func TestDispatchButtonClick(t *testing.T) {
+	f := &fakeMessenger{}
+	h := &choiceHandler{}
+	h.ack = "Progress mode for this channel set to *stream*."
+	h.choices = []string{"off", "stream"}
+	a := newTestAdapter(f)
+	a.cards = CardsStatus
+
+	payload := []byte(`{
+		"chat": {
+			"user": {"name": "users/9"},
+			"space": {"name": "spaces/AAA"},
+			"buttonClickedPayload": {
+				"message": {"name": "spaces/AAA/messages/M9", "thread": {"name": "spaces/AAA/threads/T1"}}
+			}
+		},
+		"commonEventObject": {
+			"parameters": {"switchboard_command": "progress", "switchboard_arg": "stream"}
+		}
+	}`)
+	a.dispatch(context.Background(), h, &pubsub.Message{Data: payload})
+
+	if len(h.cmds) != 1 {
+		t.Fatalf("want 1 command, got %d", len(h.cmds))
+	}
+	cmd := h.cmds[0]
+	if cmd.Name != "progress" || strings.Join(cmd.Args, ",") != "stream" || cmd.Caller != "users/9" {
+		t.Fatalf("a click should run exactly what typing it would: %+v", cmd)
+	}
+	if len(f.creates) != 0 {
+		t.Fatalf("a click answers by patching, not by posting again: %+v", f.creates)
+	}
+	if len(f.patches) != 1 || f.patches[0].name != "spaces/AAA/messages/M9" || f.patches[0].card == nil {
+		t.Fatalf("unexpected patch %+v", f.patches)
+	}
+}
+
+// TestDispatchButtonClickIsIdempotent: Pub/Sub may redeliver, so the same click
+// twice must leave the same card rather than compounding.
+func TestDispatchButtonClickIsIdempotent(t *testing.T) {
+	f := &fakeMessenger{}
+	h := &choiceHandler{}
+	h.ack = "Progress mode for this channel set to *stream*."
+	h.choices = []string{"off", "stream"}
+	a := newTestAdapter(f)
+	a.cards = CardsStatus
+
+	payload := []byte(`{
+		"chat": {
+			"space": {"name": "spaces/AAA"},
+			"buttonClickedPayload": {"message": {"name": "spaces/AAA/messages/M9"}}
+		},
+		"commonEventObject": {"parameters": {"switchboard_command": "progress", "switchboard_arg": "stream"}}
+	}`)
+	a.dispatch(context.Background(), h, &pubsub.Message{Data: payload})
+	a.dispatch(context.Background(), h, &pubsub.Message{Data: payload})
+
+	if len(f.patches) != 2 {
+		t.Fatalf("want 2 patches, got %d", len(f.patches))
+	}
+	if f.patches[0].name != f.patches[1].name || f.patches[0].fallbackText() != f.patches[1].fallbackText() {
+		t.Fatalf("a redelivered click should write the same card: %+v", f.patches)
+	}
+}
+
+func (p patchCall) fallbackText() string {
+	if p.card == nil || len(p.card.Sections) == 0 || len(p.card.Sections[0].Widgets) == 0 {
+		return p.text
+	}
+	w := p.card.Sections[0].Widgets[0]
+	if w.DecoratedText != nil {
+		return w.DecoratedText.Text
+	}
+	return p.text
+}
+
+// TestDispatchButtonClickWithoutAHostMessageStillAnswers: a click we cannot
+// locate the card for should not silently do nothing.
+func TestDispatchButtonClickWithoutHostMessage(t *testing.T) {
+	f := &fakeMessenger{}
+	h := &fakeHandler{ack: "done"}
+	a := newTestAdapter(f)
+
+	payload := []byte(`{
+		"type": "CARD_CLICKED",
+		"space": {"name": "spaces/AAA"},
+		"common": {"parameters": {"switchboard_command": "progress", "switchboard_arg": "off"}}
+	}`)
+	a.dispatch(context.Background(), h, &pubsub.Message{Data: payload})
+
+	if len(f.patches) != 0 {
+		t.Fatalf("nothing to patch, got %+v", f.patches)
+	}
+	if len(f.creates) != 1 || f.creates[0].text != "done" {
+		t.Fatalf("expected a fresh reply in the thread, got %+v", f.creates)
+	}
+}
+
+func TestDispatchWelcomesANewSpace(t *testing.T) {
+	f := &fakeMessenger{}
+	h := &choiceHandler{}
+	h.choices = []string{"off", "stream"}
+	a := newTestAdapter(f)
+	a.cards = CardsStatus
+
+	a.dispatch(context.Background(), h, &pubsub.Message{
+		Data: []byte(`{"chat": {"addedToSpacePayload": {"space": {"name": "spaces/AAA"}}}}`),
+	})
+
+	if len(f.creates) != 1 || f.creates[0].card == nil {
+		t.Fatalf("expected a welcome card, got %+v", f.creates)
+	}
+	if f.creates[0].card.Header == nil {
+		t.Fatalf("the welcome should introduce the app")
+	}
+	if len(h.msgs) != 0 || len(h.cmds) != 0 {
+		t.Fatalf("a welcome is not a turn: msgs=%+v cmds=%+v", h.msgs, h.cmds)
+	}
+}
+
+// TestDispatchDoesNotDoubleAnswerAnInteractiveAdd: when the app is added by an
+// @mention, Chat sends the mention as its own event too.
+func TestDispatchDoesNotDoubleAnswerAnInteractiveAdd(t *testing.T) {
+	f := &fakeMessenger{}
+	h := &fakeHandler{}
+	a := newTestAdapter(f)
+
+	a.dispatch(context.Background(), h, &pubsub.Message{
+		Data: []byte(`{"chat": {"addedToSpacePayload": {"space": {"name": "spaces/AAA"}, "interactionAdd": true}}}`),
+	})
+
+	if len(f.creates) != 0 {
+		t.Fatalf("the mention's own event answers this one, got %+v", f.creates)
+	}
+}
+
+func TestDispatchIgnoresUnactionableEvents(t *testing.T) {
+	for _, payload := range []string{
+		`{"chat": {"space": {"name": "spaces/A"}, "removedFromSpacePayload": {}}}`,
+		`{"chat": {"space": {"name": "spaces/A"}, "messagePayload": {"message": {"sender": {"type": "BOT"}, "text": "mine"}}}}`,
+		`not json at all`,
+	} {
+		f := &fakeMessenger{}
+		h := &fakeHandler{}
+		a := newTestAdapter(f)
+		a.dispatch(context.Background(), h, &pubsub.Message{Data: []byte(payload)})
+		if len(h.msgs) != 0 || len(h.cmds) != 0 || len(f.creates) != 0 {
+			t.Fatalf("payload %q should be ignored", payload)
+		}
+	}
+}
+
+func TestFitsOneMessage(t *testing.T) {
+	a := newTestAdapter(&fakeMessenger{})
+	if !a.FitsOneMessage("short") {
+		t.Fatalf("a short text fits")
+	}
+	if a.FitsOneMessage(strings.Repeat("x", chatTextLimit+1)) {
+		t.Fatalf("an over-long text does not fit")
 	}
 }

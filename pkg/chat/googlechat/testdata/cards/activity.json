@@ -1,0 +1,19 @@
+{
+  "sections": [
+    {
+      "widgets": [
+        {
+          "decoratedText": {
+            "startIcon": {
+              "materialIcon": {
+                "name": "settings"
+              }
+            },
+            "text": "Running `bash`",
+            "wrapText": true
+          }
+        }
+      ]
+    }
+  ]
+}

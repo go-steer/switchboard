@@ -106,3 +106,23 @@ func TestParseProgressMode(t *testing.T) {
 		t.Error("parseProgressMode accepted an unknown mode")
 	}
 }
+
+func TestParseAppCommands(t *testing.T) {
+	got, err := parseAppCommands(" 1=progress , 2=help ")
+	if err != nil {
+		t.Fatalf("parseAppCommands: %v", err)
+	}
+	if len(got) != 2 || got[1] != "progress" || got[2] != "help" {
+		t.Fatalf("unexpected mapping %v", got)
+	}
+	if got, err := parseAppCommands("  "); err != nil || got != nil {
+		t.Fatalf("an empty mapping should be nil, got (%v, %v)", got, err)
+	}
+	// A malformed entry has to fail loudly: silently dropping it would leave a
+	// configured command routing to whatever the message text happens to say.
+	for _, bad := range []string{"progress", "1=", "=progress", "x=progress", "1=progress,oops"} {
+		if _, err := parseAppCommands(bad); err == nil {
+			t.Errorf("parseAppCommands(%q) accepted a malformed entry", bad)
+		}
+	}
+}

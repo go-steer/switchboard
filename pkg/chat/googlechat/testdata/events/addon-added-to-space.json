@@ -1,0 +1,23 @@
+{
+  "chat": {
+    "user": {
+      "name": "users/106508980999999999999",
+      "type": "HUMAN"
+    },
+    "space": {
+      "name": "spaces/AAQAXbGkY1s",
+      "spaceType": "SPACE"
+    },
+    "addedToSpacePayload": {
+      "space": {
+        "name": "spaces/AAQAXbGkY1s",
+        "displayName": "deploy-review",
+        "spaceType": "SPACE"
+      }
+    }
+  },
+  "commonEventObject": {
+    "hostApp": "CHAT",
+    "platform": "WEB"
+  }
+}

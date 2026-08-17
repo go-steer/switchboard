@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -99,6 +100,15 @@ func runServe(args []string) error {
 		"GCP project hosting the Google Chat Pub/Sub subscription (--platform googlechat)")
 	googleSub := fs.String("google-subscription", envOr("SWITCHBOARD_GOOGLE_SUBSCRIPTION", ""),
 		"Pub/Sub subscription carrying Google Chat events (--platform googlechat)")
+	googleCards := fs.String("googlechat-cards", envOr("SWITCHBOARD_GOOGLECHAT_CARDS", "status"),
+		"Google Chat card rendering: \"status\" (gateway progress/notice/ack cards), \"rich\" "+
+			"(also lay agent replies out as cards), or \"off\"; text is always sent as the fallback")
+	googleLogEvents := fs.Bool("googlechat-log-events", false,
+		"log every inbound Google Chat payload verbatim, for capturing decoder fixtures; "+
+			"the payload includes message text and sender identity, so leave this off in production")
+	googleCommands := fs.String("googlechat-commands", envOr("SWITCHBOARD_GOOGLECHAT_COMMANDS", ""),
+		"comma-separated Chat app-command ID to gateway verb mappings (e.g. \"1=progress,2=help\"), "+
+			"matching the command IDs configured in the Chat API console")
 	metricsAddr := fs.String("metrics-addr", envOr("SWITCHBOARD_METRICS_ADDR", ""),
 		"Prometheus /metrics + /healthz listener address (host:port); empty = disabled")
 	ingressAddr := fs.String("ingress-addr", envOr("SWITCHBOARD_INGRESS_ADDR", ""),
@@ -128,6 +138,17 @@ func runServe(args []string) error {
 	}
 
 	progress, err := parseProgressMode(*progressMode)
+	if err != nil {
+		return err
+	}
+
+	// Both Google Chat knobs are validated here rather than inside the adapter
+	// so a typo fails at startup instead of after Pub/Sub has been dialed.
+	cardMode, ok := googlechat.ParseCardMode(*googleCards)
+	if !ok {
+		return fmt.Errorf("invalid --googlechat-cards %q (want \"off\", \"status\" or \"rich\")", *googleCards)
+	}
+	appCommands, err := parseAppCommands(*googleCommands)
 	if err != nil {
 		return err
 	}
@@ -169,6 +190,9 @@ func runServe(args []string) error {
 		adapter, err = googlechat.New(googlechat.Config{
 			ProjectID:      *googleProject,
 			SubscriptionID: *googleSub,
+			Cards:          cardMode,
+			Commands:       appCommands,
+			LogEvents:      *googleLogEvents,
 			Logf:           logf,
 		})
 		if err != nil {
@@ -290,6 +314,31 @@ func parseProgressMode(s string) (ProgressMode, error) {
 	default:
 		return "", fmt.Errorf("invalid --progress-mode %q (want \"indicator\", \"status\", \"stream\", or \"off\")", s)
 	}
+}
+
+// parseAppCommands parses the --googlechat-commands mapping. Chat identifies an
+// app command by the numeric ID configured in the API console and never by its
+// name, so the operator has to tell switchboard which ID means which verb.
+func parseAppCommands(s string) (map[int64]string, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil, nil
+	}
+	out := map[int64]string{}
+	for _, pair := range strings.Split(s, ",") {
+		pair = strings.TrimSpace(pair)
+		if pair == "" {
+			continue
+		}
+		key, verb, found := strings.Cut(pair, "=")
+		id, err := strconv.ParseInt(strings.TrimSpace(key), 10, 64)
+		verb = strings.TrimSpace(verb)
+		if !found || err != nil || verb == "" {
+			return nil, fmt.Errorf("invalid --googlechat-commands entry %q (want \"<id>=<verb>\")", pair)
+		}
+		out[id] = verb
+	}
+	return out, nil
 }
 
 func envOr(key, def string) string {

@@ -1,0 +1,19 @@
+{
+  "sections": [
+    {
+      "widgets": [
+        {
+          "decoratedText": {
+            "startIcon": {
+              "materialIcon": {
+                "name": "hourglass_top"
+              }
+            },
+            "text": "Working…",
+            "wrapText": true
+          }
+        }
+      ]
+    }
+  ]
+}

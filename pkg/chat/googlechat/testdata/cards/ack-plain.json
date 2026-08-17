@@ -1,0 +1,19 @@
+{
+  "sections": [
+    {
+      "widgets": [
+        {
+          "decoratedText": {
+            "startIcon": {
+              "materialIcon": {
+                "name": "tune"
+              }
+            },
+            "text": "Progress mode set to \u003ci\u003estream\u003c/i\u003e.",
+            "wrapText": true
+          }
+        }
+      ]
+    }
+  ]
+}

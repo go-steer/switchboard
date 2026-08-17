@@ -145,6 +145,58 @@ Correlating an outbound post with a later inbound reply — the async
 human-in-the-loop approval round trip — is a larger design and is not part of
 this.
 
+### 3.2 Reply kinds and adapter capabilities
+
+The router classifies each thing it sends with a `Reply.Kind` — an agent turn,
+a progress placeholder, a tool-activity notice, an error notice, a command
+acknowledgment. The kind is advisory: an adapter that ignores it posts the same
+text it always did, which is exactly what the Slack adapter does. An adapter that
+honors it can render the gateway's own chatter in the platform's idiom without
+switchboard growing per-platform branches in the router.
+
+Two optional capabilities work the same way — an adapter type-asserts for them
+and degrades if they are absent:
+
+- `chat.TextFitter` — does this text fit one message on this platform?
+- `chat.CommandChoices` — what values does this gateway setting accept? This is
+  what lets an adapter offer `progress` as buttons without hard-coding the
+  router's vocabulary; the router is the single source of truth for the list.
+
+### 3.3 Google Chat: dialects, Pub/Sub, and cards
+
+Google is migrating Chat apps from the Chat-API **interaction events** framework
+to **Workspace add-ons that extend Chat**. The two deliver structurally different
+events — a flat object with a `type` discriminator versus a `chat` wrapper with
+one of `messagePayload` / `appCommandPayload` / `buttonClickedPayload` /
+`addedToSpacePayload`. Converting an app in the console is **irreversible** and
+applies to all users at once, so the adapter detects the dialect per event and
+normalizes both into one internal `inbound`. The console change and a switchboard
+deploy therefore need no coordination in either direction.
+
+Pub/Sub is a supported add-on architecture, which is what preserves the
+no-public-ingress, distroless posture. Two costs come with it:
+
+- **No dialogs.** A dialog needs a synchronous HTTP response to the interaction;
+  a pulled event has no response channel. Interactivity is limited to buttons
+  whose effect is a message patch.
+- **Whole-message patches.** Updating a card means `messages.patch` on the
+  hosting message with a field mask covering both `text` and `cardsV2`, so a
+  message cannot end up carrying a stale card beside new text.
+
+Delivery may be retried, so click handling is idempotent: a click runs the
+gateway command and rewrites the hosting card to the same end state.
+
+Add-ons never report an **invoked function name** back to the app, so a button's
+identity travels in `action.parameters` — which the legacy dialect also carries,
+so one encoding serves both.
+
+Rendering is `--googlechat-cards`-gated (`off` / `status` / `rich`, default
+`status`) rather than a boolean, because the two card families carry different
+risk: gateway cards are short and authored here, while an answer card lays out
+arbitrary model output. Text is always sent as the message fallback, and a card
+Chat rejects with a 400 falls back to posting the text — a rich render never
+costs a reply.
+
 ### Conversation ↔ session mapping
 
 The mapping key is the platform's stable thread identifier. Same key across turns
@@ -162,7 +214,8 @@ same file-backed pattern as W6's `PeerRegistry`.
 2. **Interactive hardening** — long-running turns, backpressure, thread-scoped
    error surfacing, reconnect on SSE drop.
 3. **Google Chat** — Pub/Sub ingress adapter behind the same `Adapter`
-   interface; no router changes.
+   interface, speaking both the Chat-API interaction-events dialect and the
+   Workspace add-on dialect, with `cardsV2` rendering. See §3.3.
 
 ## 5. Non-goals
 
