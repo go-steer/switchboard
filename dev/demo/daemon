@@ -15,10 +15,10 @@
 
 # Stand up a throwaway core-agent daemon that switchboard can talk to:
 # bearer-table auth with switchboard registered as a proxy identity, the
-# echo provider by default, a real model on request. This is the daemon
-# side of the live demo in docs/googlechat-setup.md; the config it writes
-# is the same shape cmd/switchboard/integration_test.go stands up, so the
-# integration suite is what keeps it honest.
+# echo provider by default, a real model on request. Documented in
+# docs/daemon-setup.md, which both platform runbooks point at; the config
+# it writes is the same shape cmd/switchboard/integration_test.go stands
+# up, so the integration suite is what keeps it honest.
 #
 # For demos and local testing only. It writes a bearer token to disk and
 # prints it to the terminal, runs the agent with permissions.mode=yolo,

@@ -51,6 +51,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   function name back, so the mapping is how a dedicated `/progress` command is
   recognized. With no mapping the verb is still read from the command's argument
   text, so a single `/switchboard progress status` command keeps working.
+- `docs/slack-setup.md`: the Slack runbook that never existed — app creation and
+  Socket Mode, the scope each API call actually needs (derived from the adapter,
+  not from memory), what the adapter does and does not engage on (`app_mention`
+  only: a plain thread reply or an unmentioned DM is ignored), a demo script, and
+  a troubleshooting table keyed by symptom. Slack was the first platform
+  supported and the only one whose setup lived nowhere but the README's quick
+  start.
+- `docs/daemon-setup.md`: the core-agent daemon behind `--daemon-url`, extracted
+  from the Chat runbook so both platforms share one copy. Adds the piece neither
+  runbook had: running Slack and Google Chat **side by side against one daemon**
+  — two processes since `--platform` takes one value, one registered identity
+  since both now assert email, and separate sessions per platform thread.
 - `docs/googlechat-setup.md`: Chat app + Pub/Sub setup, a demo script, and the
   two testing layers that do not need a live app — golden card JSON in
   `testdata/cards` (pasteable into Google's Card Builder to see a real render)

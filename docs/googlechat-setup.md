@@ -213,77 +213,28 @@ Two different credentials are in play, and they are easy to conflate:
 | Chat ↔ switchboard | GCP service account (ADC) | [Credentials](#credentials-app-auth) above |
 | switchboard → core-agent | static bearer token | `$SWITCHBOARD_DAEMON_TOKEN` (rename with `--token-env`) |
 
-The daemon token is **mandatory** — switchboard refuses to start without it
-(`cmd/switchboard/main.go`), and `daemon.New` rejects an empty one. It rides as
-`Authorization: Bearer …` on all four verbs. Never pass it as a flag value.
-
-`--daemon-url` needs a daemon behind it and switchboard ships none. Even the
-echo provider is a *core-agent* flag, so a built core-agent binary is a
-prerequisite either way:
+The second hop is identical on every platform and is documented once, in
+**[daemon-setup.md](daemon-setup.md)**: building core-agent, the three config
+settings that have to line up (`proxy_identities` is the one that fails
+quietly), `dev/demo/daemon`, and echo versus a real model. The short version:
 
 ```sh
-go build -o /tmp/core-agent ./cmd/core-agent   # in a core-agent checkout
+go build -o /tmp/core-agent ./cmd/core-agent      # in a core-agent checkout
+dev/demo/daemon --bin /tmp/core-agent --port 7777 --caller you@example.com
 ```
 
-Three things have to line up in the daemon's `.agents/config.json` before a
-turn can flow:
+Two Chat-specific notes on top of that page:
 
-- `attach.multi_session.enabled` and a `listen` address matching `--daemon-url`.
-- `auth.kind = "bearer_table"` with a table file holding switchboard's identity
-  and the token it presents.
-- **`proxy_identities` listing that identity.** Without it the token still
-  authenticates, `X-Asserted-Caller` is ignored, and every turn is attributed to
-  switchboard rather than the human who sent it. This is the one that fails
-  quietly.
-
-`dev/demo/daemon` writes all of that and runs the binary:
-
-```sh
-dev/demo/daemon --bin /tmp/core-agent --port 7777
-```
-
-It prints the `SWITCHBOARD_DAEMON_TOKEN` to export, and keeps its config,
-bearer table, and session db in `./.demo-daemon` (git-ignored) so restarts do
-not rotate the token. Both files are rewritten on every run — change them with
-flags, not by editing. Demo-only: it puts a token on disk, prints it, and runs
-with `permissions.mode=yolo`. The config it emits is the same shape
-`cmd/switchboard/integration_test.go` stands up, which is what keeps it from
-rotting:
-
-```sh
-CORE_AGENT_BIN=/tmp/core-agent go test -tags=integration ./cmd/switchboard \
-  -run Integration -v
-```
-
-The default model is `echo`, which needs no credentials and covers every demo
-step that exercises the *gateway* — commands, buttons, progress modes, the
-welcome card. Steps 2 and 7 turn on what the daemon actually says (markdown, a
-structured answer), so they want a real one:
-
-```sh
-dev/demo/daemon --bin /tmp/core-agent --model claude-opus-5 --provider anthropic
-```
-
-The daemon inherits the shell's environment, so export the provider's API key
-in the same terminal. Anything after `--` is appended to core-agent's command
-line verbatim.
-
-**Every human who talks to the app has to be in the bearer table.** With
-`allow_anonymous: false`, an identity the table does not know is rejected —
-confirmed against a live daemon, which answers `POST /sessions: asserted-caller
-header rejected: identity is not provisioned`, surfaced into the thread as an
-error card. Register the caller and restart:
-
-```sh
-dev/demo/daemon --bin /tmp/core-agent --caller you@example.com
-```
-
-Which identity to register depends on `--caller-id` (default `email`, matching
-Slack): the sender's email address from the event payload, or with
-`--caller-id id` the raw Chat resource name, `users/1234567890`. The resource
-name is the fallback when an event carries no email — and it is a number you
-cannot know before the first message, so the first rejection is where you learn
-it.
+- **Register the sender's identity before the demo.** With
+  `allow_anonymous: false` an unknown caller is rejected, and Chat surfaces it
+  as an error *card* in the thread: `POST /sessions: asserted-caller header
+  rejected: identity is not provisioned`. With the default `--caller-id email`
+  that identity is the address on the event payload; with `--caller-id id` it is
+  the raw `users/1234567890`, which you cannot know before the first message —
+  the first rejection is where you learn it.
+- **Steps 2 and 7 of the demo script need a real model.** Echo covers commands,
+  buttons, progress modes and the welcome card, but not markdown or a structured
+  answer, because those are things the daemon has to actually write.
 
 ### Run it
 
