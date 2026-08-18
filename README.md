@@ -48,6 +48,12 @@ switchboard serve --daemon-url http://127.0.0.1:7777
 switchboard version
 ```
 
+Slack app creation, the scopes each API call needs, and a demo script:
+[docs/slack-setup.md](docs/slack-setup.md). The daemon that has to be behind
+`--daemon-url` — switchboard ships no agent — is
+[docs/daemon-setup.md](docs/daemon-setup.md), which also covers running Slack
+and Google Chat side by side against one daemon.
+
 ### Google Chat
 
 Select the platform with `--platform googlechat`. Ingress is **Pub/Sub** (the
@@ -364,6 +370,9 @@ Google Chat Workload Identity) and image pinning.
 | `internal/version` | build-identity stamping |
 | `deploy/` | kustomize base + Slack / Google Chat overlays |
 | `docs/DESIGN.md` | switchboard design |
+| `docs/daemon-setup.md` | the core-agent daemon behind it, and running both platforms at once |
+| `docs/slack-setup.md` | Slack app setup, scopes, demo script |
+| `docs/googlechat-setup.md` | Chat app + Pub/Sub setup, card/event testing, demo script |
 
 ## License
 
