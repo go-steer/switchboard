@@ -226,6 +226,12 @@ type sessionEntry struct {
 	inFlight atomic.Bool
 	failed   atomic.Bool
 
+	// described is the claim on logging what the daemon said it is and can do.
+	// The capabilities frame arrives on every stream open, so a session that
+	// reconnects for a week would otherwise repeat the same one or two lines
+	// each time; the interesting moment is the first one.
+	described atomic.Bool
+
 	// pmu guards progressMsg, the session's current transient progress message
 	// (the indicator placeholder, or the status message being edited with tool
 	// steps). Handle posts it before waking; relay edits it on tool activity
@@ -383,6 +389,10 @@ func (e *sessionEntry) turnInFlight() bool { return e.inFlight.Load() }
 // the thread the turn failed. A turn-error and a lost stream can both be true
 // of the same turn, and two notices for one failure read as two failures.
 func (e *sessionEntry) claimFailureNotice() bool { return e.failed.CompareAndSwap(false, true) }
+
+// claimCapabilitiesLog reports whether this is the first capabilities frame
+// seen for the session, and so the one worth logging.
+func (e *sessionEntry) claimCapabilitiesLog() bool { return e.described.CompareAndSwap(false, true) }
 
 // takeProgress atomically reads and clears the entry's progress message along
 // with the rest of the turn's ticker state, and stops the ticker: the message
@@ -731,6 +741,53 @@ func (r *Router) failTurn(ctx context.Context, e *sessionEntry, conv, kind, noti
 	}
 }
 
+// reliedOnEvents are the daemon events switchboard has a consumer for. A
+// daemon that does not advertise one of these is not an error — switchboard
+// still works, and older daemons exist — but each absence silently costs a
+// feature, so the operator is told which.
+//
+// daemon.EventAgent is deliberately absent: the daemon does not list its legacy
+// event name in the capabilities frame at all, and warning about it would fire
+// against every conformant daemon there is. The surface it carries is checked
+// under the names the frame does use — a daemon advertising no stream-chunk
+// relays no answers, which is the loudest absence of the set and the one it
+// would be strangest to leave out.
+var reliedOnEvents = []string{
+	daemon.EventStreamChunk,
+	daemon.EventToolCall,
+	daemon.EventStatusUpdate,
+	daemon.EventUsage,
+	daemon.EventTurnComplete,
+	daemon.EventTurnError,
+}
+
+// noteCapabilities records what the daemon said about itself when it opened the
+// stream: once per session, since every reconnect repeats the frame.
+//
+// This is the only place the pairing is visible. Switchboard's error notices,
+// usage footers and progress boundaries each depend on an event the daemon may
+// or may not send, and against a daemon that does not send one the symptom is
+// absence — a thread that stays quiet, a reply with no footer, a clock that
+// runs to its backstop. None of those looks like a version mismatch from the
+// outside, so the mismatch is stated here instead of left to be deduced.
+func (r *Router) noteCapabilities(conv string, e *sessionEntry, c daemon.Capabilities) {
+	if !e.claimCapabilitiesLog() {
+		return
+	}
+	server, version := c.Server, c.ProtocolVersion
+	if server == "" {
+		server = "unidentified daemon"
+	}
+	if version == "" {
+		version = "an unstated protocol version"
+	}
+	r.logf("relay %s: connected to %s speaking %s", conv, server, version)
+	if missing := c.Missing(reliedOnEvents...); len(missing) > 0 {
+		r.logf("relay %s: daemon does not advertise %s; the features reading those events "+
+			"will stay silent", conv, strings.Join(missing, ", "))
+	}
+}
+
 // startProgress posts the initial progress message for a turn (indicator and
 // status modes), records it on the entry so relay can edit or clear it, and
 // starts the ticker that keeps its clock running. A no-op in off and stream
@@ -925,6 +982,25 @@ func (r *Router) relay(ctx context.Context, conv string, e *sessionEntry, owner 
 	lastAlive := time.Now()
 	for ctx.Err() == nil {
 		progressed := false
+		// Whether this connection has seen the daemon report a turn running.
+		// It gates acting on "idle": the daemon opens every stream with a status
+		// snapshot, and on a session between turns that snapshot says idle —
+		// which must not retire a placeholder for a turn that was posted a
+		// moment ago and has not reached the daemon yet. It is also reset by
+		// each turn boundary, so a status-update the daemon sends for some other
+		// reason while idle (a model swap, a perm-mode change) cannot be read as
+		// the end of a turn that has since started.
+		//
+		// Per connection rather than per entry, and deliberately the
+		// conservative direction: a turn that both starts and ends inside a
+		// stream outage comes back to an idle snapshot this flag discards, so
+		// the entry stays in flight until something else ends it. That is
+		// exactly what a turn-complete lost in the same gap already does today —
+		// not fixed here, not made worse. Erring the other way is worse: it
+		// retires a live turn's placeholder and disarms the stream-lost notice
+		// meant to cover the outage. Telling the two apart needs a per-turn
+		// identity, which is #42.
+		streaming := false
 		err := r.client.Subscribe(ctx, e.sess, owner, e.seq.Load(), func(ev daemon.Event) error {
 			lastAlive = time.Now()
 			// The two lifecycle events carrying a turn's accounting arrive
@@ -960,6 +1036,9 @@ func (r *Router) relay(ctx context.Context, conv string, e *sessionEntry, owner 
 				// marked in flight forever, and the next outage announced a
 				// lost turn that had finished hours earlier.
 				e.endTurn()
+				// This turn is accounted for, so the status-update trailing it
+				// is not a second boundary. See the turn-error case.
+				streaming = false
 				return nil
 			case daemon.EventTurnError:
 				te, ok := daemon.TurnFailed(ev.Data)
@@ -973,7 +1052,76 @@ func (r *Router) relay(ctx context.Context, conv string, e *sessionEntry, owner 
 				// ever carry what it spent; drop it rather than let it land on
 				// the next reply.
 				e.resetUsage()
+				// Before failTurn, not after: failTurn posts the notice
+				// synchronously on this goroutine, and the daemon's trailing
+				// status-update is already queued behind it. Leaving the flag
+				// armed across that round trip means a follow-up posted while
+				// the notice is in the air gets the stale idle as its boundary —
+				// placeholder frozen, entry cleared, stream-lost backstop
+				// disarmed for a turn that is still owed.
+				streaming = false
 				r.failTurn(ctx, e, conv, te.Kind, turnErrorNotice(te))
+				return nil
+			case daemon.EventCapabilities:
+				c, ok := daemon.StreamOpened(ev.Data)
+				if !ok {
+					r.logf("relay %s: unreadable capabilities frame: %s", conv, ev.Data)
+					return nil
+				}
+				r.noteCapabilities(conv, e, c)
+				return nil
+			case daemon.EventStatusUpdate:
+				st, ok := daemon.StatusUpdated(ev.Data)
+				if !ok {
+					r.logf("relay %s: unreadable status-update: %s", conv, ev.Data)
+					return nil
+				}
+				switch {
+				case st.Working():
+					streaming = true
+				case st.Blocked():
+					// The daemon has stopped on something only a human at the
+					// agent's own console can answer. core-agent defines these
+					// two states but does not emit either today (they have
+					// declaration sites and no emission sites), so this is a
+					// branch against the protocol rather than against observed
+					// traffic. It earns its place anyway: the obvious way to
+					// write the case above is "not idle means working", and that
+					// spelling turns the first daemon to emit awaiting_permission
+					// into a turn boundary at exactly the wrong moment. Blocked
+					// is not a boundary — the turn is still owed — and not a
+					// thread notice either: relaying an approval prompt to a chat
+					// caller is its own feature. Logged because the alternative is
+					// an operator watching a turn that will never move with no way
+					// to learn why.
+					r.logf("relay %s: daemon is waiting on a human (%s); the turn is parked",
+						conv, st.TurnState)
+				case st.Idle() && streaming:
+					streaming = false
+					// The daemon's turn cleanup emits this on both exit paths of
+					// a turn that started, where turn-complete fires only when
+					// the turn succeeded and turn-error only when it failed in a
+					// way the daemon could classify. Anything that ends a turn
+					// outside those two — including a turn-error payload this
+					// build could not read, logged and walked away from above —
+					// would otherwise leave the entry in flight and the clock
+					// running until its hour-long backstop.
+					//
+					// Not every refusal, though: core-agent's cost-ceiling and
+					// watchdog pre-flights return before the cleanup is
+					// installed and emit no frame at all, so a turn refused
+					// there still runs to the backstop. That gap needs a
+					// response on the inject side, not here.
+					//
+					// The same hazard turn-complete has, and no worse now that
+					// both boundaries clear the flag on their way out: what is
+					// left is a boundary for the turn that just ended landing
+					// after the next turn was marked in flight, retiring its
+					// ticker early. A per-turn message identity is the fix, and
+					// is #42.
+					e.stopTicker()
+					e.endTurn()
+				}
 				return nil
 			}
 			if ev.Type != daemon.EventAgent {

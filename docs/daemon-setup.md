@@ -116,6 +116,27 @@ CORE_AGENT_BIN=/tmp/core-agent go test -tags=integration ./cmd/switchboard \
   -run Integration -v
 ```
 
+Against a daemon you did not build yourself, the first thing switchboard logs
+for a conversation says which one it reached:
+
+```
+relay C0123:1723742400.0001: connected to core-agent/0.9.2 speaking 1.5.0
+```
+
+If that daemon is too old to send an event switchboard reads, the next line
+names it — and names the consequence, which is a feature that silently does
+nothing rather than an error:
+
+```
+relay C0123:1723742400.0001: daemon does not advertise status-update, turn-error;
+the features reading those events will stay silent
+```
+
+Nothing is negotiated: the daemon sends what it sends. The line exists because
+the symptom of a missing event is an *absence* — a thread that stays quiet after
+a failed turn, a reply with no usage footer — and an absence looks nothing like
+a version mismatch from the outside.
+
 ## Both platforms, one daemon
 
 `--platform` takes one value, so Slack and Google Chat are **two switchboard

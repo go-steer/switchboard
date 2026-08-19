@@ -39,6 +39,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -165,18 +166,38 @@ type Event struct {
 
 // EventAgent is the SSE event name carrying the agent's streamed output —
 // model text, tool calls, and tool results are all multiplexed onto it.
-// The typed lifecycle events ("status-update", "turn-error") are separate
-// names switchboard does not relay verbatim.
+// The typed lifecycle events below are separate names switchboard consumes but
+// does not relay verbatim.
+//
+// The daemon does not list this one in the event types it advertises: it is the
+// legacy name, and the capabilities frame describes the logical surface, where
+// the same traffic appears as "stream-chunk", "tool-call" and "tool-result".
 const EventAgent = "agent"
 
 // The typed lifecycle events switchboard consumes. None is relayed verbatim:
 // EventUsage and EventTurnComplete are between them the only source for what a
 // turn cost (see TurnUsage), and EventTurnError is the only announcement that a
 // turn died inside the daemon — without it the thread simply goes quiet (#34).
+//
+// EventStatusUpdate and EventCapabilities describe the session rather than a
+// turn's output: what the daemon is doing right now, and what it can do at all.
 const (
 	EventUsage        = "usage-update"
 	EventTurnComplete = "turn-complete"
 	EventTurnError    = "turn-error"
+	EventStatusUpdate = "status-update"
+	EventCapabilities = "capabilities"
+)
+
+// The advertised names for the traffic that arrives on EventAgent. Nothing
+// subscribes to these — the wire event stays "agent" — but they are what a
+// capabilities frame calls the surface switchboard reads every answer and every
+// tool notice out of, so they are the names to check it against. EventToolResult
+// is here for the pairing; switchboard reads the calls and not their results.
+const (
+	EventStreamChunk = "stream-chunk"
+	EventToolCall    = "tool-call"
+	EventToolResult  = "tool-result"
 )
 
 // UsageTotals is a session's running accounting, as carried by every
@@ -395,6 +416,136 @@ func TurnFailed(data string) (e TurnError, ok bool) {
 		e.Kind = TurnErrorUnknown
 	}
 	return e, true
+}
+
+// Turn states, per the daemon's event-stream spec §2.2. As with the turn-error
+// kinds, an unrecognized value must not be forced into one of these: the spec
+// reserves the right to add states, and a gateway that reads anything it does
+// not know as "idle" would end turns that are still running.
+//
+// Only two of the four are observed in practice. core-agent declares all four
+// and emits exactly streaming and idle; the awaiting_ pair is spec surface with
+// no emission site as of protocol 1.5.0. They are modeled anyway because the
+// consumer has to be written for the state it will be handed, not the state it
+// sees today, and the shorthand for "streaming or nothing" quietly makes a
+// permission prompt look like the end of a turn.
+const (
+	TurnStateIdle               = "idle"
+	TurnStateStreaming          = "streaming"
+	TurnStateAwaitingPermission = "awaiting_permission"
+	TurnStateAwaitingElicit     = "awaiting_elicit"
+)
+
+// SessionStatus is what an EventStatusUpdate says the session is doing. The
+// event also carries the model, provider, permission mode and context usage;
+// none of those has a consumer here, and modeling a field nothing reads only
+// invites someone to trust it.
+type SessionStatus struct {
+	// TurnState is one of the TurnState constants, or a value this build does
+	// not know. Always present on a conformant frame — the spec requires it on
+	// every emission, snapshot or delta.
+	TurnState string
+}
+
+// Working reports whether the daemon is actively running a turn.
+func (s SessionStatus) Working() bool { return s.TurnState == TurnStateStreaming }
+
+// Blocked reports whether the turn has stopped on something only a human can
+// answer — a permission prompt or an elicitation. It is emphatically not Idle:
+// the turn is still owed, and treating it as over would retire the thread's
+// progress message while the daemon waits. No daemon emits either state today
+// (see the constants), so this is a guard against the first one that does.
+func (s SessionStatus) Blocked() bool {
+	return s.TurnState == TurnStateAwaitingPermission || s.TurnState == TurnStateAwaitingElicit
+}
+
+// Idle reports whether the session is between turns.
+func (s SessionStatus) Idle() bool { return s.TurnState == TurnStateIdle }
+
+// statusFrame is the JSON payload of an EventStatusUpdate event.
+type statusFrame struct {
+	TurnState string `json:"turn_state"`
+}
+
+// StatusUpdated parses an EventStatusUpdate payload. ok is false on a parse
+// failure or a frame with no turn_state, which is the only field this reads —
+// a status update that does not say what the session is doing is not one.
+func StatusUpdated(data string) (s SessionStatus, ok bool) {
+	var f statusFrame
+	if err := json.Unmarshal([]byte(data), &f); err != nil {
+		return SessionStatus{}, false
+	}
+	if f.TurnState == "" {
+		return SessionStatus{}, false
+	}
+	return SessionStatus{TurnState: f.TurnState}, true
+}
+
+// Capabilities is the frame the daemon opens every stream with: what it is,
+// what protocol it speaks, and which events it will actually send.
+//
+// Switchboard does not negotiate on it — there is nothing to negotiate, the
+// daemon sends what it sends. It is read so an operator can be told when the
+// daemon on the other end will not be sending something switchboard relies on,
+// which otherwise shows up as a feature quietly not working: no error notice
+// for a failed turn, no usage footer, no turn boundary for the progress clock.
+type Capabilities struct {
+	// ProtocolVersion is the event-stream spec version, e.g. "1.5.0".
+	ProtocolVersion string
+	// Server is the daemon's self-description, e.g. "core-agent/0.9.2".
+	Server string
+	// EventTypes is the logical event surface the daemon advertises. It is not
+	// the set of SSE event names: the daemon lists "stream-chunk", "tool-call"
+	// and "tool-result" separately even though all three ride on EventAgent,
+	// and does not list EventAgent itself. Nothing may test for "agent" here.
+	EventTypes []string
+}
+
+// Advertises reports whether the daemon said it sends this event type.
+func (c Capabilities) Advertises(t string) bool {
+	return slices.Contains(c.EventTypes, t)
+}
+
+// Missing returns the given event types the daemon did not advertise, in the
+// order asked. Empty when the daemon advertised nothing at all: a frame with no
+// event_types is an older or partial implementation, and reporting every type
+// as missing would be a wall of noise about one fact.
+func (c Capabilities) Missing(want ...string) []string {
+	if len(c.EventTypes) == 0 {
+		return nil
+	}
+	var out []string
+	for _, t := range want {
+		if !c.Advertises(t) {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// capabilitiesFrame is the JSON payload of an EventCapabilities event.
+type capabilitiesFrame struct {
+	ProtocolVersion string   `json:"protocol_version"`
+	Server          string   `json:"server"`
+	EventTypes      []string `json:"event_types"`
+}
+
+// StreamOpened parses an EventCapabilities payload. ok is false on a parse
+// failure or a frame carrying none of the three fields, which says nothing
+// worth logging.
+func StreamOpened(data string) (c Capabilities, ok bool) {
+	var f capabilitiesFrame
+	if err := json.Unmarshal([]byte(data), &f); err != nil {
+		return Capabilities{}, false
+	}
+	if f.ProtocolVersion == "" && f.Server == "" && len(f.EventTypes) == 0 {
+		return Capabilities{}, false
+	}
+	return Capabilities{
+		ProtocolVersion: f.ProtocolVersion,
+		Server:          f.Server,
+		EventTypes:      f.EventTypes,
+	}, true
 }
 
 // agentFrame is the JSON payload of an EventAgent event. It wraps an ADK

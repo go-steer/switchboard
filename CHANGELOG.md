@@ -7,6 +7,58 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- The relay reads the daemon's `status-update` and `capabilities` frames (#33).
+  `inbox` and `pause` remain advertised and unconsumed.
+
+  `status-update` carries the session's turn state, and its `idle` is the only
+  turn boundary that does not depend on the daemon having classified how the
+  turn ended: `turn-complete` fires when a turn succeeded and `turn-error` when
+  it failed in a way the daemon could name, but the daemon's turn cleanup emits
+  `idle` on both exit paths of any turn that started. Anything ending a turn
+  outside those two — including a `turn-error` payload this build cannot read,
+  which is logged and dropped rather than guessed at — used to leave the session
+  marked in flight and its progress clock running to the hour-long backstop, and
+  made the next unrelated outage announce a failure for a turn that had ended
+  long before. Not every refusal is covered: core-agent's cost-ceiling and
+  watchdog pre-flights return before that cleanup is installed and emit no frame
+  at all, so a turn refused there still runs to the backstop.
+
+  `awaiting_permission` and `awaiting_elicit` are deliberately not boundaries.
+  The daemon has stopped on something only a human at its own console can
+  answer, and the turn is still owed, so the state is logged — an operator
+  otherwise watches a turn that will never move with no way to learn why — and
+  nothing in the thread is retired. Relaying an approval prompt to a chat caller
+  is a feature of its own, not a side effect of parsing a frame. core-agent
+  defines both states and emits neither today, so this is written against the
+  protocol rather than against observed traffic; it earns its place because the
+  obvious spelling of the boundary — "not idle means working" — turns the first
+  daemon to emit one into a turn boundary at exactly the wrong moment.
+
+  An `idle` is only acted on once the daemon has reported the turn *running* on
+  the same connection, and each boundary puts that flag back down. Every stream
+  opens with a status snapshot that says idle on a session between turns, which
+  would otherwise retire the placeholder of a turn posted a moment earlier and
+  not yet injected; and the daemon sends `status-update` for reasons other than
+  a turn changing state — a model swap, a permission-mode change — which
+  otherwise end whatever turn has started since. The cost of scoping the flag to
+  one connection is a turn that both starts and ends inside a stream outage
+  staying in flight, which is what a `turn-complete` lost in the same gap
+  already does; erring the other way retires a live turn's placeholder and
+  disarms the stream-lost notice meant to cover the outage.
+
+  `capabilities` is logged once per session: what the daemon is, what protocol
+  it speaks, and which of the events switchboard relies on it does not advertise.
+  Nothing negotiates on it — the daemon sends what it sends — but an older daemon
+  degrades by *absence*, a thread that stays quiet or a reply with no footer, and
+  absence looks nothing like a version mismatch from the outside. The legacy
+  `agent` event is excluded from that check, since no conformant daemon
+  advertises it; the frame describes the logical surface instead, so the traffic
+  it carries is checked under the names that surface uses — a daemon
+  advertising no `stream-chunk` relays no answers at all.
+
+  Neither frame is relayed into a thread, and neither touches the seq the agent
+  events are indexed by, which drives resume-after-reconnect and replay
+  suppression.
 - The `indicator` and `status` progress messages now tick: every 15 seconds the
   placeholder is re-rendered with how long the turn has been running, and in
   `status` mode with the tool it is on and the step count — "⏳ Working… 2m30s ·
