@@ -361,6 +361,32 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   is the captured payload that shows it.
 
 ### Fixed
+- A long answer *about* markdown split into nonsense. A fenced block is closed
+  only by a bare fence at least as wide as the one that opened it, so the
+  `` ``` `` lines inside a ```` ```` ```` block are content — but the chunker
+  counted every run of three or more backticks as one delimiter and split on the
+  parity. It therefore read the inner opener as closing the outer block, and
+  from there every break in the block was inverted: the piece was not closed and
+  the next was not reopened, so the rest of the code arrived in the thread as
+  prose with stray backticks around it — #31's exact symptom, on the one kind of
+  answer most likely to be long enough to split.
+
+  Counting was wrong in the other direction too. A run of backticks is only a
+  fence at the start of its line; one with text in front of it is part of the
+  prose, and counting it flipped the parity of everything after. Two things kept
+  that from being worse than it was: only runs of three or more were counted at
+  all, so ordinary `` `code` `` spans were safe, and a *matched* span
+  contributed two runs and cancelled itself out. What it took was an unpaired
+  one — a sentence naming the syntax, like "the `` ``` `` delimiter opens a
+  block" — which is a line that turns up in exactly the answers this all goes
+  wrong on. It does not have to be inside a code block to break one further
+  down.
+
+  Both are gone: where a block opens and closes is now tracked by a line-based
+  scanner that carries the open block's *width*, and a continuation reopens with
+  a marker of that same width rather than always three backticks. Reopening a
+  ```` ```` ```` block with `` ``` `` closes it instead of continuing it, which
+  is the same corruption reached one step later.
 - A long Google Chat reply split mid-code-fence, so the backticks rendered
   literally. Chat's per-message ceiling is 4096 characters — counted here in
   bytes, which is conservative for multi-byte text — and an answer over it is
@@ -372,8 +398,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   copies to fix separately. They still differ where they should: Chat allows
   4096 to Slack's 3900.
 
-  Four further ways a split could corrupt a code block, found reviewing the
-  shared version and fixed there, so Slack gets them too:
+  Further ways a split could corrupt a code block, found reviewing the shared
+  version and fixed there, so Slack gets them too:
   - A break with no newline in reach could land *inside* the `` ``` `` itself.
     Both halves then hold a stray backtick, both count even, and no amount of
     balancing sees it — the same bug by another route. A break now never falls
@@ -384,11 +410,38 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     pieces rejoin into the answer the model actually wrote.
   - A break landing right after an opening fence posted `` ```/``` `` — an empty
     code block — and opened the real one on the next message. It now moves back
-    a line so the opener travels with its code.
+    a line so the opener travels with its code, for an opener carrying a
+    language tag (`` ```go ``) as much as a bare one. The seam on the other side
+    of the block does the same thing in reverse: a break landing right *before*
+    the closing fence seals the piece, reopens on the next, and the answer's own
+    closer arrives immediately after, so the empty block lands at the top of the
+    continuation instead. That one moves back a line too, and when there is no
+    line to move back to — the block's content starts what is left — the closing
+    fence is pulled forward into the piece instead, which needs no marker at
+    all. Two shapes needed more than moving the break: a block at the very top
+    of the answer, where backing off the closer would land on the opener and
+    put the empty block there instead; and a block whose first line is longer
+    than a whole message, where the opener's own newline is the only one in
+    reach. The break stops preferring a line ending for that one and cuts inside
+    the long line, so the opener still travels with its code.
   - Fences were counted with `strings.Count`, which reads ```` ```` ```` as one
     delimiter plus a loose backtick and gets the parity backwards. A model
     reaches for a four-backtick fence when the answer is itself about markdown.
-    Each run of three or more backticks is one delimiter now.
+    Where a block opens and closes is now tracked by a scanner rather than by
+    counting delimiters at all — see the entry above.
+  - A break with no newline in reach could land between the two bytes of a
+    CRLF, leaving the piece ending on a bare `\r` and the next opening on a bare
+    `\n`. Model output reaches the chunker with its line endings as written;
+    Chat does not normalise them. A lone `\r` is left alone — it is an old-Mac
+    line ending and content, not half of anything.
+  - The headroom reserved for the closing marker was three backticks and a
+    newline, which is a byte short for the ```` ```` ```` block a model writes
+    when the answer is about markdown: a piece closing one came back at 4097
+    bytes against Chat's 4096. It is sized to the widest run in the answer now.
+    The bound holds while the limit leaves room for both markers and a rune
+    between them — it takes a run of two thousand backticks to defeat 4096 — and
+    past that no piece can be both balanced and inside the limit, so an
+    oversized piece is the better of the two failures.
 
   Not fixed there but fixed below: `--googlechat-cards rich` sends an answer as
   a card rather than as text, and the card path had a truncation of its own.
