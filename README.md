@@ -224,6 +224,53 @@ every turn would be wrong there within minutes. The turn is the *conversational*
 one — a question that drives eight tool calls reports what all nine model calls
 cost, not just the last.
 
+### When a turn fails
+
+A turn that never answers has to say so, or a thread just goes quiet with a
+placeholder running on nothing. Three cases, three notices:
+
+| Failure | When it is detected | What the thread is told |
+|---|---|---|
+| Session creation or inject failed | immediately — the turn never started | it didn't go through, and whether a retry is worth it |
+| The daemon reported `turn-error` | as the event arrives | the daemon's own classification, message, and hint |
+| Contact with the daemon was lost mid-turn | after ~90s with nothing on the stream | contact was lost; a finished answer will still arrive |
+
+The daemon's `turn-error` carries a `retryable` flag and, when there is an
+obvious next step, a hint — which IAM role the runtime service account is
+missing, which model name to check. Both are passed through to the thread,
+along with the kind and provider status code, because "something went wrong" is
+barely an improvement on silence. Note that this puts upstream provider error
+text into what may be a shared channel, so it is flattened to one line and
+length-capped on the way in.
+
+A turn can answer *and then* fail: the cost ceiling is enforced at the turn
+boundary, so its `turn-error` arrives after the text the turn produced. The
+notice is therefore a separate thing from the turn — an answered turn does not
+silence it — while still being said at most once per turn, since a `turn-error`
+and a lost stream can both be true of the same one.
+
+Two kinds are called out separately. A tripped **cost ceiling** or **watchdog**
+is a guardrail: the agent refuses further turns until an operator resets it, so
+the notice says that instead of suggesting a retry that cannot work. Only the
+trip itself is classified as one — every message sent afterwards is refused
+before it runs, and comes back as kind `unknown` — so the refusal is also
+recognised by the sentence the daemon puts in all three guardrail messages. If
+that ever stops matching, the reader gets the generic terminal notice, which is
+what they would have got anyway.
+
+The lost-contact case is the one the daemon cannot report, because the daemon is
+what went away. The relay keeps reconnecting regardless — it never gives up, and
+resumes from the last event seen — so the notice is careful to say that an
+answer produced during the outage will still be delivered. The 90-second grace
+is there so a rolling restart resolves without interrupting anyone.
+
+It is measured from the last event of *any* kind, not from the last answer. A
+turn spent thinking produces nothing for minutes at a time, and a proxy or an
+idle timeout can cut the SSE stream repeatedly while the daemon is perfectly
+healthy; since the daemon opens every stream with a capabilities frame, a
+connection that keeps being re-established keeps proving itself, and only a
+genuine outage accumulates.
+
 ### Outbound ingress
 
 Everything above starts with someone in a thread. `--ingress-addr` opens the
@@ -353,9 +400,16 @@ The exported series (all prefixed `switchboard_`):
 | `switchboard_daemon_request_duration_seconds` | histogram | `op` | daemon request latency |
 | `switchboard_replies_sent_total` | counter | `outcome` | outbound sends to the platform |
 | `switchboard_agent_turns_relayed_total` | counter | — | completed agent turns relayed to chat |
+| `switchboard_agent_turns_failed_total` | counter | `kind` | turns that failed instead of answering |
 | `switchboard_stream_reconnects_total` | counter | — | SSE relay reconnects |
 | `switchboard_active_sessions` | gauge | — | conversation→session entries held |
 | `switchboard_ingress_requests_total` | counter | `op`, `outcome` | outbound-ingress requests (`post`/`patch`/`other`) |
+
+`kind` on the failure counter is the daemon's own classification
+(`auth_error`, `rate_limited`, `watchdog`, …), plus `stream_lost` for a turn
+abandoned because contact was lost. Anything switchboard does not recognise
+folds into `unknown`, so a future daemon inventing a kind cannot grow the label
+set without a change here.
 
 When the metrics server is disabled the collectors still accumulate in-process;
 they are just not exposed. The Kubernetes manifests set `--metrics-addr=:9090`

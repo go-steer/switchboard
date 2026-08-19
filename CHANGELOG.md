@@ -297,6 +297,33 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   is the captured payload that shows it.
 
 ### Fixed
+- A turn that failed inside the daemon posted nothing. The daemon emits
+  `turn-error` when a turn dies — a bad model name, a rejected credential, a
+  rate limit — and nothing in switchboard parsed it, so the thread went quiet
+  and the "⏳ Working…" placeholder sat there until something else retired it.
+  The relay now surfaces the failure in the thread, carrying the daemon's own
+  kind, code, message and hint rather than a generic apology, and taking the
+  retry advice from the daemon's `retryable` flag instead of guessing from the
+  kind. The two guardrail kinds (`cost_ceiling`, `watchdog`) are called out
+  separately, because "try again" is the wrong advice for a turn the agent
+  stopped on purpose and will keep refusing until an operator resets it — and
+  since only the trip itself is classified as a guardrail, the refusals that
+  follow it are recognised by the sentence the daemon puts in all three
+  guardrail messages. The notice is separate from the turn rather than
+  conditional on it, because a cost ceiling is enforced at the turn *boundary*:
+  its `turn-error` arrives after the answer the turn already produced, and that
+  is precisely the failure the reader most needs to hear about.
+- A turn was silently abandoned when contact with the daemon was lost while it
+  was running. This is the half `turn-error` cannot cover: the daemon that would
+  report the failure is the thing that went away, so no event ever arrives and
+  the relay has to notice the silence itself. After ~90 seconds with nothing at
+  all on the stream and a turn still in flight, the thread is told once that
+  contact was lost and the placeholder is retired; reconnects continue
+  underneath, and an answer that does arrive later is still delivered. The
+  grace is measured from the last event of any kind rather than the last
+  answer, so neither a turn spent thinking nor a proxy cutting the SSE stream
+  every few seconds is mistaken for a daemon that has gone away, and a rolling
+  restart that finishes inside the window interrupts nobody.
 - Every inbound message ran **two** agent turns and posted the answer twice.
   The router injected and then woke the session, but the daemon's inject
   already requests a wake as part of queueing the message, so the explicit

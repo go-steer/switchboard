@@ -21,6 +21,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/go-steer/switchboard/pkg/chat"
 	"github.com/go-steer/switchboard/pkg/daemon"
@@ -33,6 +34,17 @@ const (
 	reconnectMinBackoff = time.Second
 	reconnectMaxBackoff = 30 * time.Second
 )
+
+// streamLostGrace is how long the relay will fail to reconnect, with a turn
+// still waiting on the daemon, before it says so in the thread. Reconnection
+// itself never gives up; this only bounds how long the conversation is left
+// guessing.
+//
+// Long enough that a rolling daemon restart, or a blip that outlasts a couple
+// of backoff steps, resolves without a notice nobody needed — and short enough
+// that a reader is not still watching a placeholder minutes after the agent
+// stopped existing.
+const streamLostGrace = 90 * time.Second
 
 // sender is the egress half of a chat.Adapter the router needs to relay
 // replies and manage long-turn progress messages. Narrowed to the methods
@@ -165,6 +177,11 @@ type Router struct {
 	// overridable in tests so a reconnect can be exercised without real waits.
 	minBackoff, maxBackoff time.Duration
 
+	// streamGrace is how long the relay may be disconnected, with a turn in
+	// flight, before the thread is told contact was lost. Defaulted in
+	// NewRouter and shortened in tests.
+	streamGrace time.Duration
+
 	// tickInterval is how often a turn in flight re-renders its progress
 	// message with the elapsed clock. Defaulted in NewRouter and overridable in
 	// tests so a tick can be observed without a real wait; zero or negative
@@ -193,6 +210,21 @@ type sessionEntry struct {
 	channel string       // platform channel, for resolving the channel's progress mode
 	seq     atomic.Int64 // highest agent-event seq seen, fed back as `since` on resume
 	relayed atomic.Int64 // highest seq already posted, for exactly-once delivery across reconnects
+
+	// inFlight is true from the moment a turn is handed to the daemon until
+	// something concludes it: the daemon's turn-complete or turn-error, an
+	// answer delivered, or the relay giving up on a stream that stayed down.
+	// It is what tells a dropped stream apart from a dropped stream *with
+	// someone waiting on it*, and it is deliberately independent of the
+	// progress message, which only exists in two of the four progress modes.
+	//
+	// failed is the separate claim on *telling the thread the turn failed*.
+	// The two cannot be the same flag: an answer ends the turn, but a turn can
+	// answer and still fail afterwards — a cost ceiling is enforced at the turn
+	// boundary, so its turn-error lands after the text it paid for — and that
+	// failure still has to be reported. Reset per turn.
+	inFlight atomic.Bool
+	failed   atomic.Bool
 
 	// pmu guards progressMsg, the session's current transient progress message
 	// (the indicator placeholder, or the status message being edited with tool
@@ -326,6 +358,32 @@ func (e *sessionEntry) takeUsage() *chat.Usage {
 	}
 }
 
+// beginTurnInFlight marks a turn as running and clears the previous turn's
+// claim on the failure notice. Called *before* the inject request, not after
+// it: the relay goroutine is already dispatching, and a turn can fail and emit
+// its turn-error before the inject response has even been read. Marking it
+// afterwards lost that notice, and could land the store after the relay had
+// already ended the turn — leaving inFlight stuck true, so the next unrelated
+// outage announced a failure for a turn that answered long ago. Handle undoes
+// it if the inject never lands.
+func (e *sessionEntry) beginTurnInFlight() {
+	e.failed.Store(false)
+	e.inFlight.Store(true)
+}
+
+// endTurn concludes the turn in flight, reporting whether this call is the one
+// that did it. Nobody is waiting on the daemon once this returns, so a stream
+// that drops afterwards is an idle session rather than an abandoned turn.
+func (e *sessionEntry) endTurn() bool { return e.inFlight.CompareAndSwap(true, false) }
+
+// turnInFlight reports whether a turn is waiting on the daemon right now.
+func (e *sessionEntry) turnInFlight() bool { return e.inFlight.Load() }
+
+// claimFailureNotice reports whether this caller is the one that gets to tell
+// the thread the turn failed. A turn-error and a lost stream can both be true
+// of the same turn, and two notices for one failure read as two failures.
+func (e *sessionEntry) claimFailureNotice() bool { return e.failed.CompareAndSwap(false, true) }
+
 // takeProgress atomically reads and clears the entry's progress message along
 // with the rest of the turn's ticker state, and stops the ticker: the message
 // it renders into is about to be deleted.
@@ -424,6 +482,7 @@ func NewRouter(client *daemon.Client, out sender, progress ProgressMode, m *metr
 		logf:         logf,
 		minBackoff:   reconnectMinBackoff,
 		maxBackoff:   reconnectMaxBackoff,
+		streamGrace:  streamLostGrace,
 		tickInterval: progressTickInterval,
 		tickMaxAge:   progressTickMaxAge,
 		sessions:     make(map[string]*sessionEntry),
@@ -540,11 +599,17 @@ func (r *Router) Handle(ctx context.Context, msg chat.Message) (err error) {
 	// it there ("Working…" below the answer, with nothing left to clear it). A
 	// no-op in off and stream modes.
 	r.startProgress(ctx, entry, msg.Conversation)
+	// Someone is waiting from the moment the message is handed over, not from
+	// the moment the daemon acknowledges it: the relay is a separate goroutine
+	// and the turn can fail on the stream before Inject's response is read.
+	entry.beginTurnInFlight()
 	start := time.Now()
 	err = r.client.Inject(ctx, entry.sess, msg.Caller, msg.Text)
 	r.metrics.recordDaemon("inject", time.Since(start), err)
 	if err != nil {
-		// The turn will never run, so the progress message would linger; clear it.
+		// The turn never reached the daemon, so nothing on the stream will ever
+		// conclude it, and the progress message would linger; undo both here.
+		entry.endTurn()
 		r.clearProgress(ctx, entry, msg.Conversation)
 		r.surfaceError(ctx, msg.Conversation, err)
 		return err
@@ -573,7 +638,98 @@ func (r *Router) surfaceError(ctx context.Context, conv string, err error) {
 const (
 	errNoticeTransient = "⚠️ That turn didn't go through — the agent backend is having trouble. Please try again shortly."
 	errNoticeTerminal  = "⚠️ That turn didn't go through and retrying the same message won't help. Check the logs or contact an admin."
+
+	// The three leads for a turn that died after it started running. Separate
+	// from the two above because the turn *did* reach the daemon: "didn't go
+	// through" would be wrong, and in the guardrail case so would any
+	// suggestion to try again.
+	errNoticeTurnTransient = "⚠️ That turn failed before it could answer — the agent backend is having trouble. Please try again shortly."
+	errNoticeTurnTerminal  = "⚠️ That turn failed before it could answer, and retrying the same message won't help."
+	errNoticeGuardrail     = "🛑 A guardrail stopped that turn. The agent will refuse further turns until an operator resets it."
+
+	// errNoticeStreamLost covers the failure the daemon cannot report, because
+	// it is the daemon that went away. Deliberately does not tell the reader
+	// the turn failed — the relay resumes from the last event seen, so an
+	// answer produced during the outage is still delivered when it reconnects.
+	errNoticeStreamLost = "⚠️ Lost contact with the agent while that turn was running. Reconnecting — if the turn finished, its answer will still arrive. If nothing appears, send the message again."
 )
+
+// turnErrorNotice renders a daemon-side turn failure for the thread: what it
+// means for the reader on the first line, the daemon's own classification on
+// the second, and its hint — the actionable next step, when there is an obvious
+// one — on the third.
+//
+// The daemon's message carries the notice: without it this degenerates into
+// "something went wrong", which is barely better than the silence it replaces.
+// It is clamped here rather than trusted, because the two guardrail trips build
+// their message directly instead of through the daemon's length-capping
+// classifier, and the watchdog's interpolates a trigger reason of no fixed
+// size. Worth knowing that this is upstream provider text going into what may
+// be a shared channel.
+func turnErrorNotice(te daemon.TurnError) string {
+	lead := errNoticeTurnTerminal
+	switch {
+	case te.Guardrail():
+		lead = errNoticeGuardrail
+	case te.Retryable:
+		lead = errNoticeTurnTransient
+	}
+	detail := te.Kind
+	if te.Code != "" {
+		detail += " (" + te.Code + ")"
+	}
+	if msg := clampNotice(te.Message); msg != "" {
+		detail += ": " + msg
+	}
+	notice := lead + "\n" + detail
+	if hint := clampNotice(te.Hint); hint != "" {
+		notice += "\n" + hint
+	}
+	return notice
+}
+
+// noticeDetailCap matches the cap the daemon's own error classifier applies, so
+// a classified failure reads identically either way and only the paths that
+// skip that classifier are actually shortened.
+const noticeDetailCap = 240
+
+// clampNotice bounds one line of daemon-supplied text and flattens it, on the
+// way into a chat message. Newlines go because the notice's own structure is
+// line-based: a multi-line message would read as if the hint had arrived early.
+// Cuts on a rune boundary — a chat client rendering half a rune shows a
+// replacement character, which looks like corruption rather than truncation.
+func clampNotice(s string) string {
+	s = strings.TrimSpace(strings.Join(strings.Fields(s), " "))
+	if len(s) <= noticeDetailCap {
+		return s
+	}
+	cut := noticeDetailCap - 3
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "..."
+}
+
+// failTurn ends a turn that will never answer: retire its progress message so
+// the thread is not left with a clock running on nothing, and post the notice
+// in its place. Best effort on both — a failure to clear or to post is logged,
+// since there is no caller left to return an error to.
+//
+// claimFailureNotice makes this fire once per turn, and endTurn stops anything
+// downstream still treating the turn as live. Note that it is not gated on the
+// turn *being* live: a turn that already delivered text can still fail at its
+// boundary, and that failure is worth reporting.
+func (r *Router) failTurn(ctx context.Context, e *sessionEntry, conv, kind, notice string) {
+	if !e.claimFailureNotice() {
+		return
+	}
+	e.endTurn()
+	r.clearProgress(ctx, e, conv)
+	r.metrics.recordTurnFailed(kind)
+	if _, err := r.out.Send(ctx, chat.Reply{Conversation: conv, Text: notice, Kind: chat.KindNotice}); err != nil {
+		r.logf("relay %s: surface turn failure (%s): %v", conv, kind, err)
+	}
+}
 
 // startProgress posts the initial progress message for a turn (indicator and
 // status modes), records it on the entry so relay can edit or clear it, and
@@ -671,6 +827,9 @@ func (r *Router) clearProgress(ctx context.Context, e *sessionEntry, conv string
 // taken (and cleared) here whether or not the footer is enabled, so a session
 // that runs with it off never accumulates stale numbers.
 func (r *Router) deliverText(ctx context.Context, e *sessionEntry, conv, text string) {
+	// An answer concludes the turn: whatever the stream does next, nobody is
+	// left waiting on it.
+	e.endTurn()
 	r.clearProgress(ctx, e, conv)
 	r.metrics.recordTurnRelayed()
 	usage := e.takeUsage()
@@ -753,9 +912,21 @@ func (r *Router) session(ctx context.Context, conv, channel, caller string) (*se
 // up (#3). It runs until ctx is cancelled.
 func (r *Router) relay(ctx context.Context, conv string, e *sessionEntry, owner string) {
 	backoff := r.minBackoff
+	// The last moment the stream was known to be carrying traffic — what the
+	// grace period is measured from. Written only from inside the callback,
+	// which Subscribe invokes synchronously on this goroutine, so it needs no
+	// lock.
+	//
+	// Keyed on *any* event rather than on the connection, because the client
+	// offers no connect callback, and on any event rather than on a new agent
+	// turn, because a turn spent thinking produces neither. The daemon opens
+	// every stream with a capabilities frame, so an established connection
+	// refreshes this within a round trip; an outage refreshes nothing.
+	lastAlive := time.Now()
 	for ctx.Err() == nil {
 		progressed := false
 		err := r.client.Subscribe(ctx, e.sess, owner, e.seq.Load(), func(ev daemon.Event) error {
+			lastAlive = time.Now()
 			// The two lifecycle events carrying a turn's accounting arrive
 			// before the agent event holding its answer, so they are banked on
 			// the entry and attached when that answer is delivered. Neither
@@ -782,6 +953,27 @@ func (r *Router) relay(ctx context.Context, conv string, e *sessionEntry, owner 
 				// when that turn made tool calls (confirmed live), so a
 				// tool-using turn is not cut short.
 				e.stopTicker()
+				// Nobody is waiting on the daemon any more, whether or not
+				// this turn had anything to say. Without this, a turn that
+				// ended with no relayable text — interrupted, empty, or an
+				// answer deduplicated as a reconnect replay — left the entry
+				// marked in flight forever, and the next outage announced a
+				// lost turn that had finished hours earlier.
+				e.endTurn()
+				return nil
+			case daemon.EventTurnError:
+				te, ok := daemon.TurnFailed(ev.Data)
+				if !ok {
+					r.logf("relay %s: unreadable turn-error: %s", conv, ev.Data)
+					return nil
+				}
+				r.logf("relay %s: turn failed: kind=%s code=%s retryable=%t: %s",
+					conv, te.Kind, te.Code, te.Retryable, te.Message)
+				// The turn is over and produced no answer, so nothing will
+				// ever carry what it spent; drop it rather than let it land on
+				// the next reply.
+				e.resetUsage()
+				r.failTurn(ctx, e, conv, te.Kind, turnErrorNotice(te))
 				return nil
 			}
 			if ev.Type != daemon.EventAgent {
@@ -827,6 +1019,15 @@ func (r *Router) relay(ctx context.Context, conv string, e *sessionEntry, owner 
 		}
 		r.metrics.recordReconnect()
 		r.logf("relay %s: stream ended (%v); resuming from seq %d in %s", conv, err, e.seq.Load(), backoff)
+		// A stream that has carried nothing past the grace period, with a turn
+		// still waiting on it, is the one failure the daemon cannot announce —
+		// it is the daemon that went away. Reconnecting continues regardless;
+		// this only stops the thread waiting in silence, and fires once because
+		// failTurn ends the turn.
+		if down := time.Since(lastAlive); down > r.streamGrace && e.turnInFlight() {
+			r.logf("relay %s: no stream for %s with a turn in flight; telling the thread", conv, formatElapsed(down))
+			r.failTurn(ctx, e, conv, kindStreamLost, errNoticeStreamLost)
+		}
 		select {
 		case <-ctx.Done():
 			return

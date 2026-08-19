@@ -264,8 +264,10 @@ In the order that shows what is new:
 4. **Click a button** → the card is rewritten *in place*; no second message.
 5. **Click the same button again** → the card ends in the same state. Pub/Sub
    redelivers, so idempotence is a property to actually check.
-6. **Long turn** → a progress card; **stop the daemon mid-turn** → an error
-   notice card.
+6. **Long turn** → a progress card; **stop the daemon before sending** → an
+   error notice card. **Stop it mid-turn** and the notice takes about 90
+   seconds of failed reconnects to arrive, because a daemon that comes back
+   inside that window should not have interrupted anyone.
 7. Restart with `--googlechat-cards=rich`, ask for something structured → a
    sectioned answer card.
 8. Restart with `--googlechat-cards=off` → everything degrades to text.
