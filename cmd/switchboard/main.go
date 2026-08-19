@@ -30,6 +30,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/go-steer/switchboard/internal/logging"
 	"github.com/go-steer/switchboard/internal/version"
 	"github.com/go-steer/switchboard/pkg/chat"
 	"github.com/go-steer/switchboard/pkg/chat/googlechat"
@@ -60,9 +61,39 @@ func main() {
 		os.Exit(2)
 	}
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "%s: %v\n", prog, err)
+		// serve reports its own failures once it has a logger, so that a
+		// --log-format json stream does not end on a line no collector can
+		// parse — a crash loop being exactly when that line is read.
+		var logged loggedError
+		if !errors.As(err, &logged) {
+			fmt.Fprintf(os.Stderr, "%s: %v\n", prog, err)
+		}
 		os.Exit(1)
 	}
+}
+
+// loggedError wraps an error serve has already written to the log, so main
+// exits non-zero without printing it a second time. It delegates Error and
+// Unwrap to what it carries, so a caller that inspects the error — a test, or
+// anything matching on it — sees no difference.
+type loggedError struct{ error }
+
+func (e loggedError) Unwrap() error { return e.error }
+
+// reportOnce logs err and marks it as reported, so main exits non-zero without
+// printing it again. An error that is already marked — a listener's bind
+// failure, logged where it happened with the name of the listener attached — is
+// passed through untouched rather than said a second time in a vaguer form.
+func reportOnce(logf func(string, ...any), err error) error {
+	if err == nil {
+		return nil
+	}
+	var logged loggedError
+	if errors.As(err, &logged) {
+		return err
+	}
+	logf("%v", err)
+	return loggedError{err}
 }
 
 func isFlag(s string) bool { return len(s) > 0 && s[0] == '-' }
@@ -84,7 +115,7 @@ Usage:
 // conversational traffic and only escalates when there is something to lay out.
 const defaultCardMode = string(googlechat.CardsRich)
 
-func runServe(args []string) error {
+func runServe(args []string) (err error) {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	daemonURL := fs.String("daemon-url", envOr("SWITCHBOARD_DAEMON_URL", "http://127.0.0.1:7777"),
 		"core-agent daemon base URL (no trailing slash)")
@@ -130,6 +161,9 @@ func runServe(args []string) error {
 	ingressAllow := fs.String("ingress-allow", envOr("SWITCHBOARD_INGRESS_ALLOW", ""),
 		"comma-separated conversations the outbound ingress may post into (channel IDs, or "+
 			"full channel:thread keys); empty = any conversation the bot can reach")
+	logFormat := fs.String("log-format", envOr("SWITCHBOARD_LOG_FORMAT", string(logging.Text)),
+		"log rendering: \"text\" (timestamped lines for a terminal) or \"json\" (one object "+
+			"per line for a collector)")
 	showVersion := fs.Bool("version", false, "print build identity and exit")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -138,6 +172,25 @@ func runServe(args []string) error {
 		fmt.Println(version.String(prog))
 		return nil
 	}
+
+	format, ok := logging.ParseFormat(*logFormat)
+	if !ok {
+		return fmt.Errorf("invalid --log-format %q (want \"text\" or \"json\")", *logFormat)
+	}
+	// Every component logs through this one hook.
+	logf := logging.New(os.Stderr, format, prog)
+
+	// From here on a failure is logged rather than handed back to main to
+	// print: the whole point of json is a stream a collector can read, and a
+	// startup that fails is the run whose last line matters most. Everything
+	// above — a flag that will not parse, a --log-format nobody can render —
+	// happens before there is a logger to say it through, so main still
+	// reports those plainly.
+	defer func() { err = reportOnce(logf, err) }()
+
+	// Build identity first, ahead of the config checks, so an operator whose
+	// flags are rejected still learns which build rejected them.
+	logf("%s", version.String(prog))
 
 	token := os.Getenv(*tokenEnv)
 	if token == "" {
@@ -182,8 +235,6 @@ func runServe(args []string) error {
 	if err != nil {
 		return err
 	}
-
-	logf := func(format string, a ...any) { fmt.Fprintf(os.Stderr, prog+": "+format+"\n", a...) }
 
 	var adapter chat.Adapter
 	switch *platform {
@@ -277,10 +328,12 @@ func runServe(args []string) error {
 	serveOptional("metrics", *metricsAddr, func() error { return serveMetrics(ctx, *metricsAddr, m) })
 	serveOptional("ingress", *ingressAddr, func() error { return serveIngress(ctx, *ingressAddr, ing) })
 
-	fmt.Fprintf(os.Stderr, "%s: %s\n", prog, version.String(prog))
-	fmt.Fprintf(os.Stderr, "%s: bridging %s -> %s\n", prog, adapter.Name(), *daemonURL)
+	// Through logf, not straight to stderr: these are the first lines of the
+	// run, and a JSON stream that opens with three unparseable ones is worse
+	// than no banner at all.
+	logf("bridging %s -> %s", adapter.Name(), *daemonURL)
 	if ing != nil {
-		fmt.Fprintf(os.Stderr, "%s: outbound ingress on %s%s\n", prog, *ingressAddr, ingressPath)
+		logf("outbound ingress on %s%s", *ingressAddr, ingressPath)
 	}
 	runErr := adapter.Run(ctx, router)
 
@@ -295,12 +348,14 @@ func runServe(args []string) error {
 		}
 	}
 	if srvErr != nil {
-		return srvErr
+		// serveOptional already logged this one, with the name of the listener
+		// that failed attached.
+		return loggedError{srvErr}
 	}
 	if runErr != nil && !errors.Is(runErr, context.Canceled) {
 		return runErr
 	}
-	fmt.Fprintf(os.Stderr, "%s: shutting down\n", prog)
+	logf("shutting down")
 	return nil
 }
 

@@ -416,6 +416,64 @@ When the metrics server is disabled the collectors still accumulate in-process;
 they are just not exposed. The Kubernetes manifests set `--metrics-addr=:9090`
 and wire `/healthz` to the liveness + readiness probes.
 
+### Logs
+
+Everything goes to stderr, one write per event, each stamped with the time it
+was written in UTC:
+
+```
+2026-08-19T16:00:00.123Z switchboard: bridging slack -> http://127.0.0.1:7777
+2026-08-19T16:04:19.881Z switchboard: relay C0123:1723742400.0001: stream ended (EOF); resuming from seq 41 in 2s
+```
+
+`--log-format json` (or `SWITCHBOARD_LOG_FORMAT=json`) renders the same events
+one JSON object per line instead, for a collector:
+
+```json
+{"time":"2026-08-19T16:04:19.881Z","message":"relay C0123:1723742400.0001: stream ended (EOF); resuming from seq 41 in 2s"}
+```
+
+The entry text is under `message` rather than `log/slog`'s `msg`, which is
+where Cloud Logging looks for it; `time` is both slog's default key and the one
+Cloud Logging reads a timestamp from, so it is unchanged.
+
+`json` is also the format to pick when a message might contain a newline — a
+Chat payload under `--googlechat-log-events`, say. The JSON encoder escapes it
+(and replaces invalid UTF-8 with U+FFFD), so the record stays on one line;
+`text` passes the message through verbatim, so such an event spans as many
+lines as it contains.
+
+A startup that fails goes through the logger too — a crash loop being when
+those lines are read. The build identity is logged before the config is
+checked, for the same reason: an operator whose flags are rejected still learns
+which build rejected them. Some output is still not the logger's, so a strict
+collector will see lines it cannot parse in a `json` run:
+
+- a flag that will not parse, and a `--log-format` that cannot be rendered —
+  both happen before there is a logger to say them through;
+- `--help`, the flag defaults the `flag` package prints, and the unknown-
+  subcommand message;
+- `version` and `--version`, which print build identity to **stdout**;
+- panics and connection errors from the `--metrics-addr` and `--ingress-addr`
+  listeners, which `net/http` writes through its own default logger
+  ([#49](https://github.com/go-steer/switchboard/issues/49) tracks routing
+  those through this one). A listener *failing to bind* is logged normally.
+
+Two things a log line does not carry yet, both tracked in
+[#49](https://github.com/go-steer/switchboard/issues/49). There is no
+**severity**: no call site distinguishes a connect notice from a send failure,
+so rather than label every record `INFO` — which would be a lie about the
+failures — the JSON carries no severity field at all and Cloud Logging assigns
+`DEFAULT`. And the messages are **not structured**: the component and the
+conversation key are interpolated into the text, so a collector cannot filter
+on them. Both want a pass over all the call sites, which is a larger change
+than putting a time on the front.
+
+A deployment does get an ingestion timestamp from Cloud Run or a k8s collector
+regardless. That is when the line was *collected*, though, and it is absent
+entirely from a local run, a redirect to a file, or a `kubectl logs` dump taken
+without `--timestamps` — which is why the line carries its own.
+
 ### Container
 
 Images are published to **GHCR** and are multi-arch
