@@ -350,11 +350,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   readable where truncated is gone. An over-long run now spills into consecutive
   widgets in the same section, split by the same fence-aware logic as the text
   path, since a widget boundary inside a `` ``` `` renders the backticks
-  literally exactly as a message boundary does. The gateway's own widgets keep
-  the clamp: their text is authored here, fixed, nowhere near the budget, and
-  carries HTML, where a split could land inside a tag or a character entity.
-  `maxCardHeader` keeps clamping too — a section header is one line in every
-  client, which is a real presentation limit.
+  literally much as a message boundary does. The gateway's own widgets keep the
+  clamp, as a backstop that cannot fire: their text is authored here, fixed, and
+  nowhere near the budget. Splitting them would be no safer anyway — they carry
+  HTML, and a clamp is a byte cut that can land inside a tag or an entity just
+  as a split can. `maxCardHeader` keeps clamping too — a section header is one
+  line in every client, which is a real presentation limit.
+
+  Spilling lets a card grow without bound, so `answerCard` now measures the card
+  it built and returns nil past 26,000 bytes, sending the answer as text — which
+  splits into as many messages as it needs. Chat caps a whole message, text and
+  `cardsV2` together, at 32,000 bytes and tells an app over that to send
+  several; the margin covers the fallback text and usage footer riding on the
+  same message. Measured here rather than left to Chat, because a rejected card
+  costs a write against a per-space quota of one per second before the fallback
+  can run. This, not `maxCardWidgets`, is the binding limit: widgets of up to
+  3500 bytes reach 32 KB at around a dozen, and would need a quarter of a
+  megabyte of answer to reach eighty. A card Chat rejects for size (413) now
+  falls back to text like the 400 it already did.
 - A turn that failed inside the daemon posted nothing. The daemon emits
   `turn-error` when a turn dies — a bad model name, a rejected credential, a
   rate limit — and nothing in switchboard parsed it, so the thread went quiet

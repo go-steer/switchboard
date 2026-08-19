@@ -41,6 +41,7 @@
 package googlechat
 
 import (
+	"encoding/json"
 	"regexp"
 	"strings"
 
@@ -62,12 +63,29 @@ const (
 	// An answer's paragraph spills over this into consecutive widgets rather
 	// than being cut at it: that is a presentation limit, and presentation is
 	// no reason to discard what the model wrote. The gateway's own widgets do
-	// still clamp — their text is authored here, fixed, and nowhere near the
-	// budget, and they carry HTML, which cannot be cut safely anyway.
+	// still clamp, because their text is authored here and is nowhere near the
+	// budget — a clamp that can never fire is the cheapest backstop there is.
+	// It would not be a safe *split* if it did fire: those widgets carry HTML,
+	// and clamp is a byte cut that can land inside a tag or an entity.
 	maxWidgetText = 3500
 	// maxCardHeader is the budget for a section header, which is one line in
 	// every client — a paragraph's worth of text there just gets clipped.
 	maxCardHeader = 200
+	// maxCardBytes is the budget for the whole rendered card, measured as the
+	// JSON Chat is actually handed. Chat caps a message — text, cardsV2 and
+	// accessory widgets together — at 32,000 bytes, and tells an app over it to
+	// send several messages instead, which is what the text path already does.
+	//
+	// This is the binding constraint, not maxCardWidgets: spilling produces
+	// widgets of up to maxWidgetText, so a card reaches 32 KB at around a dozen
+	// of them and would need over 250 KB of answer to reach eighty. Without
+	// this bail an over-long answer would cost a rejected write before the text
+	// fallback ran — and Chat's per-space write quota is one per second.
+	//
+	// Held under the real ceiling by enough for the rest of the message: the
+	// fallback text (clamped to chatTextLimit), the usage footer appended after
+	// this check, and the thread and card envelope.
+	maxCardBytes = 26000
 	// cardID names the single card on a message. Chat requires an id per card;
 	// it is only used to address the card within the message.
 	cardID = "switchboard"
@@ -158,7 +176,7 @@ func markdownWidgets(md string) []*chatv1.GoogleAppsCardV1Widget {
 	parts := chat.ChunkText(md, maxWidgetText)
 	out := make([]*chatv1.GoogleAppsCardV1Widget, 0, len(parts))
 	for _, p := range parts {
-		if strings.TrimSpace(p) == "" {
+		if p == "" {
 			continue
 		}
 		out = append(out, &chatv1.GoogleAppsCardV1Widget{
@@ -484,7 +502,28 @@ func answerCard(markdown string) (card *chatv1.GoogleAppsCardV1Card) {
 	if !structure {
 		return nil
 	}
-	return &chatv1.GoogleAppsCardV1Card{Sections: sections}
+	card = &chatv1.GoogleAppsCardV1Card{Sections: sections}
+	// An answer too big for one Chat message goes out as text, which splits
+	// into as many messages as it needs. Checked here rather than left to Chat
+	// so an oversize answer costs no rejected write on the way to the fallback.
+	if cardBytes(card) > maxCardBytes {
+		return nil
+	}
+	return card
+}
+
+// cardBytes is the card's size on the wire — the JSON of the cardsV2 list, the
+// same encoding the API call sends. Measured rather than estimated because
+// escaping and the per-widget envelope are a large enough share of a card built
+// from model output to make an estimate wrong in the direction that matters.
+func cardBytes(card *chatv1.GoogleAppsCardV1Card) int {
+	b, err := json.Marshal(singleCard(card))
+	if err != nil {
+		// Unmarshalable means the API call would fail too: treat it as
+		// over-budget and let the caller send text.
+		return maxCardBytes + 1
+	}
+	return len(b)
 }
 
 // withUsageFooter appends the turn's accounting to an answer card as a final

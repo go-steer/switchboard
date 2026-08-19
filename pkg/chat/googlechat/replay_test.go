@@ -132,8 +132,12 @@ func TestReplay(t *testing.T) {
 	}
 }
 
-// replay runs one payload through the real dispatch path against fakes,
-// configured the way a typical deployment is: cards on, one mapped command.
+// replay runs one payload through the real dispatch path against fakes, with
+// one mapped command and gateway cards on. status rather than the rich default
+// on purpose: these goldens are about decoding and routing an inbound event,
+// and everything they post is a gateway message, so rich would pin the same
+// output while making every golden churn on an answer-card change. The rich
+// answer path is covered end to end by TestSendLongAnswerInRichMode.
 func replay(t *testing.T, payload []byte) replayResult {
 	t.Helper()
 	m := &fakeMessenger{}

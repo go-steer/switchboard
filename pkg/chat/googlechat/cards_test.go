@@ -337,10 +337,62 @@ func TestAnswerCardSpillsALongSectionInsteadOfTruncating(t *testing.T) {
 	}
 }
 
+// TestAnswerCardBailsBeforeChatsMessageCeiling is the other half of spilling:
+// an answer big enough that the card would not fit in one Chat message has to
+// go out as text, and has to do it without spending a rejected write first.
+// Chat caps a message at 32,000 bytes; maxCardWidgets never gets near that,
+// because a spilled widget is up to maxWidgetText and eighty of them is a
+// quarter of a megabyte.
+func TestAnswerCardBailsBeforeChatsMessageCeiling(t *testing.T) {
+	body := func(lines int) string {
+		var b strings.Builder
+		b.WriteString("# Deploy\n\nRun it:\n\n```hcl\n")
+		for i := 0; i < lines; i++ {
+			fmt.Fprintf(&b, "resource \"google_project_service\" \"svc_%04d\" { service = \"x\" }\n", i)
+		}
+		b.WriteString("```\n")
+		return b.String()
+	}
+
+	// Comfortably inside the ceiling: still a card, and still spilled.
+	card := answerCard(body(200))
+	if card == nil {
+		t.Fatalf("an answer that fits should still render as a card")
+	}
+	if n := cardBytes(card); n > maxCardBytes {
+		t.Fatalf("card is %d bytes, over the %d budget", n, maxCardBytes)
+	}
+
+	// Past it: text, which splits across as many messages as it needs.
+	for _, lines := range []int{600, 2000} {
+		if card := answerCard(body(lines)); card != nil {
+			t.Errorf("a %d-byte answer produced a %d-byte card; want the text path",
+				len(body(lines)), cardBytes(card))
+		}
+	}
+
+	// The bail has to leave room for everything else on the message: the
+	// fallback text and the usage footer both ride alongside the card.
+	biggest := answerCard(body(430))
+	for lines := 430; lines > 0 && biggest == nil; lines -= 10 {
+		biggest = answerCard(body(lines))
+	}
+	if biggest == nil {
+		t.Fatalf("no card at any size")
+	}
+	withFooter := withUsageFooter(biggest, &chat.Usage{
+		Model: "gemini-3.7-flash", TokensIn: 5000, TokensOut: 1, CostUSD: 0.0037537,
+	})
+	if n := cardBytes(withFooter) + chatTextLimit; n > 32000 {
+		t.Errorf("card plus fallback text is %d bytes, over Chat's 32000 ceiling", n)
+	}
+}
+
 // TestGatewayWidgetsStillClamp pins the other half of the decision: the
-// gateway's own widgets keep their budget. Their text is authored here and
-// nowhere near it, and they carry HTML, where a split could land inside a tag
-// or a character entity.
+// gateway's own widgets keep their budget, as a backstop that cannot fire —
+// their text is authored here, fixed, and nowhere near it. Splitting them would
+// be no safer: they carry HTML, and a clamp is a byte cut that can land inside
+// a tag or an entity just as a split can.
 func TestGatewayWidgetsStillClamp(t *testing.T) {
 	long := strings.Repeat("a", maxWidgetText*2)
 	w := htmlWidget(long)

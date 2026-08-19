@@ -318,6 +318,86 @@ func TestSendAnswerCardsOnlyInRichMode(t *testing.T) {
 	}
 }
 
+// TestSendLongAnswerInRichMode walks the whole egress path for the mode that is
+// now the default: a long fenced answer, sent, and observed as Chat would see
+// it. answerCard's own tests check the card in isolation; this one checks what
+// Send actually hands the API — one message while the card fits, and the text
+// path once it does not.
+func TestSendLongAnswerInRichMode(t *testing.T) {
+	body := func(lines int) string {
+		var b strings.Builder
+		b.WriteString("# Deploy\n\nRun it:\n\n```hcl\n")
+		for i := 0; i < lines; i++ {
+			fmt.Fprintf(&b, "resource \"google_project_service\" \"svc_%04d\" { service = \"x\" }\n", i)
+		}
+		b.WriteString("```\n")
+		return b.String()
+	}
+
+	// Inside the ceiling: one card message, spilled across widgets, complete.
+	f := &fakeMessenger{}
+	a := newTestAdapter(f)
+	a.cards = CardsRich
+	if _, err := a.Send(context.Background(), chat.Reply{
+		Conversation: "spaces/AAA:spaces/AAA/threads/T1",
+		Text:         body(200),
+		Kind:         chat.KindAnswer,
+	}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if len(f.creates) != 1 || f.creates[0].card == nil {
+		t.Fatalf("want one card message, got %+v", f.creates)
+	}
+	var widgets, size int
+	for _, s := range f.creates[0].card.Sections {
+		for _, w := range s.Widgets {
+			if w.TextParagraph != nil {
+				widgets++
+				size += len(w.TextParagraph.Text)
+				if strings.Contains(w.TextParagraph.Text, "…") {
+					t.Errorf("widget was truncated: %q", w.TextParagraph.Text)
+				}
+			}
+		}
+	}
+	if widgets < 2 {
+		t.Errorf("want the answer spilled across widgets, got %d", widgets)
+	}
+	if size < len(body(200))/2 {
+		t.Errorf("card carries %d bytes of a %d-byte answer", size, len(body(200)))
+	}
+
+	// Past it: no card, and the answer arrives whole across several messages
+	// rather than costing a rejected write on the way there.
+	f = &fakeMessenger{}
+	a = newTestAdapter(f)
+	a.cards = CardsRich
+	if _, err := a.Send(context.Background(), chat.Reply{
+		Conversation: "spaces/AAA:spaces/AAA/threads/T1",
+		Text:         body(2000),
+		Kind:         chat.KindAnswer,
+	}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if len(f.creates) < 2 {
+		t.Fatalf("want the oversize answer split across messages, got %d", len(f.creates))
+	}
+	for _, c := range f.creates {
+		if c.card != nil {
+			t.Errorf("an oversize answer must not attempt a card: %+v", c)
+		}
+	}
+	var joined strings.Builder
+	for _, c := range f.creates {
+		joined.WriteString(c.text)
+	}
+	for _, want := range []string{"svc_0000", "svc_1000", "svc_1999"} {
+		if !strings.Contains(joined.String(), want) {
+			t.Errorf("%q was lost on the way to the text fallback", want)
+		}
+	}
+}
+
 // TestSendFallsBackWhenChatRejectsACard is the rule that a rich render must
 // never cost a reply.
 func TestSendFallsBackWhenChatRejectsACard(t *testing.T) {
