@@ -326,10 +326,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     reaches for a four-backtick fence when the answer is itself about markdown.
     Each run of three or more backticks is one delimiter now.
 
-  Not fixed here: in `--googlechat-cards rich` an answer goes out as a card
-  whose paragraphs are clamped at 3500 bytes with an ellipsis, so a long one is
-  still truncated (and can still be cut mid-fence) — that is #32, which spills
-  over-long widgets instead of clamping them.
+  Not fixed there but fixed below: `--googlechat-cards rich` sends an answer as
+  a card rather than as text, and the card path had a truncation of its own.
+- A long answer-card paragraph in `--googlechat-cards rich` was cut at 3500
+  bytes and given an ellipsis. A widget is one paragraph run, one fenced block,
+  or one section body, so a single long code block was all it took — and the
+  same answer in `status` or `off` arrived complete across two posts. Nothing
+  was logged, unlike a card Chat *rejects*, which falls back to text; the
+  reader's only signal was the `…`. The budget was a presentation argument ("a
+  widget this long is already collapsed behind *show more*"), and collapsed is
+  readable where truncated is gone. An over-long run now spills into consecutive
+  widgets in the same section, split by the same fence-aware logic as the text
+  path, since a widget boundary inside a `` ``` `` renders the backticks
+  literally exactly as a message boundary does. The gateway's own widgets keep
+  the clamp: their text is authored here, fixed, nowhere near the budget, and
+  carries HTML, where a split could land inside a tag or a character entity.
+  `maxCardHeader` keeps clamping too — a section header is one line in every
+  client, which is a real presentation limit.
 - A turn that failed inside the daemon posted nothing. The daemon emits
   `turn-error` when a turn dies — a bad model name, a rejected credential, a
   rate limit — and nothing in switchboard parsed it, so the thread went quiet

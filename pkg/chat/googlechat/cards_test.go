@@ -15,6 +15,7 @@
 package googlechat
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -279,6 +280,92 @@ func TestAnswerCardFenceIsOpaque(t *testing.T) {
 	if !strings.Contains(body, "# not a header") || !strings.Contains(body, "```") {
 		t.Fatalf("fence body was mangled: %q", body)
 	}
+}
+
+// TestAnswerCardSpillsALongSectionInsteadOfTruncating is #32's regression test:
+// one long fenced block in a section used to arrive cut at maxWidgetText with an
+// ellipsis, where the same answer in status or off mode arrives complete across
+// two posts. Truncation is the one failure a fallback cannot excuse — nothing is
+// logged and the reader's only signal is the "…".
+func TestAnswerCardSpillsALongSectionInsteadOfTruncating(t *testing.T) {
+	var body strings.Builder
+	body.WriteString("# Deploy\n\nRun it:\n\n```\n")
+	for i := 0; i < 250; i++ {
+		fmt.Fprintf(&body, "gcloud services enable service_%03d.googleapis.com\n", i)
+	}
+	body.WriteString("```\n")
+	md := body.String()
+	if len(md) < 3*maxWidgetText {
+		t.Fatalf("fixture is only %d bytes; it has to need several widgets", len(md))
+	}
+
+	card := answerCard(md)
+	if card == nil {
+		t.Fatalf("a headed answer should render as a card")
+	}
+
+	var texts []string
+	for _, s := range card.Sections {
+		for _, w := range s.Widgets {
+			if w.TextParagraph == nil {
+				continue
+			}
+			text := w.TextParagraph.Text
+			if len(text) > maxWidgetText {
+				t.Errorf("widget is %d bytes, over the %d budget", len(text), maxWidgetText)
+			}
+			if strings.Contains(text, "…") {
+				t.Errorf("widget was truncated rather than spilled: %q", lastBytes(text, 80))
+			}
+			if strings.Count(text, "```")%2 != 0 {
+				t.Errorf("widget leaves a fence open, so Chat renders the backticks literally")
+			}
+			texts = append(texts, text)
+		}
+	}
+	if len(texts) < 2 {
+		t.Fatalf("want the section spilled across several widgets, got %d", len(texts))
+	}
+
+	// Every line the model wrote is still somewhere in the card, including the
+	// last one — the whole point of spilling rather than cutting.
+	joined := strings.Join(texts, "\n")
+	for _, want := range []string{"service_000", "service_125", "service_249"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("%q was lost from the card", want)
+		}
+	}
+}
+
+// TestGatewayWidgetsStillClamp pins the other half of the decision: the
+// gateway's own widgets keep their budget. Their text is authored here and
+// nowhere near it, and they carry HTML, where a split could land inside a tag
+// or a character entity.
+func TestGatewayWidgetsStillClamp(t *testing.T) {
+	long := strings.Repeat("a", maxWidgetText*2)
+	w := htmlWidget(long)
+	if w == nil || w.TextParagraph == nil {
+		t.Fatalf("no widget")
+	}
+	if len(w.TextParagraph.Text) > maxWidgetText {
+		t.Fatalf("html widget is %d bytes, over the %d budget", len(w.TextParagraph.Text), maxWidgetText)
+	}
+	w = iconTextWidget(iconNotice, long)
+	if w == nil || w.DecoratedText == nil {
+		t.Fatalf("no widget")
+	}
+	if len(w.DecoratedText.Text) > maxWidgetText {
+		t.Fatalf("icon widget is %d bytes, over the %d budget", len(w.DecoratedText.Text), maxWidgetText)
+	}
+}
+
+// lastBytes trims a value to its tail for an error message, since what a
+// truncation test wants to show is the end of the string.
+func lastBytes(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return "…" + s[len(s)-n:]
 }
 
 func TestSingleCardRejectsEmpty(t *testing.T) {
