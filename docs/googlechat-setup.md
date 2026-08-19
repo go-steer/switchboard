@@ -268,11 +268,16 @@ In the order that shows what is new:
    error notice card. **Stop it mid-turn** and the notice takes about 90
    seconds of failed reconnects to arrive, because a daemon that comes back
    inside that window should not have interrupted anyone.
-7. Restart with `--googlechat-cards=rich`, ask for something structured → a
+7. **Ask for a long answer with code in it** — "write me the Terraform for
+   three project services, with the variables" is enough to clear the
+   4096-character ceiling. It arrives as several ordered posts, and every one of
+   them renders its code as code: no stray backticks at the seam, which is what
+   used to happen when the split landed inside a fenced block.
+8. Restart with `--googlechat-cards=rich`, ask for something structured → a
    sectioned answer card.
-8. Restart with `--googlechat-cards=off` → everything degrades to text.
-9. **@-mention the app into a new room** → the welcome card, exactly once. A
-   mention-add sends two events and only one may be answered.
+9. Restart with `--googlechat-cards=off` → everything degrades to text.
+10. **@-mention the app into a new room** → the welcome card, exactly once. A
+    mention-add sends two events and only one may be answered.
 
 ### Testing both dialects
 

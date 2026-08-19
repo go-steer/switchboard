@@ -166,7 +166,7 @@ func TestSendChunksLongReply(t *testing.T) {
 	if len(f.creates) < 2 {
 		t.Fatalf("expected reply to be split into >=2 messages, got %d", len(f.creates))
 	}
-	var reassembled strings.Builder
+	var parts []string
 	for _, c := range f.creates {
 		if len(c.text) > chatTextLimit {
 			t.Fatalf("chunk exceeds limit: %d bytes", len(c.text))
@@ -174,9 +174,10 @@ func TestSendChunksLongReply(t *testing.T) {
 		if c.thread != "spaces/AAA/threads/T1" {
 			t.Fatalf("every chunk must target the thread, got %q", c.thread)
 		}
-		reassembled.WriteString(c.text)
+		parts = append(parts, c.text)
 	}
-	if reassembled.String() != strings.TrimSpace(body) {
+	// Rejoined on the boundary newline the split was taken at.
+	if strings.Join(parts, "\n") != strings.TrimSpace(body) {
 		t.Fatalf("chunks do not reassemble to the reply")
 	}
 	if ref.ID != "spaces/AAA/messages/M1" {
