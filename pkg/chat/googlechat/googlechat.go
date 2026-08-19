@@ -87,7 +87,8 @@ type Config struct {
 	// SubscriptionID is the Pub/Sub subscription carrying Google Chat events.
 	SubscriptionID string
 	// Cards selects how much of the output is rendered as cards. The zero
-	// value means CardsStatus (gateway messages as cards, answers as text).
+	// value means CardsRich (gateway messages and a structured answer both as
+	// cards); CardsStatus leaves answers as text.
 	Cards CardMode
 	// CallerMode selects which form of the sender's identity is asserted.
 	// The zero value means chat.CallerEmail.
@@ -490,12 +491,20 @@ func (a *Adapter) FitsOneMessage(text string) bool {
 
 // isCardRejection reports whether Chat refused the request because of the
 // payload itself — the case worth retrying as plain text. A 400 from
-// spaces.messages with a card attached is Chat saying the card is malformed;
-// every other status (auth, missing space, rate limit) means the text would
-// fail too.
+// spaces.messages with a card attached is Chat saying the card is malformed,
+// and a 413 is it saying the message is too big for one post, which is exactly
+// what the text path splits. Every other status (auth, missing space, rate
+// limit) means the text would fail too.
+//
+// answerCard keeps a card under Chat's 32,000-byte message ceiling itself
+// (maxCardBytes), so 413 should be unreachable; it is here because the cost of
+// being wrong about that is a dropped reply rather than a wasted write.
 func isCardRejection(err error) bool {
 	var ae *googleapi.Error
-	return errors.As(err, &ae) && ae.Code == http.StatusBadRequest
+	if !errors.As(err, &ae) {
+		return false
+	}
+	return ae.Code == http.StatusBadRequest || ae.Code == http.StatusRequestEntityTooLarge
 }
 
 // classify maps Chat's HTTP statuses onto the provider-neutral sentinels in

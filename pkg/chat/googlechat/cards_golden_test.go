@@ -18,8 +18,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"flag"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -45,6 +47,35 @@ const goldenAnswer = "# Deploy check\n\n" +
 	"---\n\n" +
 	"#### Next\n\nRe-run after patching.\n"
 
+// goldenSpilledAnswer holds one fenced block too long for a single widget, so
+// there is a golden showing what a spilled run looks like on the wire:
+// consecutive paragraphs, each fence closed in the widget that opened it, and
+// no ellipsis anywhere. Sized just over the budget rather than far over it, so
+// the file stays something a reviewer can read and paste.
+//
+// It also records what spilling does not preserve: the continuation widget
+// reopens a bare ``` rather than ```sh. Neither Chat nor Slack highlights by
+// language, so the tag is inert on both, and the alternative — reopening with
+// the opener's info string — is a change to the shared splitter that the text
+// path would have to be re-pinned for.
+var goldenSpilledAnswer = func() string {
+	var b strings.Builder
+	b.WriteString("# Enable the APIs\n\nRun this once per project:\n\n```sh\n")
+	for i := 0; i < 90; i++ {
+		fmt.Fprintf(&b, "gcloud services enable service_%03d.googleapis.com\n", i)
+	}
+	b.WriteString("```\n")
+	return b.String()
+}()
+
+func countWidgets(card *chatv1.GoogleAppsCardV1Card) int {
+	n := 0
+	for _, s := range card.Sections {
+		n += len(s.Widgets)
+	}
+	return n
+}
+
 // TestCardsGolden pins the exact JSON each card builder emits.
 //
 // Unit tests can only check that a card has the shape this package intended.
@@ -59,25 +90,31 @@ func TestCardsGolden(t *testing.T) {
 	cases := []struct {
 		name string
 		card *chatv1.GoogleAppsCardV1Card
+		// minWidgets guards a fixture whose point is how many widgets it
+		// produces: without it, -update would happily record a card that had
+		// stopped spilling, and the golden would pin the bug.
+		minWidgets int
 	}{
-		{"progress", gatewayCard(chat.KindProgress, toChatText("⏳ Working…"))},
-		{"activity", gatewayCard(chat.KindActivity, toChatText("🔧 Running `bash`"))},
+		{"progress", gatewayCard(chat.KindProgress, toChatText("⏳ Working…")), 0},
+		{"activity", gatewayCard(chat.KindActivity, toChatText("🔧 Running `bash`")), 0},
 		{"notice", gatewayCard(chat.KindNotice, toChatText(
-			"⚠️ That turn didn't go through — the daemon returned 503. Try again."))},
+			"⚠️ That turn didn't go through — the daemon returned 503. Try again.")), 0},
 		{"ack-with-choices", ackCard(
 			toChatText("Progress mode for this channel is *indicator*. "+
 				"Change it with `progress <off|indicator|status|stream>`."),
-			"progress", []string{"off", "indicator", "status", "stream"})},
-		{"ack-plain", ackCard(toChatText("Progress mode set to *stream*."), "progress", nil)},
-		{"welcome", welcomeCard([]string{"off", "indicator", "status", "stream"})},
-		{"answer", answerCard(goldenAnswer)},
+			"progress", []string{"off", "indicator", "status", "stream"}), 0},
+		{"ack-plain", ackCard(toChatText("Progress mode set to *stream*."), "progress", nil), 0},
+		{"welcome", welcomeCard([]string{"off", "indicator", "status", "stream"}), 0},
+		{"answer", answerCard(goldenAnswer), 0},
+		// The whole fence has to survive, across as many widgets as it takes.
+		{"answer-spilled", answerCard(goldenSpilledAnswer), 2},
 		// The --show-usage footer, pinned separately: it is a widget shape
 		// nothing else on the card uses, and the Card Builder is the only place
 		// its size and colour can actually be judged.
 		{"answer-with-usage", withUsageFooter(answerCard(goldenAnswer), &chat.Usage{
 			Model: "gemini-3.7-flash", TokensIn: 5000, TokensOut: 1,
 			CostUSD: 0.0037537, Latency: 3142 * time.Millisecond,
-		})},
+		}), 0},
 	}
 
 	dir := filepath.Join("testdata", "cards")
@@ -90,6 +127,10 @@ func TestCardsGolden(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.card == nil {
 				t.Fatalf("builder returned no card — the golden would be meaningless")
+			}
+			if n := countWidgets(tc.card); n < tc.minWidgets {
+				t.Fatalf("card has %d widgets, want at least %d — the fixture no longer "+
+					"exercises what it was written for", n, tc.minWidgets)
 			}
 			// An encoder rather than json.Marshal: the default escapes < and &
 			// to < / &, which would hide the very HTML these cards

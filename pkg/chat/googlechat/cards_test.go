@@ -15,6 +15,7 @@
 package googlechat
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -29,7 +30,7 @@ func TestParseCardMode(t *testing.T) {
 		want CardMode
 		ok   bool
 	}{
-		{"", CardsStatus, true}, // the zero value is the default
+		{"", CardsRich, true}, // the zero value is the default
 		{"off", CardsOff, true},
 		{"status", CardsStatus, true},
 		{"rich", CardsRich, true},
@@ -279,6 +280,144 @@ func TestAnswerCardFenceIsOpaque(t *testing.T) {
 	if !strings.Contains(body, "# not a header") || !strings.Contains(body, "```") {
 		t.Fatalf("fence body was mangled: %q", body)
 	}
+}
+
+// TestAnswerCardSpillsALongSectionInsteadOfTruncating is #32's regression test:
+// one long fenced block in a section used to arrive cut at maxWidgetText with an
+// ellipsis, where the same answer in status or off mode arrives complete across
+// two posts. Truncation is the one failure a fallback cannot excuse — nothing is
+// logged and the reader's only signal is the "…".
+func TestAnswerCardSpillsALongSectionInsteadOfTruncating(t *testing.T) {
+	var body strings.Builder
+	body.WriteString("# Deploy\n\nRun it:\n\n```\n")
+	for i := 0; i < 250; i++ {
+		fmt.Fprintf(&body, "gcloud services enable service_%03d.googleapis.com\n", i)
+	}
+	body.WriteString("```\n")
+	md := body.String()
+	if len(md) < 3*maxWidgetText {
+		t.Fatalf("fixture is only %d bytes; it has to need several widgets", len(md))
+	}
+
+	card := answerCard(md)
+	if card == nil {
+		t.Fatalf("a headed answer should render as a card")
+	}
+
+	var texts []string
+	for _, s := range card.Sections {
+		for _, w := range s.Widgets {
+			if w.TextParagraph == nil {
+				continue
+			}
+			text := w.TextParagraph.Text
+			if len(text) > maxWidgetText {
+				t.Errorf("widget is %d bytes, over the %d budget", len(text), maxWidgetText)
+			}
+			if strings.Contains(text, "…") {
+				t.Errorf("widget was truncated rather than spilled: %q", lastBytes(text, 80))
+			}
+			if strings.Count(text, "```")%2 != 0 {
+				t.Errorf("widget leaves a fence open, so Chat renders the backticks literally")
+			}
+			texts = append(texts, text)
+		}
+	}
+	if len(texts) < 2 {
+		t.Fatalf("want the section spilled across several widgets, got %d", len(texts))
+	}
+
+	// Every line the model wrote is still somewhere in the card, including the
+	// last one — the whole point of spilling rather than cutting.
+	joined := strings.Join(texts, "\n")
+	for _, want := range []string{"service_000", "service_125", "service_249"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("%q was lost from the card", want)
+		}
+	}
+}
+
+// TestAnswerCardBailsBeforeChatsMessageCeiling is the other half of spilling:
+// an answer big enough that the card would not fit in one Chat message has to
+// go out as text, and has to do it without spending a rejected write first.
+// Chat caps a message at 32,000 bytes; maxCardWidgets never gets near that,
+// because a spilled widget is up to maxWidgetText and eighty of them is a
+// quarter of a megabyte.
+func TestAnswerCardBailsBeforeChatsMessageCeiling(t *testing.T) {
+	body := func(lines int) string {
+		var b strings.Builder
+		b.WriteString("# Deploy\n\nRun it:\n\n```hcl\n")
+		for i := 0; i < lines; i++ {
+			fmt.Fprintf(&b, "resource \"google_project_service\" \"svc_%04d\" { service = \"x\" }\n", i)
+		}
+		b.WriteString("```\n")
+		return b.String()
+	}
+
+	// Comfortably inside the ceiling: still a card, and still spilled.
+	card := answerCard(body(200))
+	if card == nil {
+		t.Fatalf("an answer that fits should still render as a card")
+	}
+	if n := cardBytes(card); n > maxCardBytes {
+		t.Fatalf("card is %d bytes, over the %d budget", n, maxCardBytes)
+	}
+
+	// Past it: text, which splits across as many messages as it needs.
+	for _, lines := range []int{600, 2000} {
+		if card := answerCard(body(lines)); card != nil {
+			t.Errorf("a %d-byte answer produced a %d-byte card; want the text path",
+				len(body(lines)), cardBytes(card))
+		}
+	}
+
+	// The bail has to leave room for everything else on the message: the
+	// fallback text and the usage footer both ride alongside the card.
+	biggest := answerCard(body(430))
+	for lines := 430; lines > 0 && biggest == nil; lines -= 10 {
+		biggest = answerCard(body(lines))
+	}
+	if biggest == nil {
+		t.Fatalf("no card at any size")
+	}
+	withFooter := withUsageFooter(biggest, &chat.Usage{
+		Model: "gemini-3.7-flash", TokensIn: 5000, TokensOut: 1, CostUSD: 0.0037537,
+	})
+	if n := cardBytes(withFooter) + chatTextLimit; n > 32000 {
+		t.Errorf("card plus fallback text is %d bytes, over Chat's 32000 ceiling", n)
+	}
+}
+
+// TestGatewayWidgetsStillClamp pins the other half of the decision: the
+// gateway's own widgets keep their budget, as a backstop that cannot fire —
+// their text is authored here, fixed, and nowhere near it. Splitting them would
+// be no safer: they carry HTML, and a clamp is a byte cut that can land inside
+// a tag or an entity just as a split can.
+func TestGatewayWidgetsStillClamp(t *testing.T) {
+	long := strings.Repeat("a", maxWidgetText*2)
+	w := htmlWidget(long)
+	if w == nil || w.TextParagraph == nil {
+		t.Fatalf("no widget")
+	}
+	if len(w.TextParagraph.Text) > maxWidgetText {
+		t.Fatalf("html widget is %d bytes, over the %d budget", len(w.TextParagraph.Text), maxWidgetText)
+	}
+	w = iconTextWidget(iconNotice, long)
+	if w == nil || w.DecoratedText == nil {
+		t.Fatalf("no widget")
+	}
+	if len(w.DecoratedText.Text) > maxWidgetText {
+		t.Fatalf("icon widget is %d bytes, over the %d budget", len(w.DecoratedText.Text), maxWidgetText)
+	}
+}
+
+// lastBytes trims a value to its tail for an error message, since what a
+// truncation test wants to show is the end of the string.
+func lastBytes(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return "…" + s[len(s)-n:]
 }
 
 func TestSingleCardRejectsEmpty(t *testing.T) {

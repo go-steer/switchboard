@@ -286,6 +286,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `block_kit.py`; mrkdwn stays the default.
 
 ### Changed
+- `--googlechat-cards` now defaults to **`rich`** rather than `status`, so a
+  structured agent reply is laid out as a card out of the box. A card is not
+  chunked, which makes `rich` the one mode in which a long fenced answer cannot
+  break at a message boundary at all — with the widget truncation above fixed,
+  it is the only mode with no content defect, and that is what a default should
+  be. The escalation is narrow: `answerCard` returns nil unless the answer has a
+  `#`/`##` header or a rule that actually draws, so conversational traffic
+  behaves exactly as it did, and a render that goes wrong cannot cost a reply —
+  a panic recovers into nil and a card Chat rejects falls back to posting the
+  text. `status` stays supported and documented for an operator who wants
+  gateway cards without model-authored ones, which is the whole reason this is a
+  mode and not a bool.
 - Google Chat now asserts the sender's **email address** as `X-Asserted-Caller`,
   matching what the Slack adapter has always done and what the daemon keys
   per-caller credentials by; `--caller-id id` restores the raw `users/NNN`
@@ -326,10 +338,36 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     reaches for a four-backtick fence when the answer is itself about markdown.
     Each run of three or more backticks is one delimiter now.
 
-  Not fixed here: in `--googlechat-cards rich` an answer goes out as a card
-  whose paragraphs are clamped at 3500 bytes with an ellipsis, so a long one is
-  still truncated (and can still be cut mid-fence) — that is #32, which spills
-  over-long widgets instead of clamping them.
+  Not fixed there but fixed below: `--googlechat-cards rich` sends an answer as
+  a card rather than as text, and the card path had a truncation of its own.
+- A long answer-card paragraph in `--googlechat-cards rich` was cut at 3500
+  bytes and given an ellipsis. A widget is one paragraph run, one fenced block,
+  or one section body, so a single long code block was all it took — and the
+  same answer in `status` or `off` arrived complete across two posts. Nothing
+  was logged, unlike a card Chat *rejects*, which falls back to text; the
+  reader's only signal was the `…`. The budget was a presentation argument ("a
+  widget this long is already collapsed behind *show more*"), and collapsed is
+  readable where truncated is gone. An over-long run now spills into consecutive
+  widgets in the same section, split by the same fence-aware logic as the text
+  path, since a widget boundary inside a `` ``` `` renders the backticks
+  literally much as a message boundary does. The gateway's own widgets keep the
+  clamp, as a backstop that cannot fire: their text is authored here, fixed, and
+  nowhere near the budget. Splitting them would be no safer anyway — they carry
+  HTML, and a clamp is a byte cut that can land inside a tag or an entity just
+  as a split can. `maxCardHeader` keeps clamping too — a section header is one
+  line in every client, which is a real presentation limit.
+
+  Spilling lets a card grow without bound, so `answerCard` now measures the card
+  it built and returns nil past 26,000 bytes, sending the answer as text — which
+  splits into as many messages as it needs. Chat caps a whole message, text and
+  `cardsV2` together, at 32,000 bytes and tells an app over that to send
+  several; the margin covers the fallback text and usage footer riding on the
+  same message. Measured here rather than left to Chat, because a rejected card
+  costs a write against a per-space quota of one per second before the fallback
+  can run. This, not `maxCardWidgets`, is the binding limit: widgets of up to
+  3500 bytes reach 32 KB at around a dozen, and would need a quarter of a
+  megabyte of answer to reach eighty. A card Chat rejects for size (413) now
+  falls back to text like the 400 it already did.
 - A turn that failed inside the daemon posted nothing. The daemon emits
   `turn-error` when a turn dies — a bad model name, a rejected credential, a
   rate limit — and nothing in switchboard parsed it, so the thread went quiet

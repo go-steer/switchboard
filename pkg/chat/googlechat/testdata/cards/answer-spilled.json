@@ -1,0 +1,27 @@
+{
+  "sections": [
+    {
+      "header": "Enable the APIs",
+      "widgets": [
+        {
+          "textParagraph": {
+            "text": "Run this once per project:",
+            "textSyntax": "MARKDOWN"
+          }
+        },
+        {
+          "textParagraph": {
+            "text": "```sh\ngcloud services enable service_000.googleapis.com\ngcloud services enable service_001.googleapis.com\ngcloud services enable service_002.googleapis.com\ngcloud services enable service_003.googleapis.com\ngcloud services enable service_004.googleapis.com\ngcloud services enable service_005.googleapis.com\ngcloud services enable service_006.googleapis.com\ngcloud services enable service_007.googleapis.com\ngcloud services enable service_008.googleapis.com\ngcloud services enable service_009.googleapis.com\ngcloud services enable service_010.googleapis.com\ngcloud services enable service_011.googleapis.com\ngcloud services enable service_012.googleapis.com\ngcloud services enable service_013.googleapis.com\ngcloud services enable service_014.googleapis.com\ngcloud services enable service_015.googleapis.com\ngcloud services enable service_016.googleapis.com\ngcloud services enable service_017.googleapis.com\ngcloud services enable service_018.googleapis.com\ngcloud services enable service_019.googleapis.com\ngcloud services enable service_020.googleapis.com\ngcloud services enable service_021.googleapis.com\ngcloud services enable service_022.googleapis.com\ngcloud services enable service_023.googleapis.com\ngcloud services enable service_024.googleapis.com\ngcloud services enable service_025.googleapis.com\ngcloud services enable service_026.googleapis.com\ngcloud services enable service_027.googleapis.com\ngcloud services enable service_028.googleapis.com\ngcloud services enable service_029.googleapis.com\ngcloud services enable service_030.googleapis.com\ngcloud services enable service_031.googleapis.com\ngcloud services enable service_032.googleapis.com\ngcloud services enable service_033.googleapis.com\ngcloud services enable service_034.googleapis.com\ngcloud services enable service_035.googleapis.com\ngcloud services enable service_036.googleapis.com\ngcloud services enable service_037.googleapis.com\ngcloud services enable service_038.googleapis.com\ngcloud services enable service_039.googleapis.com\ngcloud services enable service_040.googleapis.com\ngcloud services enable service_041.googleapis.com\ngcloud services enable service_042.googleapis.com\ngcloud services enable service_043.googleapis.com\ngcloud services enable service_044.googleapis.com\ngcloud services enable service_045.googleapis.com\ngcloud services enable service_046.googleapis.com\ngcloud services enable service_047.googleapis.com\ngcloud services enable service_048.googleapis.com\ngcloud services enable service_049.googleapis.com\ngcloud services enable service_050.googleapis.com\ngcloud services enable service_051.googleapis.com\ngcloud services enable service_052.googleapis.com\ngcloud services enable service_053.googleapis.com\ngcloud services enable service_054.googleapis.com\ngcloud services enable service_055.googleapis.com\ngcloud services enable service_056.googleapis.com\ngcloud services enable service_057.googleapis.com\ngcloud services enable service_058.googleapis.com\ngcloud services enable service_059.googleapis.com\ngcloud services enable service_060.googleapis.com\ngcloud services enable service_061.googleapis.com\ngcloud services enable service_062.googleapis.com\ngcloud services enable service_063.googleapis.com\ngcloud services enable service_064.googleapis.com\ngcloud services enable service_065.googleapis.com\ngcloud services enable service_066.googleapis.com\ngcloud services enable service_067.googleapis.com\ngcloud services enable service_068.googleapis.com\n```",
+            "textSyntax": "MARKDOWN"
+          }
+        },
+        {
+          "textParagraph": {
+            "text": "```\ngcloud services enable service_069.googleapis.com\ngcloud services enable service_070.googleapis.com\ngcloud services enable service_071.googleapis.com\ngcloud services enable service_072.googleapis.com\ngcloud services enable service_073.googleapis.com\ngcloud services enable service_074.googleapis.com\ngcloud services enable service_075.googleapis.com\ngcloud services enable service_076.googleapis.com\ngcloud services enable service_077.googleapis.com\ngcloud services enable service_078.googleapis.com\ngcloud services enable service_079.googleapis.com\ngcloud services enable service_080.googleapis.com\ngcloud services enable service_081.googleapis.com\ngcloud services enable service_082.googleapis.com\ngcloud services enable service_083.googleapis.com\ngcloud services enable service_084.googleapis.com\ngcloud services enable service_085.googleapis.com\ngcloud services enable service_086.googleapis.com\ngcloud services enable service_087.googleapis.com\ngcloud services enable service_088.googleapis.com\ngcloud services enable service_089.googleapis.com\n```",
+            "textSyntax": "MARKDOWN"
+          }
+        }
+      ]
+    }
+  ]
+}

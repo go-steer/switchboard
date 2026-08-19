@@ -41,6 +41,7 @@
 package googlechat
 
 import (
+	"encoding/json"
 	"regexp"
 	"strings"
 
@@ -58,10 +59,33 @@ const (
 	// maxWidgetText is the per-widget text budget. Chat accepts more in a
 	// paragraph, but a widget this long is already collapsed behind "show
 	// more" in every client.
+	//
+	// An answer's paragraph spills over this into consecutive widgets rather
+	// than being cut at it: that is a presentation limit, and presentation is
+	// no reason to discard what the model wrote. The gateway's own widgets do
+	// still clamp, because their text is authored here and is nowhere near the
+	// budget — a clamp that can never fire is the cheapest backstop there is.
+	// It would not be a safe *split* if it did fire: those widgets carry HTML,
+	// and clamp is a byte cut that can land inside a tag or an entity.
 	maxWidgetText = 3500
 	// maxCardHeader is the budget for a section header, which is one line in
 	// every client — a paragraph's worth of text there just gets clipped.
 	maxCardHeader = 200
+	// maxCardBytes is the budget for the whole rendered card, measured as the
+	// JSON Chat is actually handed. Chat caps a message — text, cardsV2 and
+	// accessory widgets together — at 32,000 bytes, and tells an app over it to
+	// send several messages instead, which is what the text path already does.
+	//
+	// This is the binding constraint, not maxCardWidgets: spilling produces
+	// widgets of up to maxWidgetText, so a card reaches 32 KB at around a dozen
+	// of them and would need over 250 KB of answer to reach eighty. Without
+	// this bail an over-long answer would cost a rejected write before the text
+	// fallback ran — and Chat's per-space write quota is one per second.
+	//
+	// Held under the real ceiling by enough for the rest of the message: the
+	// fallback text (clamped to chatTextLimit), the usage footer appended after
+	// this check, and the thread and card envelope.
+	maxCardBytes = 26000
 	// cardID names the single card on a message. Chat requires an id per card;
 	// it is only used to address the card within the message.
 	cardID = "switchboard"
@@ -90,7 +114,7 @@ const (
 // a mode rather than a bool because the two card families carry very different
 // risk: gateway cards are small, fixed shapes the gateway itself authors, while
 // an answer card is a render of arbitrary model output. An operator who wants
-// the first without the second (the default) can have it.
+// the first without the second can have it.
 type CardMode string
 
 const (
@@ -98,9 +122,15 @@ const (
 	CardsOff CardMode = "off"
 	// CardsStatus renders the gateway's own messages — progress, activity,
 	// notices, command acknowledgments, the welcome — as cards, and leaves
-	// model answers as text. The default.
+	// model answers as text.
 	CardsStatus CardMode = "status"
-	// CardsRich additionally renders model answers as structural cards.
+	// CardsRich additionally renders model answers as structural cards. The
+	// default: a card is not chunked, so it is the only mode in which a long
+	// fenced answer cannot straddle a message boundary at all, and the render
+	// is already conditional — answerCard returns nil unless the answer has a
+	// header or a rule that draws, so a conversational reply behaves exactly
+	// as it does in status mode. A render bug cannot cost a reply either: a
+	// panic recovers into nil and a card Chat rejects falls back to text.
 	CardsRich CardMode = "rich"
 )
 
@@ -109,9 +139,9 @@ func ParseCardMode(s string) (CardMode, bool) {
 	switch CardMode(strings.ToLower(strings.TrimSpace(s))) {
 	case CardsOff:
 		return CardsOff, true
-	case CardsStatus, "":
+	case CardsStatus:
 		return CardsStatus, true
-	case CardsRich:
+	case CardsRich, "":
 		return CardsRich, true
 	}
 	return "", false
@@ -121,26 +151,45 @@ func ParseCardMode(s string) (CardMode, bool) {
 // Widget helpers
 // ---------------------------------------------------------------------------
 
-// markdownWidget is a paragraph rendered with Chat's markdown text syntax, so
-// a model turn's own markup — lists, emphasis, links, fenced code — is passed
+// markdownWidgets renders a run of a model turn with Chat's markdown text
+// syntax, so its own markup — lists, emphasis, links, fenced code — is passed
 // through for Chat to render rather than translated first. Chat-only, and used
 // only by the opt-in answer card. Returns nil when the text reduces to nothing
 // (Chat rejects an empty widget).
 //
+// Text over the per-widget budget becomes several consecutive widgets rather
+// than one cut short. A section body is whatever sits between two headers, so
+// one long fenced block is all it takes to pass the budget, and the text path
+// posts that same answer complete across several messages — a card must not be
+// the mode that loses the tail of it (#32). Splitting is the shared fence-aware
+// one, because a widget boundary inside a ``` renders the backticks literally
+// exactly as a message boundary does.
+//
 // Links and fenced blocks were confirmed to render this way in the Card
 // Builder (see docs/googlechat-setup.md §A); that is the evidence this path
 // rests on, since nothing offline can check it.
-func markdownWidget(md string) *chatv1.GoogleAppsCardV1Widget {
+func markdownWidgets(md string) []*chatv1.GoogleAppsCardV1Widget {
 	md = strings.TrimSpace(md)
 	if md == "" {
 		return nil
 	}
-	return &chatv1.GoogleAppsCardV1Widget{
-		TextParagraph: &chatv1.GoogleAppsCardV1TextParagraph{
-			Text:       clamp(md, maxWidgetText),
-			TextSyntax: "MARKDOWN",
-		},
+	parts := chat.ChunkText(md, maxWidgetText)
+	out := make([]*chatv1.GoogleAppsCardV1Widget, 0, len(parts))
+	for _, p := range parts {
+		if p == "" {
+			continue
+		}
+		out = append(out, &chatv1.GoogleAppsCardV1Widget{
+			TextParagraph: &chatv1.GoogleAppsCardV1TextParagraph{
+				Text:       p,
+				TextSyntax: "MARKDOWN",
+			},
+		})
 	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // htmlWidget is a paragraph of gateway-authored text. It takes Chat markup and
@@ -351,16 +400,20 @@ func answerCard(markdown string) (card *chatv1.GoogleAppsCardV1Card) {
 		structure bool // saw a header or a rule: the card earns its keep
 	)
 
+	// add appends a run's widgets — several when the run is over the per-widget
+	// budget — and keeps the count they are checked against in step with them.
+	add := func(sec *chatv1.GoogleAppsCardV1Section, md string) {
+		w := markdownWidgets(md)
+		sec.Widgets = append(sec.Widgets, w...)
+		widgets += len(w)
+	}
 	flushPara := func() {
 		if len(para) == 0 {
 			return
 		}
 		text := strings.Join(para, "\n")
 		para = para[:0]
-		if w := markdownWidget(text); w != nil {
-			cur.Widgets = append(cur.Widgets, w)
-			widgets++
-		}
+		add(cur, text)
 	}
 	// A header whose section turns out to have no body of its own — "# Results"
 	// immediately followed by "## Passing" — must not vanish with the empty
@@ -414,10 +467,7 @@ func answerCard(markdown string) (card *chatv1.GoogleAppsCardV1Card) {
 				continue
 			}
 			flushPara()
-			if w := markdownWidget("**" + title + "**"); w != nil {
-				cur.Widgets = append(cur.Widgets, w)
-				widgets++
-			}
+			add(cur, "**"+title+"**")
 			continue
 		}
 		if cardHRLineRE.MatchString(line) {
@@ -441,11 +491,7 @@ func answerCard(markdown string) (card *chatv1.GoogleAppsCardV1Card) {
 	// A header at the very end has no following section to be carried onto, so
 	// it lands as a bold lead-in on the last one rather than being lost.
 	if len(pending) > 0 && len(sections) > 0 {
-		last := sections[len(sections)-1]
-		if w := markdownWidget("**" + strings.Join(pending, " — ") + "**"); w != nil {
-			last.Widgets = append(last.Widgets, w)
-			widgets++
-		}
+		add(sections[len(sections)-1], "**"+strings.Join(pending, " — ")+"**")
 	}
 
 	if len(sections) == 0 || widgets == 0 || widgets > maxCardWidgets {
@@ -456,7 +502,28 @@ func answerCard(markdown string) (card *chatv1.GoogleAppsCardV1Card) {
 	if !structure {
 		return nil
 	}
-	return &chatv1.GoogleAppsCardV1Card{Sections: sections}
+	card = &chatv1.GoogleAppsCardV1Card{Sections: sections}
+	// An answer too big for one Chat message goes out as text, which splits
+	// into as many messages as it needs. Checked here rather than left to Chat
+	// so an oversize answer costs no rejected write on the way to the fallback.
+	if cardBytes(card) > maxCardBytes {
+		return nil
+	}
+	return card
+}
+
+// cardBytes is the card's size on the wire — the JSON of the cardsV2 list, the
+// same encoding the API call sends. Measured rather than estimated because
+// escaping and the per-widget envelope are a large enough share of a card built
+// from model output to make an estimate wrong in the direction that matters.
+func cardBytes(card *chatv1.GoogleAppsCardV1Card) int {
+	b, err := json.Marshal(singleCard(card))
+	if err != nil {
+		// Unmarshalable means the API call would fail too: treat it as
+		// over-budget and let the caller send text.
+		return maxCardBytes + 1
+	}
+	return len(b)
 }
 
 // withUsageFooter appends the turn's accounting to an answer card as a final

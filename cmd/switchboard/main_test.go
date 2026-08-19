@@ -15,9 +15,13 @@
 package main
 
 import (
+	"io"
+	"os"
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/go-steer/switchboard/pkg/chat/googlechat"
 )
 
 // TestSplitList checks the allowlist flag parser tolerates the shapes a
@@ -81,6 +85,55 @@ func TestRunServeIngressValidation(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestDefaultCardModeIsRich pins the out-of-the-box Google Chat rendering.
+// rich is the only mode in which a long fenced answer cannot break at a message
+// boundary, so the default is a correctness choice, not a cosmetic one, and it
+// should not drift back without someone deciding to.
+//
+// Asserted against what --help prints, which is the flag as registered, rather
+// than against the constant: a test that reads the constant the registration is
+// supposed to use passes just as happily when the registration stops using it.
+func TestDefaultCardModeIsRich(t *testing.T) {
+	if mode, ok := googlechat.ParseCardMode(defaultCardMode); !ok || mode != googlechat.CardsRich {
+		t.Fatalf("defaultCardMode = (%q, %v), want rich", mode, ok)
+	}
+	// The env var wins over the flag default, so it must not be set here.
+	t.Setenv("SWITCHBOARD_GOOGLECHAT_CARDS", "")
+	usage := captureStderr(t, func() { _ = runServe([]string{"-h"}) })
+	if !strings.Contains(usage, "-googlechat-cards") {
+		t.Fatalf("--help did not describe the flag:\n%s", usage)
+	}
+	if !strings.Contains(usage, `(default "rich")`) {
+		i := strings.Index(usage, "-googlechat-cards")
+		t.Fatalf("--googlechat-cards does not default to rich:\n%s", usage[i:min(i+400, len(usage))])
+	}
+}
+
+// captureStderr runs fn with os.Stderr redirected and returns what it wrote.
+// The flag package prints its defaults there, and that output is the only place
+// a registered default is observable from outside runServe.
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	saved := os.Stderr
+	os.Stderr = w
+	done := make(chan string, 1)
+	go func() {
+		var b strings.Builder
+		_, _ = io.Copy(&b, r)
+		done <- b.String()
+	}()
+	fn()
+	os.Stderr = saved
+	_ = w.Close()
+	out := <-done
+	_ = r.Close()
+	return out
 }
 
 // TestParseCallerMode and TestParseProgressMode pin the flag vocabulary: a

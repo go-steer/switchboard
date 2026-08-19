@@ -77,6 +77,13 @@ Usage:
 `, prog)
 }
 
+// defaultCardMode is what --googlechat-cards selects when nothing else does.
+// rich rather than status, because a card is not chunked and so is the only
+// mode a long fenced answer cannot break in, and because the render is already
+// conditional on the answer having structure — the mode is a no-op for
+// conversational traffic and only escalates when there is something to lay out.
+const defaultCardMode = string(googlechat.CardsRich)
+
 func runServe(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	daemonURL := fs.String("daemon-url", envOr("SWITCHBOARD_DAEMON_URL", "http://127.0.0.1:7777"),
@@ -104,9 +111,10 @@ func runServe(args []string) error {
 		"GCP project hosting the Google Chat Pub/Sub subscription (--platform googlechat)")
 	googleSub := fs.String("google-subscription", envOr("SWITCHBOARD_GOOGLE_SUBSCRIPTION", ""),
 		"Pub/Sub subscription carrying Google Chat events (--platform googlechat)")
-	googleCards := fs.String("googlechat-cards", envOr("SWITCHBOARD_GOOGLECHAT_CARDS", "status"),
-		"Google Chat card rendering: \"status\" (gateway progress/notice/ack cards), \"rich\" "+
-			"(also lay agent replies out as cards), or \"off\"; text is always sent as the fallback")
+	googleCards := fs.String("googlechat-cards", envOr("SWITCHBOARD_GOOGLECHAT_CARDS", defaultCardMode),
+		"Google Chat card rendering: \"rich\" (gateway cards, and a structured agent reply "+
+			"laid out as a card), \"status\" (gateway progress/notice/ack cards only), or "+
+			"\"off\"; text is always sent as the fallback")
 	googleLogEvents := fs.Bool("googlechat-log-events", false,
 		"log every inbound Google Chat payload verbatim, for capturing decoder fixtures; "+
 			"the payload includes message text and sender identity, so leave this off in production")
