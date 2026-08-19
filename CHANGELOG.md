@@ -414,6 +414,46 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   is the captured payload that shows it.
 
 ### Fixed
+- `go install`ed binaries no longer report themselves as a dev build (#43).
+  `go install module@version` records the module version in the binary, but
+  `internal/version` read only the `vcs.*` build settings — and those are
+  stamped only when building from a checkout, never for a module-cache build.
+  So the one field that *was* populated was the one field not read, and
+
+  ```
+  $ switchboard version    # go install ...@v0.0.0-20260819120633-a6e51f013566
+  switchboard v0.1.0-dev (commit none, built unknown)
+  $ go run ./cmd/switchboard version    # someone's uncommitted tree
+  switchboard v0.1.0-dev (commit none, built unknown)
+  ```
+
+  were byte-identical, with no second field to fall back on.
+  k8s-lookout hit this exactly (lookout#146, fixed in lookout#150).
+
+  `resolveBuildInfo` now reads `debug.BuildInfo.Main.Version` — but *last*,
+  behind both `-ldflags` and the VCS stamp, which is the part that is easy to
+  get wrong. Since Go 1.24 a build from a checkout stamps `Main.Version` too,
+  as a pseudo-version derived from the tags, so preferring it would have
+  stripped the `-dev` marker off every developer's `go build` and replaced it
+  with a restatement of the SHA already in the next field — and worse, a
+  checkout sitting on a release tag would report the bare tag, i.e. a dev build
+  claiming to be the release, which is the exact failure the new presubmit
+  exists to prevent. What separates the two cases is the VCS stamp, written
+  only when there is a checkout to stamp: no commit means a module-cache build,
+  and there the module version is the only identity available. A `Version`
+  injected by `-ldflags` without a `Commit` is also left alone. Nothing changes
+  for a build from a checkout or for a release image.
+
+  A `verify-version-fallback` presubmit comes with it, asserting that main's
+  fallback is the next minor `-dev` after the newest release tag. The manual
+  bump `internal/version` documents — "bump this manually on main right after
+  cutting a release" — is the step that gets forgotten, and the cost of
+  forgetting is every dev build claiming to be the release that just shipped.
+  Pre-release tags are excluded: `--sort=-v:refname` ranks `v0.2.0-rc1` above
+  `v0.2.0`, and `release-images.yml` publishes pre-release tags, so counting
+  one would demand a wrong bump on every PR until the tag went away. CI now
+  checks out with `fetch-depth: 0`, since a tagless checkout would let the new
+  check pass on every branch. The package also gains its first tests.
 - A long answer *about* markdown split into nonsense. A fenced block is closed
   only by a bare fence at least as wide as the one that opened it, so the
   `` ``` `` lines inside a ```` ```` ```` block are content — but the chunker
