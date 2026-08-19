@@ -28,6 +28,7 @@ checks=(
   vet
   build
   test-unit
+  verify-version-fallback
   verify-mod-tidy
   verify-vuln
 )

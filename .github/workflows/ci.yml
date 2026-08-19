@@ -28,6 +28,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # verify-version-fallback compares main's -dev version against
+          # the newest release tag, and checkout fetches no tags by
+          # default — without this it would see an untagged repo and
+          # pass on every branch, which is exactly the drift it exists
+          # to catch.
+          fetch-depth: 0
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod

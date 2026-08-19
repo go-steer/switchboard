@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Presubmit: main's version fallback must be the next minor -dev after
+# the newest release tag.
+#
+# internal/version documents "Bump this manually on main right after
+# cutting a release", and a manual step after a release is the one that
+# gets forgotten — in the repo this pattern came from the drift had
+# already happened three releases running. The cost of forgetting is not
+# cosmetic: a fallback left at the tag that just shipped means every dev
+# build claims to be that release.
+#
+# Ported from k8s-lookout#150.
+set -euo pipefail
+cd "$(dirname "$0")/../../.."
+
+if ! git rev-parse --git-dir >/dev/null 2>&1; then
+  echo "not a git checkout — skipping (nothing to compare the fallback against)"
+  exit 0
+fi
+
+# What is being checked is the Version constant, and `go run` is how to
+# read it: a go-run binary reports its module version as "(devel)", so
+# no fallback in resolve() fires and the constant prints verbatim. (A
+# `go build` binary would print the pseudo-version Go stamps from the
+# tags instead — see internal/version.) Reading it this way rather than
+# grepping the source means the constant has to compile and has to be
+# the one String actually renders.
+got="$(go run ./cmd/switchboard version | awk 'NR==1{print $2}')"
+
+# The fallback must always be an in-development version, whatever the
+# tags say. A bare release version on main means every dev build claims
+# to be that release.
+if ! printf '%s' "$got" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+-dev$'; then
+  echo "internal/version.Version is '${got}', which is not a vX.Y.Z-dev version." >&2
+  echo "main must carry the NEXT release as -dev, so a dev build never claims to be a release." >&2
+  exit 1
+fi
+
+# Release tags only. A pre-release (v0.2.0-rc1) is not something main is
+# bumped past — and `--sort=-v:refname` ranks pre-releases ABOVE the
+# release they precede, so letting one through would demand a wrong bump
+# on every PR until the tag went away. release-images.yml publishes
+# pre-release tags, so this is a real shape, not a hypothetical one.
+#
+# Assigned in two steps rather than piped into `head -1`: under
+# `pipefail` a closed pipe makes git exit 141 and takes the whole script
+# with it, silently, once the repo has enough tags to fill the pipe.
+tags="$(git tag --list 'v*' --sort=-v:refname || true)"
+latest="$(printf '%s\n' "$tags" | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' || true)"
+latest="${latest%%$'\n'*}"
+
+if [ -z "$latest" ]; then
+  # No releases yet: the fallback is whatever the first release will be,
+  # and there is nothing to check it against beyond the shape above.
+  echo "version fallback: ${got} (no release tags yet)"
+  exit 0
+fi
+
+want="v$(printf '%s' "${latest#v}" | awk -F. '{print $1 "." $2 + 1 ".0-dev"}')"
+if [ "$got" != "$want" ]; then
+  echo "internal/version.Version is ${got}, but the newest release tag is ${latest}." >&2
+  echo "Expected ${want} — bump Version in internal/version/version.go." >&2
+  echo >&2
+  echo "The rule is the next MINOR as -dev. A patch release off main would need" >&2
+  echo "this check revisited; there is no release branch today." >&2
+  exit 1
+fi
+
+echo "version fallback: ${got} (newest release tag ${latest})"
