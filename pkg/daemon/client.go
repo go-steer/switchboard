@@ -165,9 +165,126 @@ type Event struct {
 
 // EventAgent is the SSE event name carrying the agent's streamed output —
 // model text, tool calls, and tool results are all multiplexed onto it.
-// The typed lifecycle events ("status-update", "turn-complete",
-// "turn-error") are separate names switchboard does not relay verbatim.
+// The typed lifecycle events ("status-update", "turn-error") are separate
+// names switchboard does not relay verbatim.
 const EventAgent = "agent"
+
+// EventUsage and EventTurnComplete are the two typed lifecycle events that
+// carry a turn's accounting. Neither is relayed verbatim; between them they
+// are the only source for what a turn cost — see TurnUsage.
+const (
+	EventUsage        = "usage-update"
+	EventTurnComplete = "turn-complete"
+)
+
+// UsageTotals is a session's running accounting, as carried by every
+// EventUsage event.
+//
+// The totals are what a caller wanting a *conversational* turn's cost has to
+// work from, because the daemon does not report one. Its "turn" is a single
+// model call: one user message that drives five tool calls produces six
+// EventUsage events, each with a last_turn describing only the call that just
+// finished, and turns_total climbing by six. Confirmed live on 2026-08-19 —
+// last_turn.tokens_in was 5,660 on the final event of a turn that had
+// consumed 33,340. Differencing these totals across the turn is the only
+// figure that is not an undercount.
+type UsageTotals struct {
+	// Model is the model that ran the most recent call.
+	Model string
+	// TokensIn, TokensOut and CostUSD are the session's cumulative totals.
+	TokensIn, TokensOut int64
+	CostUSD             float64
+	// Calls is the daemon's turns_total: model calls, not user turns.
+	Calls int64
+}
+
+// TurnUsage is the accounting for one conversational turn. No single event
+// carries it: the tokens and cost come from differencing UsageTotals across
+// the turn, and Latency from "turn-complete".
+type TurnUsage struct {
+	// Model is the model that ran the turn, e.g. "gemini-3.7-flash".
+	Model string
+	// TokensIn and TokensOut are the turn's prompt and completion tokens.
+	TokensIn, TokensOut int64
+	// CostUSD is the turn's cost in US dollars, from "usage-update" only.
+	CostUSD float64
+	// Latency is the turn's wall-clock duration, from "turn-complete" only.
+	Latency time.Duration
+}
+
+// Empty reports whether the usage carries nothing worth showing.
+func (u TurnUsage) Empty() bool {
+	return u.Model == "" && u.TokensIn == 0 && u.TokensOut == 0 && u.CostUSD == 0 && u.Latency == 0
+}
+
+// usageFrame is the JSON payload of an EventUsage event. last_turn is
+// modeled only for the model name it carries — see UsageTotals for why its
+// token and cost figures are not what a conversational turn cost.
+// The totals are pointers so a report of zero can be told from a payload that
+// is not a usage report at all: the daemon's subscribe-time priming event is
+// all zeros on a fresh session and is the baseline everything after it is
+// differenced against, so discarding it would cost the session's first turn
+// its numbers.
+type usageFrame struct {
+	TokensIn  *int64   `json:"tokens_in_total"`
+	TokensOut *int64   `json:"tokens_out_total"`
+	CostUSD   *float64 `json:"cost_usd_total"`
+	Calls     *int64   `json:"turns_total"`
+	LastTurn  *struct {
+		Model string `json:"model"`
+	} `json:"last_turn"`
+}
+
+// turnCompleteFrame is the JSON payload of an EventTurnComplete event. Unlike
+// EventUsage it fires exactly once per conversational turn, and its
+// latency_ms spans the whole of it — but its tokens describe only the last
+// model call, so they are deliberately not modeled.
+type turnCompleteFrame struct {
+	Model     string `json:"model"`
+	LatencyMS int64  `json:"latency_ms"`
+}
+
+// SessionUsage parses an EventUsage payload and reports the session's running
+// totals. A report of all zeros is valid and meaningful — it is what a fresh
+// session's priming event says — so ok is false only for a payload carrying no
+// totals at all: a parse failure, or an object with none of the fields.
+func SessionUsage(data string) (t UsageTotals, ok bool) {
+	var f usageFrame
+	if err := json.Unmarshal([]byte(data), &f); err != nil {
+		return UsageTotals{}, false
+	}
+	if f.TokensIn == nil && f.TokensOut == nil && f.CostUSD == nil && f.Calls == nil {
+		return UsageTotals{}, false
+	}
+	if f.TokensIn != nil {
+		t.TokensIn = *f.TokensIn
+	}
+	if f.TokensOut != nil {
+		t.TokensOut = *f.TokensOut
+	}
+	if f.CostUSD != nil {
+		t.CostUSD = *f.CostUSD
+	}
+	if f.Calls != nil {
+		t.Calls = *f.Calls
+	}
+	if f.LastTurn != nil {
+		t.Model = f.LastTurn.Model
+	}
+	return t, true
+}
+
+// TurnCompleted parses an EventTurnComplete payload for the two things only
+// it knows: that a conversational turn has ended, and how long it took. ok is
+// false on a parse failure or a payload with neither.
+func TurnCompleted(data string) (u TurnUsage, ok bool) {
+	var f turnCompleteFrame
+	if err := json.Unmarshal([]byte(data), &f); err != nil {
+		return TurnUsage{}, false
+	}
+	u = TurnUsage{Model: f.Model, Latency: time.Duration(f.LatencyMS) * time.Millisecond}
+	return u, !u.Empty()
+}
 
 // agentFrame is the JSON payload of an EventAgent event. It wraps an ADK
 // session.Event, whose own fields carry no JSON tags and so serialize

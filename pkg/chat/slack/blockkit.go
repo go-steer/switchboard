@@ -40,6 +40,8 @@ import (
 	"strings"
 
 	"github.com/slack-go/slack"
+
+	"github.com/go-steer/switchboard/pkg/chat"
 )
 
 // Slack Block Kit hard limits.
@@ -374,6 +376,40 @@ func listBlock(items []listItem) map[string]any {
 
 func sectionBlock(text string) map[string]any {
 	return map[string]any{"type": "section", "text": map[string]any{"type": "mrkdwn", "text": text}}
+}
+
+// contextBlock is Block Kit's small grey-text element — the idiomatic place
+// for a note *about* a message rather than part of it, which is exactly what
+// the usage footer is. Returns nil on empty text (Slack rejects a context
+// block with no elements).
+func contextBlock(text string) map[string]any {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return nil
+	}
+	return map[string]any{
+		"type":     "context",
+		"elements": []any{map[string]any{"type": "mrkdwn", "text": text}},
+	}
+}
+
+// withUsageFooter appends the usage footer to a rendered answer, keeping it
+// last. blocks may be nil, in which case there is no rich render to append to
+// and the caller falls back to text — where the footer is deliberately not
+// shown (see the Adapter docs). A payload already at Slack's block ceiling
+// gives up its last block rather than the footer.
+func withUsageFooter(blocks []map[string]any, u *chat.Usage) []map[string]any {
+	if blocks == nil || u == nil {
+		return blocks
+	}
+	footer := contextBlock(controlEscaper.Replace(u.Line()))
+	if footer == nil {
+		return blocks
+	}
+	if len(blocks) >= maxBlocks {
+		blocks = blocks[:maxBlocks-1]
+	}
+	return append(blocks, footer)
 }
 
 // ---------------------------------------------------------------------------

@@ -66,13 +66,79 @@ const (
 // transient message — retired when the reply is delivered — never the answer.
 const workingText = "⏳ Working…"
 
-// activityText renders a tool-activity notice, e.g. "🔧 Running `lookup`".
-func activityText(tools []string) string {
+const (
+	// progressTickInterval is how often a turn in flight re-renders its
+	// progress message with the elapsed clock. Coarse deliberately: every tick
+	// is an edit against the platform's API, and a turn running for an hour
+	// would spend thousands of them at one-second resolution to convey nothing
+	// a fifteen-second clock does not.
+	progressTickInterval = 15 * time.Second
+
+	// progressTickMaxBackoff bounds the retry interval after a failed edit, so
+	// a rate-limited conversation stops answering a rate limit with more edits
+	// but still recovers without waiting out the whole turn.
+	progressTickMaxBackoff = 4 * time.Minute
+
+	// progressTickMaxAge stops the clock on a turn that has neither answered
+	// nor reported itself complete. turn-complete is the real boundary; this is
+	// the backstop for when it never arrives, so a daemon that loses a turn
+	// leaves a frozen message rather than a goroutine editing a channel until
+	// the process is restarted. Generous, because switchboard cannot tell a
+	// genuinely long turn from a lost one and freezing a live one is the worse
+	// mistake.
+	progressTickMaxAge = time.Hour
+)
+
+// quotedTools renders a tool list as backticked names: "`bash`, `read`".
+func quotedTools(tools []string) string {
 	quoted := make([]string, len(tools))
 	for i, t := range tools {
 		quoted[i] = "`" + t + "`"
 	}
-	return "🔧 Running " + strings.Join(quoted, ", ")
+	return strings.Join(quoted, ", ")
+}
+
+// activityText renders a standalone tool-activity notice, e.g. "🔧 Running
+// `lookup`" — stream mode, and status mode with no message left to edit.
+func activityText(tools []string) string { return "🔧 Running " + quotedTools(tools) }
+
+// tickText renders the progress message of a turn in flight: the working
+// marker, how long it has been running, and — status mode only — the tool it
+// is on and how many steps it has taken.
+//
+//	⏳ Working… 45s
+//	⏳ Working… 2m30s · running `bash` (step 7)
+//
+// The clock is the whole point. A turn that makes no tool calls posts
+// "⏳ Working…" once and then looks identical whether it is thinking hard or
+// has died, which is the only signal a reader has to go on.
+func tickText(elapsed time.Duration, tools []string, step int) string {
+	text := workingText + " " + formatElapsed(elapsed)
+	if len(tools) > 0 {
+		text += " · running " + quotedTools(tools)
+		if step > 0 {
+			text += fmt.Sprintf(" (step %d)", step)
+		}
+	}
+	return text
+}
+
+// formatElapsed renders a turn's age at second resolution: "45s", "2m30s",
+// "1h07m". Compact because it sits inline in a chat line, and never fractional
+// because the clock is read for "is this moving", not for measurement.
+func formatElapsed(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	s := int(d.Round(time.Second).Seconds())
+	switch {
+	case s < 60:
+		return fmt.Sprintf("%ds", s)
+	case s < 3600:
+		return fmt.Sprintf("%dm%02ds", s/60, s%60)
+	default:
+		return fmt.Sprintf("%dh%02dm", s/3600, (s%3600)/60)
+	}
 }
 
 // Router maps chat conversations onto core-agent sessions and shuttles
@@ -89,9 +155,23 @@ type Router struct {
 	metrics  *metrics
 	logf     func(string, ...any)
 
+	// showUsage turns on the per-turn tokens/cost footer. Off unless the
+	// operator asked for it: what a turn cost is spend data, and a shared
+	// channel is the wrong place to disclose it by default. Set once at
+	// startup via setShowUsage, before the adapter is running.
+	showUsage bool
+
 	// Reconnect backoff bounds for the SSE relay; defaulted in NewRouter and
 	// overridable in tests so a reconnect can be exercised without real waits.
 	minBackoff, maxBackoff time.Duration
+
+	// tickInterval is how often a turn in flight re-renders its progress
+	// message with the elapsed clock. Defaulted in NewRouter and overridable in
+	// tests so a tick can be observed without a real wait; zero or negative
+	// disables the ticker and leaves the placeholder static. tickMaxAge is the
+	// backstop that stops a clock the daemon never called time on; both are
+	// defaulted in NewRouter and shortened in tests.
+	tickInterval, tickMaxAge time.Duration
 
 	mu       sync.Mutex
 	sessions map[string]*sessionEntry
@@ -121,22 +201,210 @@ type sessionEntry struct {
 	// the answer. Zero value means none is outstanding.
 	pmu         sync.Mutex
 	progressMsg chat.MessageRef
+
+	// The ticker's state for the turn in flight, under pmu because it renders
+	// into that same progressMsg and must not become a second source of truth
+	// for it. turnStart is when the turn was handed to the daemon — what the
+	// elapsed clock counts from, not the moment the placeholder landed; tools
+	// and step are the last tool activity seen, replayed by each tick so the
+	// clock does not erase it; tickStop closes the ticker goroutine down.
+	turnStart time.Time
+	tools     []string
+	step      int
+	tickStop  chan struct{}
+
+	// umu guards the usage accounting for the turn currently in flight: usage
+	// is what has accrued so far, totals the last running total seen (have
+	// says whether there is one to difference against). The daemon reports
+	// per-model-call, not per conversational turn, so a turn's real cost is
+	// the growth in its totals — see daemon.UsageTotals. Both feeding events
+	// arrive before the agent event carrying the answer, so relay accumulates
+	// here and deliverText takes the result as the reply's footer.
+	// settled says turn-complete has arrived, which is the only signal that
+	// what is banked is a whole conversational turn rather than a partial one.
+	umu     sync.Mutex
+	usage   daemon.TurnUsage
+	totals  daemon.UsageTotals
+	have    bool
+	settled bool
 }
 
-// takeProgress atomically reads and clears the entry's progress message.
+// noteTotals folds one usage-update into the turn in flight by differencing it
+// against the last totals seen. The very first report on the entry only
+// establishes the baseline — it is the daemon's subscribe-time priming event,
+// which on a resumed session already carries every turn the session has ever
+// run, and counting it in full would bill the whole history to one reply.
+//
+// The baseline then persists across reconnects, so a stream that drops and
+// resumes differences from where it left off rather than re-baselining. The
+// cost of that is a stream outage spanning more than one turn: the reconnect
+// yields a single delta covering all of them, which lands on whichever reply
+// is relayed first while the rest get no footer. Over-attributing one reply is
+// preferable to the alternatives — re-baselining would lose those turns'
+// numbers entirely, and treating each stream as fresh would bill a resumed
+// session's whole history to its next answer.
+func (e *sessionEntry) noteTotals(t daemon.UsageTotals) {
+	e.umu.Lock()
+	defer e.umu.Unlock()
+	prev, seeded := e.totals, e.have
+	e.totals, e.have = t, true
+	if !seeded {
+		return // a baseline only: it describes turns this reply did not run
+	}
+	if t.Model != "" {
+		e.usage.Model = t.Model
+	}
+	// Guard the deltas: a total that went backwards is not something this can
+	// make sense of, and must not turn into a negative token count.
+	if d := t.TokensIn - prev.TokensIn; d > 0 {
+		e.usage.TokensIn += d
+	}
+	if d := t.TokensOut - prev.TokensOut; d > 0 {
+		e.usage.TokensOut += d
+	}
+	if d := t.CostUSD - prev.CostUSD; d > 0 {
+		e.usage.CostUSD += d
+	}
+}
+
+// noteTurnComplete records what only the turn-complete event knows — the
+// turn's wall-clock duration — and marks the bank complete, which is what
+// releases it to the next reply.
+func (e *sessionEntry) noteTurnComplete(u daemon.TurnUsage) {
+	e.umu.Lock()
+	defer e.umu.Unlock()
+	if u.Model != "" {
+		e.usage.Model = u.Model
+	}
+	if u.Latency != 0 {
+		e.usage.Latency = u.Latency
+	}
+	e.settled = true
+}
+
+// resetUsage discards whatever is still banked as a new turn is handed to the
+// daemon. A turn that ended without an answer — an error, an interrupt (#34) —
+// leaves its numbers with nothing to attach them to, and they must not surface
+// on the next reply as if that reply had spent them. The totals baseline is
+// deliberately kept: it is what the new turn is differenced against, so the
+// dead turn's spend is dropped from the footer rather than double-counted.
+func (e *sessionEntry) resetUsage() {
+	e.umu.Lock()
+	defer e.umu.Unlock()
+	e.usage, e.settled = daemon.TurnUsage{}, false
+}
+
+// takeUsage reads and clears the turn's accounting, returning nil unless a
+// whole conversational turn is banked.
+//
+// The turn-complete gate is what keeps a fraction of a turn from being
+// reported as the whole of it. Not every agent event carrying text is the
+// answer: a model turn that narrates before calling a tool ("let me check…")
+// arrives as text too, and relaying it drains the bank. Since turn-complete
+// lands before the answer and after every usage-update, requiring it means an
+// interim message gets no footer and the answer gets the complete figure.
+//
+// The totals baseline survives: it is the running session figure the *next*
+// turn differences against.
+func (e *sessionEntry) takeUsage() *chat.Usage {
+	e.umu.Lock()
+	defer e.umu.Unlock()
+	if !e.settled {
+		return nil
+	}
+	u := e.usage
+	e.usage, e.settled = daemon.TurnUsage{}, false
+	if u.Empty() {
+		return nil
+	}
+	return &chat.Usage{
+		Model:     u.Model,
+		TokensIn:  u.TokensIn,
+		TokensOut: u.TokensOut,
+		CostUSD:   u.CostUSD,
+		Latency:   u.Latency,
+	}
+}
+
+// takeProgress atomically reads and clears the entry's progress message along
+// with the rest of the turn's ticker state, and stops the ticker: the message
+// it renders into is about to be deleted.
 func (e *sessionEntry) takeProgress() chat.MessageRef {
 	e.pmu.Lock()
-	defer e.pmu.Unlock()
-	ref := e.progressMsg
-	e.progressMsg = chat.MessageRef{}
+	ref, stop := e.progressMsg, e.tickStop
+	e.progressMsg, e.tickStop = chat.MessageRef{}, nil
+	e.turnStart, e.tools, e.step = time.Time{}, nil, 0
+	e.pmu.Unlock()
+	// Outside the lock, and safe against a concurrent caller: whoever nils
+	// tickStop under the lock is the only one holding a channel to close.
+	if stop != nil {
+		close(stop)
+	}
 	return ref
 }
 
-// currentProgress reads the entry's progress message without clearing it.
-func (e *sessionEntry) currentProgress() chat.MessageRef {
+// stopTicker halts the turn's ticker while leaving the progress message in
+// place for the reply to retire. Called when the daemon says the turn is over,
+// so a turn that ends without an answer — an error, an interrupt — stops
+// claiming to still be working.
+func (e *sessionEntry) stopTicker() {
+	e.pmu.Lock()
+	stop := e.tickStop
+	e.tickStop = nil
+	e.pmu.Unlock()
+	if stop != nil {
+		close(stop)
+	}
+}
+
+// beginTurn adopts ref as the turn's progress message, dated from start, and
+// returns the previous message (for the caller to delete) plus a stop channel
+// for the ticker it should now run. Any ticker still running for a previous
+// turn is stopped: only the latest message is live.
+func (e *sessionEntry) beginTurn(ref chat.MessageRef, start time.Time) (stale chat.MessageRef, stop chan struct{}) {
+	e.pmu.Lock()
+	stale, prev := e.progressMsg, e.tickStop
+	stop = make(chan struct{})
+	e.progressMsg, e.tickStop = ref, stop
+	e.turnStart, e.tools, e.step = start, nil, 0
+	e.pmu.Unlock()
+	if prev != nil {
+		close(prev)
+	}
+	return stale, stop
+}
+
+// noteActivity records the tools the agent just started — so every later tick
+// keeps showing them instead of dropping back to a bare clock — and returns
+// the message to edit with the line to put in it. ok is false when there is no
+// progress message to render into (stream mode, or a status turn whose
+// placeholder failed to post), and the caller falls back to a standalone
+// notice.
+func (e *sessionEntry) noteActivity(tools []string) (ref chat.MessageRef, text string, ok bool) {
 	e.pmu.Lock()
 	defer e.pmu.Unlock()
-	return e.progressMsg
+	if e.progressMsg.ID == "" || e.turnStart.IsZero() {
+		return chat.MessageRef{}, "", false
+	}
+	e.tools, e.step = tools, e.step+1
+	return e.progressMsg, tickText(time.Since(e.turnStart), e.tools, e.step), true
+}
+
+// tickRender composes one tick: the message to edit and the line to put in it.
+// ok is false once the turn has ended, which is what stops a tick that fired
+// just as the reply landed from resurrecting a deleted placeholder. Indicator
+// mode gets the clock alone — naming tools is what status mode is for.
+func (e *sessionEntry) tickRender(mode ProgressMode) (ref chat.MessageRef, text string, ok bool) {
+	e.pmu.Lock()
+	defer e.pmu.Unlock()
+	if e.progressMsg.ID == "" || e.turnStart.IsZero() {
+		return chat.MessageRef{}, "", false
+	}
+	tools, step := e.tools, e.step
+	if mode != ProgressStatus {
+		tools, step = nil, 0
+	}
+	return e.progressMsg, tickText(time.Since(e.turnStart), tools, step), true
 }
 
 // NewRouter builds a Router. progress selects long-turn feedback (ProgressOff
@@ -149,17 +417,25 @@ func NewRouter(client *daemon.Client, out sender, progress ProgressMode, m *metr
 		progress = ProgressOff
 	}
 	return &Router{
-		client:     client,
-		out:        out,
-		progress:   progress,
-		metrics:    m,
-		logf:       logf,
-		minBackoff: reconnectMinBackoff,
-		maxBackoff: reconnectMaxBackoff,
-		sessions:   make(map[string]*sessionEntry),
-		overrides:  make(map[string]ProgressMode),
+		client:       client,
+		out:          out,
+		progress:     progress,
+		metrics:      m,
+		logf:         logf,
+		minBackoff:   reconnectMinBackoff,
+		maxBackoff:   reconnectMaxBackoff,
+		tickInterval: progressTickInterval,
+		tickMaxAge:   progressTickMaxAge,
+		sessions:     make(map[string]*sessionEntry),
+		overrides:    make(map[string]ProgressMode),
 	}
 }
+
+// setShowUsage turns the per-turn usage footer on. Unlike the progress mode
+// it is not a runtime, per-channel setting — disclosing spend is an operator
+// decision, not something a channel member should be able to flip — so it is
+// set once at startup, before the adapter begins dispatching.
+func (r *Router) setShowUsage(on bool) { r.showUsage = on }
 
 // progressFor resolves the progress mode in effect for a channel: its runtime
 // override (set via a chat command) if any, else the process default. An empty
@@ -256,6 +532,9 @@ func (r *Router) Handle(ctx context.Context, msg chat.Message) (err error) {
 		r.surfaceError(ctx, msg.Conversation, err)
 		return err
 	}
+	// A new turn starts from no accounting: anything left banked belongs to a
+	// turn that ended without an answer to carry it.
+	entry.resetUsage()
 	// Post the progress message before injecting: inject starts the turn, so a
 	// fast reply would otherwise beat the placeholder into the thread and strand
 	// it there ("Working…" below the answer, with nothing left to clear it). A
@@ -297,29 +576,80 @@ const (
 )
 
 // startProgress posts the initial progress message for a turn (indicator and
-// status modes) and records it on the entry so relay can edit or clear it. A
-// no-op in off and stream modes. A message still outstanding from a prior turn
-// (a second turn started before the first replied) is deleted so only the
-// latest remains. Failures are logged, never fatal — a missing progress
-// message must not drop the turn.
+// status modes), records it on the entry so relay can edit or clear it, and
+// starts the ticker that keeps its clock running. A no-op in off and stream
+// modes. A message still outstanding from a prior turn (a second turn started
+// before the first replied) is deleted so only the latest remains. Failures
+// are logged, never fatal — a missing progress message must not drop the turn.
 func (r *Router) startProgress(ctx context.Context, e *sessionEntry, conv string) {
 	if mode := r.progressFor(e.channel); mode != ProgressIndicator && mode != ProgressStatus {
 		return
 	}
+	// Time the turn from here rather than from the post that is about to
+	// happen: the clock is meant to answer "how long have I been waiting", and
+	// the wait began when the message arrived, not when the placeholder landed.
+	start := time.Now()
 	ref, err := r.out.Send(ctx, chat.Reply{Conversation: conv, Text: workingText, Kind: chat.KindProgress})
 	r.metrics.recordReply(err)
 	if err != nil {
 		r.logf("progress %s: post: %v", conv, err)
 		return
 	}
-	e.pmu.Lock()
-	stale := e.progressMsg
-	e.progressMsg = ref
-	e.pmu.Unlock()
+	stale, stop := e.beginTurn(ref, start)
 	if stale.ID != "" {
 		if derr := r.out.Delete(ctx, stale); derr != nil {
 			r.logf("progress %s: clear stale: %v", conv, derr)
 		}
+	}
+	if r.tickInterval > 0 {
+		go r.tick(ctx, e, conv, start, stop)
+	}
+}
+
+// tick re-renders the turn's progress message on a coarse interval until the
+// turn ends, so a long turn that runs silently — no tool calls to report —
+// still visibly moves instead of sitting on a placeholder that cannot be told
+// apart from a wedged one (#37).
+//
+// It exits on stop (the reply landed, the daemon called the turn done, or a
+// later turn took over) or on ctx, which is the adapter's lifetime and not a
+// per-request context — the same assumption relay makes.
+//
+// An edit is decoration. A failure is logged and backed off, never returned:
+// nothing here may cost the turn its answer, and a conversation that is being
+// rate limited must not be answered with more edits at the same rate.
+func (r *Router) tick(ctx context.Context, e *sessionEntry, conv string, start time.Time, stop <-chan struct{}) {
+	interval := r.tickInterval
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
+	maxAge := r.tickMaxAge
+	if maxAge <= 0 {
+		maxAge = progressTickMaxAge
+	}
+	deadline := time.NewTimer(maxAge)
+	defer deadline.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-stop:
+			return
+		case <-deadline.C:
+			r.logf("progress %s: no turn boundary after %s; stopping the clock", conv, formatElapsed(time.Since(start)))
+			return
+		case <-timer.C:
+		}
+		ref, text, ok := e.tickRender(r.progressFor(e.channel))
+		if !ok {
+			return // the turn ended between the tick firing and this read
+		}
+		if err := r.out.Update(ctx, ref, chat.Reply{Conversation: conv, Text: text, Kind: chat.KindProgress}); err != nil {
+			r.logf("progress %s: tick: %v", conv, err)
+			interval = min(interval*2, progressTickMaxBackoff)
+		} else {
+			interval = r.tickInterval
+		}
+		timer.Reset(interval)
 	}
 }
 
@@ -337,11 +667,17 @@ func (r *Router) clearProgress(ctx context.Context, e *sessionEntry, conv string
 // deliverText relays a completed model turn: retire the transient progress
 // message (a no-op unless indicator/status mode left one) and post the turn as
 // its own message. Shared by every mode, so a long answer is chunked by the
-// adapter rather than squeezed into an in-place edit.
+// adapter rather than squeezed into an in-place edit. The turn's accounting is
+// taken (and cleared) here whether or not the footer is enabled, so a session
+// that runs with it off never accumulates stale numbers.
 func (r *Router) deliverText(ctx context.Context, e *sessionEntry, conv, text string) {
 	r.clearProgress(ctx, e, conv)
 	r.metrics.recordTurnRelayed()
-	_, err := r.out.Send(ctx, chat.Reply{Conversation: conv, Text: text})
+	usage := e.takeUsage()
+	if !r.showUsage {
+		usage = nil
+	}
+	_, err := r.out.Send(ctx, chat.Reply{Conversation: conv, Text: text, Usage: usage})
 	r.metrics.recordReply(err)
 	if err != nil {
 		// A failed post should not tear down the stream; log and keep relaying.
@@ -353,17 +689,22 @@ func (r *Router) deliverText(ctx context.Context, e *sessionEntry, conv, text st
 // modes). Status mode edits the managed status message in place so the whole
 // turn stays one message; stream mode — and status mode with no message left
 // to edit — posts a standalone notice.
+//
+// The in-place edit renders the same line the ticker does — same text, same
+// KindProgress — rather than a bare tool notice: the two write to one message,
+// and if they disagreed the wording and the card icon would flip back and
+// forth every fifteen seconds. A standalone notice is still KindActivity,
+// where the distinction earns its icon.
 func (r *Router) postActivity(ctx context.Context, e *sessionEntry, conv string, mode ProgressMode, tools []string) {
-	text := activityText(tools)
 	if mode == ProgressStatus {
-		if ref := e.currentProgress(); ref.ID != "" {
-			if err := r.out.Update(ctx, ref, chat.Reply{Conversation: conv, Text: text, Kind: chat.KindActivity}); err != nil {
+		if ref, text, ok := e.noteActivity(tools); ok {
+			if err := r.out.Update(ctx, ref, chat.Reply{Conversation: conv, Text: text, Kind: chat.KindProgress}); err != nil {
 				r.logf("relay %s: status activity: %v", conv, err)
 			}
 			return
 		}
 	}
-	_, err := r.out.Send(ctx, chat.Reply{Conversation: conv, Text: text, Kind: chat.KindActivity})
+	_, err := r.out.Send(ctx, chat.Reply{Conversation: conv, Text: activityText(tools), Kind: chat.KindActivity})
 	r.metrics.recordReply(err)
 	if err != nil {
 		r.logf("relay %s: activity: %v", conv, err)
@@ -415,6 +756,34 @@ func (r *Router) relay(ctx context.Context, conv string, e *sessionEntry, owner 
 	for ctx.Err() == nil {
 		progressed := false
 		err := r.client.Subscribe(ctx, e.sess, owner, e.seq.Load(), func(ev daemon.Event) error {
+			// The two lifecycle events carrying a turn's accounting arrive
+			// before the agent event holding its answer, so they are banked on
+			// the entry and attached when that answer is delivered. Neither
+			// carries a seq, so neither can be deduplicated on a reconnect the
+			// way an agent event is — but usage-update reports running totals
+			// rather than increments, so a replayed one contributes a zero
+			// delta instead of double-counting.
+			switch ev.Type {
+			case daemon.EventUsage:
+				if t, ok := daemon.SessionUsage(ev.Data); ok {
+					e.noteTotals(t)
+				}
+				return nil
+			case daemon.EventTurnComplete:
+				if u, ok := daemon.TurnCompleted(ev.Data); ok {
+					e.noteTurnComplete(u)
+				}
+				// The daemon's own turn boundary, and the only one that
+				// arrives when a turn ends without an answer to deliver.
+				// Stop the clock but leave the message: if an answer is
+				// still coming it lands within moments and retires it, and
+				// if none is, a frozen "Working… 2m30s" is at least not a
+				// lie that grows. Fires once per conversational turn even
+				// when that turn made tool calls (confirmed live), so a
+				// tool-using turn is not cut short.
+				e.stopTicker()
+				return nil
+			}
 			if ev.Type != daemon.EventAgent {
 				return nil
 			}

@@ -410,10 +410,12 @@ func TestRouterProgressStatus(t *testing.T) {
 		t.Fatalf("reply = %q, want the answer", got.Text)
 	}
 
-	// The status message (ts1) was edited in place to name the tool...
+	// The status message (ts1) was edited in place to name the tool. The edit
+	// carries the ticker's line — clock, tool, step — because both writers
+	// render into this one message and must agree on its shape (#37).
 	waitFor(t, func() bool {
 		for _, u := range fake.updatedCalls() {
-			if u.ref.ID == "ts1" && u.text == activityText([]string{"lookup"}) {
+			if u.ref.ID == "ts1" && strings.Contains(u.text, "running `lookup` (step 1)") {
 				return true
 			}
 		}

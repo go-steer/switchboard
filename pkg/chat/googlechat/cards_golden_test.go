@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	chatv1 "google.golang.org/api/chat/v1"
 
@@ -31,6 +32,18 @@ import (
 //
 //	go test ./pkg/chat/googlechat -run Golden -update
 var updateGolden = flag.Bool("update", false, "rewrite the golden card JSON in testdata/cards")
+
+// goldenAnswer is the model turn the answer-card goldens render — headers,
+// emphasis, a link, a fence and a rule, so one card exercises every structure
+// the renderer lifts out of the text.
+const goldenAnswer = "# Deploy check\n\n" +
+	"Three things stood out.\n\n" +
+	"## Findings\n\n" +
+	"The **readiness probe** hits `/healthz` on the wrong port. " +
+	"See [the manifest](https://example.com/deploy.yaml).\n\n" +
+	"```yaml\nreadinessProbe:\n  httpGet:\n    port: 8080\n```\n\n" +
+	"---\n\n" +
+	"#### Next\n\nRe-run after patching.\n"
 
 // TestCardsGolden pins the exact JSON each card builder emits.
 //
@@ -57,14 +70,14 @@ func TestCardsGolden(t *testing.T) {
 			"progress", []string{"off", "indicator", "status", "stream"})},
 		{"ack-plain", ackCard(toChatText("Progress mode set to *stream*."), "progress", nil)},
 		{"welcome", welcomeCard([]string{"off", "indicator", "status", "stream"})},
-		{"answer", answerCard("# Deploy check\n\n" +
-			"Three things stood out.\n\n" +
-			"## Findings\n\n" +
-			"The **readiness probe** hits `/healthz` on the wrong port. " +
-			"See [the manifest](https://example.com/deploy.yaml).\n\n" +
-			"```yaml\nreadinessProbe:\n  httpGet:\n    port: 8080\n```\n\n" +
-			"---\n\n" +
-			"#### Next\n\nRe-run after patching.\n")},
+		{"answer", answerCard(goldenAnswer)},
+		// The --show-usage footer, pinned separately: it is a widget shape
+		// nothing else on the card uses, and the Card Builder is the only place
+		// its size and colour can actually be judged.
+		{"answer-with-usage", withUsageFooter(answerCard(goldenAnswer), &chat.Usage{
+			Model: "gemini-3.7-flash", TokensIn: 5000, TokensOut: 1,
+			CostUSD: 0.0037537, Latency: 3142 * time.Millisecond,
+		})},
 	}
 
 	dir := filepath.Join("testdata", "cards")

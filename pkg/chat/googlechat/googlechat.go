@@ -369,7 +369,7 @@ func (a *Adapter) cardFor(r chat.Reply) *chatv1.GoogleAppsCardV1Card {
 		if a.cards != CardsRich {
 			return nil
 		}
-		return answerCard(r.Text)
+		return withUsageFooter(answerCard(r.Text), r.Usage)
 	}
 	return gatewayCard(r.Kind, toChatText(r.Text))
 }

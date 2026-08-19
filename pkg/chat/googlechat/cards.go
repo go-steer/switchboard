@@ -83,6 +83,7 @@ const (
 	iconNotice   = "error"
 	iconAck      = "tune"
 	iconWelcome  = "waving_hand"
+	iconUsage    = "receipt_long"
 )
 
 // CardMode selects how much of the adapter's output is rendered as cards. It is
@@ -456,4 +457,26 @@ func answerCard(markdown string) (card *chatv1.GoogleAppsCardV1Card) {
 		return nil
 	}
 	return &chatv1.GoogleAppsCardV1Card{Sections: sections}
+}
+
+// withUsageFooter appends the turn's accounting to an answer card as a final
+// iconed line, separated by a divider. It runs after answerCard's widget
+// budget so the footer can never be what pushes a card over — and it appends
+// to the card's last section rather than inserting anywhere else, because the
+// footer has to stay last no matter what the overflow rules become (#32).
+//
+// card may be nil, meaning the answer is going out as plain text; the footer
+// is deliberately dropped there rather than appended as a line, which would
+// have to survive the 4096-char chunker.
+func withUsageFooter(card *chatv1.GoogleAppsCardV1Card, u *chat.Usage) *chatv1.GoogleAppsCardV1Card {
+	if card == nil || u == nil || len(card.Sections) == 0 {
+		return card
+	}
+	w := iconTextWidget(iconUsage, u.Line())
+	if w == nil {
+		return card
+	}
+	last := card.Sections[len(card.Sections)-1]
+	last.Widgets = append(last.Widgets, dividerWidget(), w)
+	return card
 }
