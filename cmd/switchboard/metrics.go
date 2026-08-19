@@ -21,6 +21,8 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+
+	"github.com/go-steer/switchboard/pkg/daemon"
 )
 
 // metrics bundles switchboard's Prometheus collectors behind a private
@@ -38,6 +40,7 @@ type metrics struct {
 	daemonDuration  *prometheus.HistogramVec // ["op"] daemon request latency
 	repliesSent     *prometheus.CounterVec   // ["outcome"] outbound sends to the chat platform
 	turnsRelayed    prometheus.Counter       // completed agent turns delivered to chat
+	turnsFailed     *prometheus.CounterVec   // ["kind"] turns that ended in a failure surfaced to chat
 	reconnects      prometheus.Counter       // SSE relay reconnects
 	activeSessions  prometheus.Gauge         // conversation→session entries currently held
 	ingressRequests *prometheus.CounterVec   // ["op","outcome"] outbound-ingress HTTP requests
@@ -75,6 +78,10 @@ func newMetrics() *metrics {
 			Name: "switchboard_agent_turns_relayed_total",
 			Help: "Completed agent turns relayed from the SSE stream back to chat.",
 		}),
+		turnsFailed: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "switchboard_agent_turns_failed_total",
+			Help: "Turns that ended in a failure surfaced into the conversation, by kind: the daemon's turn-error kind, or stream_lost when contact was lost with a turn in flight.",
+		}, []string{"kind"}),
 		reconnects: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "switchboard_stream_reconnects_total",
 			Help: "SSE relay reconnects after a stream ended or errored.",
@@ -95,6 +102,7 @@ func newMetrics() *metrics {
 		m.daemonDuration,
 		m.repliesSent,
 		m.turnsRelayed,
+		m.turnsFailed,
 		m.reconnects,
 		m.activeSessions,
 		m.ingressRequests,
@@ -147,6 +155,37 @@ func (m *metrics) recordTurnRelayed() {
 		return
 	}
 	m.turnsRelayed.Inc()
+}
+
+// failureKinds bounds the "kind" label. The daemon's spec reserves the right
+// to add categories, and a label taken straight from the wire would let a
+// newer daemon grow the time series without limit — so an unrecognized kind is
+// counted as "unknown" here, while the raw value still reaches the log and the
+// notice in the thread.
+var failureKinds = map[string]bool{
+	daemon.TurnErrorConfig:        true,
+	daemon.TurnErrorAuth:          true,
+	daemon.TurnErrorModelNotFound: true,
+	daemon.TurnErrorRateLimited:   true,
+	daemon.TurnErrorTransientNet:  true,
+	daemon.TurnErrorCostCeiling:   true,
+	daemon.TurnErrorWatchdog:      true,
+	daemon.TurnErrorUnknown:       true,
+	kindStreamLost:                true,
+}
+
+// kindStreamLost is switchboard's own failure kind, for the case the daemon
+// cannot report because it is the one that went away.
+const kindStreamLost = "stream_lost"
+
+func (m *metrics) recordTurnFailed(kind string) {
+	if m == nil {
+		return
+	}
+	if !failureKinds[kind] {
+		kind = daemon.TurnErrorUnknown
+	}
+	m.turnsFailed.WithLabelValues(kind).Inc()
 }
 
 func (m *metrics) recordReconnect() {

@@ -169,12 +169,14 @@ type Event struct {
 // names switchboard does not relay verbatim.
 const EventAgent = "agent"
 
-// EventUsage and EventTurnComplete are the two typed lifecycle events that
-// carry a turn's accounting. Neither is relayed verbatim; between them they
-// are the only source for what a turn cost — see TurnUsage.
+// The typed lifecycle events switchboard consumes. None is relayed verbatim:
+// EventUsage and EventTurnComplete are between them the only source for what a
+// turn cost (see TurnUsage), and EventTurnError is the only announcement that a
+// turn died inside the daemon — without it the thread simply goes quiet (#34).
 const (
 	EventUsage        = "usage-update"
 	EventTurnComplete = "turn-complete"
+	EventTurnError    = "turn-error"
 )
 
 // UsageTotals is a session's running accounting, as carried by every
@@ -284,6 +286,115 @@ func TurnCompleted(data string) (u TurnUsage, ok bool) {
 	}
 	u = TurnUsage{Model: f.Model, Latency: time.Duration(f.LatencyMS) * time.Millisecond}
 	return u, !u.Empty()
+}
+
+// TurnError kinds, mirroring the daemon's event-stream spec §2.6. Unknown
+// values must be treated as TurnErrorUnknown — the spec reserves the right to
+// add categories, and a gateway that switches exhaustively on today's list
+// would go silent on tomorrow's.
+const (
+	TurnErrorConfig        = "config_error"
+	TurnErrorAuth          = "auth_error"
+	TurnErrorModelNotFound = "model_not_found"
+	TurnErrorRateLimited   = "rate_limited"
+	TurnErrorTransientNet  = "transient_network"
+	// TurnErrorCostCeiling and TurnErrorWatchdog are the two guardrail trips.
+	// They differ from every other kind in what they demand of the reader: the
+	// agent refuses further turns until an operator resets it, so "try again"
+	// is actively wrong advice.
+	TurnErrorCostCeiling = "cost_ceiling"
+	TurnErrorWatchdog    = "watchdog"
+	TurnErrorUnknown     = "unknown"
+)
+
+// TurnError is a turn that failed inside the daemon, as carried by an
+// EventTurnError event. The daemon emits one only for failures an operator
+// should see — a retry that succeeded is not one — so every TurnError received
+// is worth surfacing.
+type TurnError struct {
+	// Kind is the stable category, one of the TurnError* constants. Treat an
+	// unrecognized value as TurnErrorUnknown rather than dropping the event.
+	Kind string
+	// Code is the provider's status code when one could be extracted
+	// ("NOT_FOUND", "429"), empty otherwise.
+	Code string
+	// Message is a single human-readable line — but not a bounded one. The
+	// daemon's classifier caps what it produces, and the guardrail trips
+	// bypass that classifier and build their message directly, interpolating
+	// text a caller does not control (the watchdog's trigger reason). Clamp
+	// before rendering.
+	Message string
+	// Retryable is the daemon's own judgement on whether sending the same
+	// message again could work.
+	Retryable bool
+	// Hint is the most actionable next step when one is obvious, empty
+	// otherwise — e.g. which IAM role the runtime service account is missing.
+	Hint string
+}
+
+// guardrailRefusal is the clause the daemon puts in every guardrail message,
+// cost ceiling and watchdog alike. Matching prose is a fallback, not the
+// primary signal — see Guardrail.
+const guardrailRefusal = "refuse new turns until the operator resets it"
+
+// Guardrail reports whether the failure is a tripped guardrail, which the agent
+// will not clear on its own: it refuses new turns until an operator resets it.
+// The distinction matters to a reader, because unlike every other terminal
+// failure there is a specific thing to go and do.
+//
+// Only the *first* trip carries one of the two guardrail kinds. Every turn sent
+// afterwards is refused before it runs, and that refusal is an ordinary error
+// routed through the daemon's generic classifier, whose categories do not cover
+// guardrails — so it arrives as TurnErrorUnknown. Since the refusals outnumber
+// the trip (one trip, then every message the reader sends until someone
+// resets), keying on kind alone would get the advice right once and wrong
+// thereafter. Hence the message fallback: if the clause stops matching some day
+// the reader gets the generic terminal notice, which is exactly what they would
+// have got without it.
+func (e TurnError) Guardrail() bool {
+	if e.Kind == TurnErrorCostCeiling || e.Kind == TurnErrorWatchdog {
+		return true
+	}
+	return strings.Contains(e.Message, guardrailRefusal)
+}
+
+// turnErrorFrame is the JSON payload of an EventTurnError event.
+type turnErrorFrame struct {
+	Kind      string `json:"kind"`
+	Code      string `json:"code"`
+	Message   string `json:"message"`
+	Retryable bool   `json:"retryable"`
+	Hint      string `json:"hint"`
+}
+
+// TurnFailed parses an EventTurnError payload. ok is false on a parse failure
+// or a payload that says nothing — a frame with neither a kind nor a message
+// cannot be rendered into a notice worth posting, and announcing "something
+// went wrong" with no detail is worse than the silence it replaces.
+//
+// An unrecognized kind is preserved rather than normalized: it still routes
+// correctly (only the two guardrail kinds are special-cased) and the raw value
+// is more use in a log than "unknown" would be. A frame with a message but no
+// kind is reported as TurnErrorUnknown.
+func TurnFailed(data string) (e TurnError, ok bool) {
+	var f turnErrorFrame
+	if err := json.Unmarshal([]byte(data), &f); err != nil {
+		return TurnError{}, false
+	}
+	if f.Kind == "" && f.Message == "" {
+		return TurnError{}, false
+	}
+	e = TurnError{
+		Kind:      f.Kind,
+		Code:      f.Code,
+		Message:   f.Message,
+		Retryable: f.Retryable,
+		Hint:      f.Hint,
+	}
+	if e.Kind == "" {
+		e.Kind = TurnErrorUnknown
+	}
+	return e, true
 }
 
 // agentFrame is the JSON payload of an EventAgent event. It wraps an ADK

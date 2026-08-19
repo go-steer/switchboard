@@ -118,10 +118,14 @@ In the order that shows what is there:
 5. **`@switchboard progress status`** — a mention command; the ack posts in the
    thread. Then **`/switchboard progress status`** if you configured the slash
    command — that ack is ephemeral, visible only to you.
-6. **Stop the daemon mid-turn.** An error notice appears in the thread rather
-   than the thread going silent, and its wording distinguishes a transient
-   failure from a terminal one.
-7. **Ask for a very long answer** (over ~3900 characters). It is split into
+6. **Stop the daemon before sending.** An error notice appears in the thread
+   rather than the thread going silent, and its wording distinguishes a
+   transient failure from a terminal one.
+7. **Stop the daemon *mid-turn*.** After about 90 seconds of failed reconnects
+   the thread is told contact was lost and the progress message is retired.
+   Bring the daemon back up before then and the relay resumes silently, which
+   is the point — a rolling restart should not interrupt anyone.
+8. **Ask for a very long answer** (over ~3900 characters). It is split into
    several ordered in-thread posts rather than being truncated.
 
 Not on this list, because Slack has no equivalent: the Chat welcome card. Slack
