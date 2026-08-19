@@ -286,6 +286,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `block_kit.py`; mrkdwn stays the default.
 
 ### Changed
+- `--googlechat-cards` now defaults to **`rich`** rather than `status`, so a
+  structured agent reply is laid out as a card out of the box. A card is not
+  chunked, which makes `rich` the one mode in which a long fenced answer cannot
+  break at a message boundary at all — with the widget truncation above fixed,
+  it is the only mode with no content defect, and that is what a default should
+  be. The escalation is narrow: `answerCard` returns nil unless the answer has a
+  `#`/`##` header or a rule that actually draws, so conversational traffic
+  behaves exactly as it did, and a render that goes wrong cannot cost a reply —
+  a panic recovers into nil and a card Chat rejects falls back to posting the
+  text. `status` stays supported and documented for an operator who wants
+  gateway cards without model-authored ones, which is the whole reason this is a
+  mode and not a bool.
 - Google Chat now asserts the sender's **email address** as `X-Asserted-Caller`,
   matching what the Slack adapter has always done and what the daemon keys
   per-caller credentials by; `--caller-id id` restores the raw `users/NNN`

@@ -123,8 +123,8 @@ posting the text — a rich render never costs a reply.
 
 | Mode | Behavior |
 |------|----------|
-| `status` (default) | the gateway's own messages — progress, tool activity, error notices, command acks — render as small icon cards; a command ack offers its valid values as buttons |
-| `rich` | additionally lays a structured agent reply out as a card (a section per heading, dividers for rules, code fences kept verbatim); unstructured replies stay as text |
+| `rich` (default) | everything `status` does, and lays a structured agent reply out as a card too (a section per heading, dividers for rules, code fences kept verbatim); an unstructured reply stays as text, and a section too long for one widget spills across several rather than being cut |
+| `status` | the gateway's own messages — progress, tool activity, error notices, command acks — render as small icon cards; a command ack offers its valid values as buttons. Model output stays as text |
 | `off` | text only |
 
 Regardless of mode, replies are translated into Chat's text dialect

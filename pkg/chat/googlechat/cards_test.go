@@ -30,7 +30,7 @@ func TestParseCardMode(t *testing.T) {
 		want CardMode
 		ok   bool
 	}{
-		{"", CardsStatus, true}, // the zero value is the default
+		{"", CardsRich, true}, // the zero value is the default
 		{"off", CardsOff, true},
 		{"status", CardsStatus, true},
 		{"rich", CardsRich, true},

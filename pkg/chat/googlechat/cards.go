@@ -96,7 +96,7 @@ const (
 // a mode rather than a bool because the two card families carry very different
 // risk: gateway cards are small, fixed shapes the gateway itself authors, while
 // an answer card is a render of arbitrary model output. An operator who wants
-// the first without the second (the default) can have it.
+// the first without the second can have it.
 type CardMode string
 
 const (
@@ -104,9 +104,15 @@ const (
 	CardsOff CardMode = "off"
 	// CardsStatus renders the gateway's own messages — progress, activity,
 	// notices, command acknowledgments, the welcome — as cards, and leaves
-	// model answers as text. The default.
+	// model answers as text.
 	CardsStatus CardMode = "status"
-	// CardsRich additionally renders model answers as structural cards.
+	// CardsRich additionally renders model answers as structural cards. The
+	// default: a card is not chunked, so it is the only mode in which a long
+	// fenced answer cannot straddle a message boundary at all, and the render
+	// is already conditional — answerCard returns nil unless the answer has a
+	// header or a rule that draws, so a conversational reply behaves exactly
+	// as it does in status mode. A render bug cannot cost a reply either: a
+	// panic recovers into nil and a card Chat rejects falls back to text.
 	CardsRich CardMode = "rich"
 )
 
@@ -115,9 +121,9 @@ func ParseCardMode(s string) (CardMode, bool) {
 	switch CardMode(strings.ToLower(strings.TrimSpace(s))) {
 	case CardsOff:
 		return CardsOff, true
-	case CardsStatus, "":
+	case CardsStatus:
 		return CardsStatus, true
-	case CardsRich:
+	case CardsRich, "":
 		return CardsRich, true
 	}
 	return "", false

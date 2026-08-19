@@ -18,6 +18,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/go-steer/switchboard/pkg/chat/googlechat"
 )
 
 // TestSplitList checks the allowlist flag parser tolerates the shapes a
@@ -80,6 +82,17 @@ func TestRunServeIngressValidation(t *testing.T) {
 				t.Errorf("error = %q, want it to mention %q", err, tc.want)
 			}
 		})
+	}
+}
+
+// TestDefaultCardModeIsRich pins the out-of-the-box Google Chat rendering.
+// rich is the only mode in which a long fenced answer cannot break at a message
+// boundary, so the default is a correctness choice, not a cosmetic one, and it
+// should not drift back without someone deciding to.
+func TestDefaultCardModeIsRich(t *testing.T) {
+	mode, ok := googlechat.ParseCardMode(defaultCardMode)
+	if !ok || mode != googlechat.CardsRich {
+		t.Fatalf("default --googlechat-cards = (%q, %v), want rich", mode, ok)
 	}
 }
 

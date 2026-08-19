@@ -196,9 +196,10 @@ identity travels in `action.parameters` — which the legacy dialect also carrie
 so one encoding serves both.
 
 Rendering is `--googlechat-cards`-gated (`off` / `status` / `rich`, default
-`status`) rather than a boolean, because the two card families carry different
+`rich`) rather than a boolean, because the two card families carry different
 risk: gateway cards are short and authored here, while an answer card lays out
-arbitrary model output. Text is always sent as the message fallback, and a card
+arbitrary model output — an operator who wants the first without the second
+sets `status`. Text is always sent as the message fallback, and a card
 Chat rejects with a 400 falls back to posting the text — a rich render never
 costs a reply.
 

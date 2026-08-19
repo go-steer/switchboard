@@ -268,13 +268,17 @@ In the order that shows what is new:
    error notice card. **Stop it mid-turn** and the notice takes about 90
    seconds of failed reconnects to arrive, because a daemon that comes back
    inside that window should not have interrupted anyone.
-7. **Ask for a long answer with code in it** — "write me the Terraform for
-   three project services, with the variables" is enough to clear the
-   4096-character ceiling. It arrives as several ordered posts, and every one of
-   them renders its code as code: no stray backticks at the seam, which is what
+7. **Ask for something structured** — "compare Cloud Run and GKE, with headings"
+   → a sectioned answer card, which is what the default `rich` is for. Ask for
+   something conversational and it stays plain text: an answer with no heading
+   and no rule is not laid out as a card in any mode.
+8. **Ask for a long answer with code in it** — "write me the Terraform for three
+   project services, with the variables" is enough to clear the 4096-character
+   ceiling. Under `rich` it is one card and a section too long for a single
+   widget spills across several; restart with `--googlechat-cards=status` and
+   the same answer arrives as several ordered posts instead. Either way every
+   piece renders its code as code: no stray backticks at the seam, which is what
    used to happen when the split landed inside a fenced block.
-8. Restart with `--googlechat-cards=rich`, ask for something structured → a
-   sectioned answer card.
 9. Restart with `--googlechat-cards=off` → everything degrades to text.
 10. **@-mention the app into a new room** → the welcome card, exactly once. A
     mention-add sends two events and only one may be answered.
