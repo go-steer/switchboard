@@ -263,7 +263,9 @@ func (a *Adapter) runMentionCommand(ctx context.Context, h chat.Handler, cmd cha
 // first attempts a single Block Kit message (with the mrkdwn text attached as
 // the notification/fallback); if the renderer declines (nil) or Slack rejects
 // the payload (invalid_blocks), it falls back to the plain mrkdwn path so a
-// rich render never loses a message.
+// rich render never loses a message. A reply carrying Usage gets it as a
+// trailing context block — only on the Block Kit path, since appending a line
+// to chunked mrkdwn would land it in whichever chunk had room.
 func (a *Adapter) Send(ctx context.Context, r chat.Reply) (chat.MessageRef, error) {
 	channel, thread, ok := splitConversation(r.Conversation)
 	if !ok {
@@ -275,7 +277,7 @@ func (a *Adapter) Send(ctx context.Context, r chat.Reply) (chat.MessageRef, erro
 	}
 
 	if a.richBlocks {
-		blocks := sanitizeBlocks(renderBlocks(r.Text, toMrkdwn))
+		blocks := sanitizeBlocks(withUsageFooter(renderBlocks(r.Text, toMrkdwn), r.Usage))
 		if blocks != nil {
 			// The text fallback is for notifications/old clients only; clamp it
 			// so a very long turn does not bloat the payload (blocks carry the

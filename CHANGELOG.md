@@ -7,6 +7,44 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- The `indicator` and `status` progress messages now tick: every 15 seconds the
+  placeholder is re-rendered with how long the turn has been running, and in
+  `status` mode with the tool it is on and the step count — "⏳ Working… 2m30s ·
+  running `bash` (step 7)". Previously the only thing
+  that ever changed a progress message was a tool call, so a turn that thought
+  for four minutes without calling one was indistinguishable from a dead
+  session. The clock runs from when the message was handed to the daemon rather
+  than from when the placeholder landed, and stops on the daemon's
+  `turn-complete` so a turn that ends without an answer freezes instead of
+  ticking forever — with an hour-long backstop for the case where even that
+  never arrives. Coarse on purpose — every tick is an API edit — and a failed
+  edit backs off rather than retrying at the rate that provoked it, and never
+  fails the turn. Status mode's tool notice now renders the same line as a
+  tick: two writers, one message, one format. The clock still stops early in
+  the two cases where the placeholder is retired before the turn is over — a
+  model that narrates before calling a tool, and a follow-up question asked
+  before the first answer lands — which needs a per-turn message identity the
+  relay does not have yet.
+- `--show-usage` appends each answer's model, tokens, cost and latency as a
+  footer — a Block Kit `context` block on Slack, a card footer on Google Chat.
+  The daemon has been reporting all of it and switchboard was dropping it, but
+  not in a form that can be read off any single event. The daemon's "turn" is
+  one model call, so a turn that makes five tool calls emits six
+  `usage-update`s, each with a `last_turn` covering only the call that just
+  finished; the conversational turn's tokens and cost are the *delta* of the
+  running totals across it. Latency comes from `turn-complete`, which does fire
+  once per conversational turn and does span the whole of it. Both events
+  arrive *before* the agent event carrying the answer, so the relay banks the
+  running difference and attaches the merged result on delivery. Off by
+  default, because a turn's
+  cost is spend data and a shared channel is the wrong place to disclose it
+  uninvited; suppressed outside the rich renders, where a footer line would
+  have to survive the per-message chunker. Per-turn only — a session running
+  total would be stale the moment it landed on a message nothing will edit
+  again. Held until `turn-complete`, so a model that narrates mid-turn does not
+  get a footer covering part of its own turn. On Google Chat the footer needs a
+  card to ride, so a prose answer — one with no heading, list, or code — carries
+  none even in `--googlechat-cards rich`.
 - `dev/demo/daemon` stands up a throwaway core-agent for local testing and
   demos: bearer-table auth, switchboard registered in `proxy_identities` so
   `X-Asserted-Caller` is honored, and a generated token printed for

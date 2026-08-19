@@ -24,6 +24,10 @@ package chat
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strconv"
+	"strings"
+	"time"
 )
 
 // Message is one inbound turn from a chat platform, normalized across
@@ -120,6 +124,90 @@ type Reply struct {
 	// Kind classifies the reply so an adapter can render it in the
 	// platform's idiom. The zero value (KindAnswer) is an agent turn.
 	Kind ReplyKind
+
+	// Usage is what the turn cost, for an adapter to render as a footer on
+	// the reply. Nil — the usual case — means show nothing: the router only
+	// populates it for an answer, and only when the operator opted in.
+	Usage *Usage
+}
+
+// Usage is the token and cost accounting for the turn a Reply carries. It is
+// structured rather than pre-rendered because the platforms have genuinely
+// different places to put it (a Block Kit context block, a Chat card footer)
+// and may want to arrange it differently; Line is the shared one-line form
+// both use today.
+type Usage struct {
+	// Model is the model that ran the turn, e.g. "gemini-3.7-flash".
+	Model string
+	// TokensIn and TokensOut are the turn's prompt and completion tokens.
+	TokensIn, TokensOut int64
+	// CostUSD is the turn's cost in US dollars.
+	CostUSD float64
+	// Latency is the turn's wall-clock duration.
+	Latency time.Duration
+}
+
+// Line renders the usage as one line of plain text — e.g.
+// "gemini-3.7-flash · 5,000 in / 1 out · $0.0038 · 3.1s". A field the daemon
+// did not report is left out rather than shown as a zero, so a partial
+// report degrades to a shorter line; an empty Usage renders as "" and the
+// adapter then shows no footer at all.
+func (u Usage) Line() string {
+	var parts []string
+	if u.Model != "" {
+		parts = append(parts, u.Model)
+	}
+	if u.TokensIn > 0 || u.TokensOut > 0 {
+		parts = append(parts, commas(u.TokensIn)+" in / "+commas(u.TokensOut)+" out")
+	}
+	if u.CostUSD > 0 {
+		parts = append(parts, formatCost(u.CostUSD))
+	}
+	if u.Latency > 0 {
+		parts = append(parts, formatLatency(u.Latency))
+	}
+	return strings.Join(parts, " · ")
+}
+
+// formatCost renders a dollar amount at a precision that stays informative
+// across four orders of magnitude: a single cheap turn costs a fraction of a
+// cent, where two decimals would round every turn to "$0.00".
+func formatCost(c float64) string {
+	switch {
+	case c < 0.0001:
+		return "<$0.0001"
+	case c < 1:
+		return fmt.Sprintf("$%.4f", c)
+	default:
+		return fmt.Sprintf("$%.2f", c)
+	}
+}
+
+// formatLatency renders a turn duration the way people say it: milliseconds
+// under a second, then one decimal place of seconds.
+func formatLatency(d time.Duration) string {
+	if d < time.Second {
+		return strconv.FormatInt(d.Milliseconds(), 10) + "ms"
+	}
+	return fmt.Sprintf("%.1fs", d.Seconds())
+}
+
+// commas groups an integer in thousands. Token counts are the one number
+// here people compare at a glance, and "5,000" is legible where "5000" is
+// merely readable.
+func commas(n int64) string {
+	s := strconv.FormatInt(n, 10)
+	neg := strings.HasPrefix(s, "-")
+	if neg {
+		s = s[1:]
+	}
+	for i := len(s) - 3; i > 0; i -= 3 {
+		s = s[:i] + "," + s[i:]
+	}
+	if neg {
+		s = "-" + s
+	}
+	return s
 }
 
 // MessageRef identifies a reply already posted to a conversation so the

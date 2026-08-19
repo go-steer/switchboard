@@ -96,6 +96,10 @@ func runServe(args []string) error {
 	progressMode := fs.String("progress-mode", "indicator",
 		"long-turn feedback: \"indicator\" (placeholder cleared on reply), \"status\" "+
 			"(one message edited with the running tool), \"stream\" (a notice per tool + each turn), or \"off\"")
+	showUsage := fs.Bool("show-usage", false,
+		"append each answer's model, tokens, cost and latency as a footer; rich renders only "+
+			"(--slack-rich-blocks, --googlechat-cards rich), and off by default because it "+
+			"discloses spend to everyone in the conversation")
 	googleProject := fs.String("google-project", envOr("SWITCHBOARD_GOOGLE_PROJECT", ""),
 		"GCP project hosting the Google Chat Pub/Sub subscription (--platform googlechat)")
 	googleSub := fs.String("google-subscription", envOr("SWITCHBOARD_GOOGLE_SUBSCRIPTION", ""),
@@ -204,6 +208,15 @@ func runServe(args []string) error {
 	}
 	m := newMetrics()
 	router := NewRouter(dc, adapter, progress, m, logf)
+	router.setShowUsage(*showUsage)
+	if *showUsage {
+		switch {
+		case *platform == "slack" && !*richBlocks:
+			logf("warning: --show-usage needs --slack-rich-blocks; the footer will not be shown")
+		case *platform == "googlechat" && cardMode != googlechat.CardsRich:
+			logf("warning: --show-usage needs --googlechat-cards rich; the footer will not be shown")
+		}
+	}
 
 	// The outbound ingress posts through the same adapter egress the router
 	// replies with, so it is built once the adapter exists — and before

@@ -141,10 +141,36 @@ the process default:
 
 | Mode | Behavior |
 |------|----------|
-| `indicator` (default) | posts a "⏳ Working…" placeholder, deleted when the reply lands |
-| `status` | keeps one message per turn, edited in place to name the running tool |
+| `indicator` (default) | posts a "⏳ Working…" placeholder with a running clock, deleted when the reply lands |
+| `status` | keeps one message per turn, edited in place with the clock and the running tool |
 | `stream` | posts a "🔧 Running `tool`" notice per tool call, plus each completed turn |
 | `off` | silent until the reply is ready |
+
+In `indicator` and `status` the placeholder ticks: every 15 seconds it is
+re-rendered with how long the turn has been running, and in `status` with the
+tool it is on.
+
+```
+⏳ Working… 45s
+⏳ Working… 2m30s · running `bash` (step 7)
+```
+
+The clock is what makes a long turn readable. A turn that runs for four minutes
+without calling a tool has nothing else to say for itself, and a static
+"⏳ Working…" looks exactly like a turn that died. The clock counts from when
+the message was handed to the daemon, not from when the placeholder landed, and
+stops on the daemon's `turn-complete` — so a turn that ends without an answer
+freezes rather than ticking forever. Fifteen seconds is deliberately coarse:
+each tick is an API edit. A failed edit backs off and is never allowed to fail
+the turn.
+
+Two cases stop the clock early, both because switchboard retires the placeholder
+on the first message it delivers. A model that narrates before calling a tool
+("let me check…") sends that text as a message: the placeholder is cleared and
+the clock stops, even though the turn runs on. So does a second question asked
+before the first has answered — the new turn takes over the placeholder and the
+old one goes quiet. Neither case loses an answer; both lose the running clock.
+Fixing them needs a per-turn message identity the relay does not have yet.
 
 Operators can override the mode **per channel** at runtime with a command — no
 restart:
@@ -167,6 +193,36 @@ slash_commands:
 
 `indicator` and `status` also need the bot's `chat:delete` scope to clear their
 transient messages.
+
+### Per-turn usage
+
+`--show-usage` appends what the turn cost to each answer — model, tokens in and
+out, dollars, wall-clock:
+
+```
+gemini-3.7-flash · 5,000 in / 1 out · $0.0038 · 3.1s
+```
+
+It is **off by default**: a turn's cost is spend data, and a shared channel —
+particularly one with a customer in it — is the wrong place to disclose it
+without being asked.
+
+The footer rides the rich render on each platform: a Block Kit `context` block
+under `--slack-rich-blocks`, a card footer under `--googlechat-cards rich`.
+Outside those it is suppressed rather than appended as a line of text, which
+would have to survive the per-message chunker to arrive intact. Switchboard
+warns at startup if `--show-usage` is set with no rich render to attach it to.
+
+On Google Chat that means the footer appears only on answers that earn a card.
+A plain paragraph with no headings, list, or code goes out as text, and carries
+no footer even in `--googlechat-cards rich`. Slack has no such gap: every answer
+is rendered as blocks under `--slack-rich-blocks`.
+
+Only the finished turn is reported, never a session running total: the footer
+lands on a message that will never be edited again, so a number that changes
+every turn would be wrong there within minutes. The turn is the *conversational*
+one — a question that drives eight tool calls reports what all nine model calls
+cost, not just the last.
 
 ### Outbound ingress
 
