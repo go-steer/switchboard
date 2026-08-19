@@ -159,10 +159,11 @@ The clock is what makes a long turn readable. A turn that runs for four minutes
 without calling a tool has nothing else to say for itself, and a static
 "⏳ Working…" looks exactly like a turn that died. The clock counts from when
 the message was handed to the daemon, not from when the placeholder landed, and
-stops on the daemon's `turn-complete` — so a turn that ends without an answer
-freezes rather than ticking forever. Fifteen seconds is deliberately coarse:
-each tick is an API edit. A failed edit backs off and is never allowed to fail
-the turn.
+stops on the daemon's own turn boundary — `turn-complete`, or the `status-update`
+reporting the session idle, which is the one the daemon emits however the turn
+ended — so a turn that ends without an answer freezes rather than ticking
+forever. Fifteen seconds is deliberately coarse: each tick is an API edit. A
+failed edit backs off and is never allowed to fail the turn.
 
 Two cases stop the clock early, both because switchboard retires the placeholder
 on the first message it delivers. A model that narrates before calling a tool
