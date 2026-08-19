@@ -7,6 +7,59 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- Every log line now carries the time it was written, and `--log-format json`
+  (`SWITCHBOARD_LOG_FORMAT`) renders one JSON object per line for a collector
+  (#49). Until now the entire logging surface was a single closure —
+  `fmt.Fprintf(os.Stderr, prog+": "+format+"\n", ...)` — so a line had no time,
+  no severity and no structure, and neither `log` nor `log/slog` appeared
+  anywhere in the tree.
+
+  A hosted deployment was not quite as blind as that sounds: Cloud Run and a
+  k8s collector both stamp an ingestion time on arrival. But that is when the
+  line was collected rather than when it happened, and it is missing outright
+  from a local run, a redirect to a file, a `kubectl logs` dump taken without
+  `--timestamps`, and log output pasted into an issue — which is how most of
+  the Google Chat walkthrough findings arrived. The gap fell hardest on the
+  behaviour that is hardest to reason about: the relay logs
+  `stream ended (%v); resuming from seq %d in %s` on every reconnect, and
+  whether a session flapped four times in a minute or four times in an hour is
+  the entire diagnostic question. Ordering alone does not answer it.
+
+  The stamp is fixed-width UTC to the millisecond in both formats, rather than
+  RFC3339Nano, whose trailing-zero trimming renders a different width per line
+  and makes an unreadable left-hand column. JSON goes through
+  `slog.JSONHandler` for its escaping, which is not incidental: the relay logs
+  raw daemon frames it cannot decode, and `--googlechat-log-events` logs whole
+  Chat payloads, so quotes and braces in a message are the normal case — as is
+  the occasional newline, which JSON escapes and text passes through verbatim.
+  The entry text is under `message`, where Cloud Logging looks for it, rather
+  than slog's `msg`; `time` is already both.
+  The startup banner and the shutdown line went to stderr directly and now go
+  through the logger too, so a JSON stream no longer opens with three
+  unparseable lines — nor ends on one, since a startup failure is now logged by
+  `serve` rather than printed by `main`, and a crash loop is when that line is
+  read. Build identity is logged ahead of the config checks so an operator
+  whose flags are rejected still learns which build rejected them. Not
+  everything is the logger's: a flag that will not parse and a `--log-format`
+  that cannot be rendered happen before there is a logger to say them through,
+  `--help` and `version` keep their own output, and the `--metrics-addr` and
+  `--ingress-addr` listeners still hand runtime errors to `net/http`'s default
+  logger — the README lists them, and #49 tracks the last one.
+
+  Two things a line still does not carry, both deliberate and both tracked in
+  #49. There is no **severity**: nothing upstream distinguishes
+  `slack: connected as %s` from `handle %s: surface error: %v`, so every record
+  arrives at one level, and labelling them all `INFO` would mislabel the
+  failures — worse than the `DEFAULT` that Cloud Logging assigns a record with
+  no severity at all. Giving the call sites a level to carry is a pass over all
+  54 of them. And the messages are still **unstructured**, with the component
+  and the conversation key interpolated into the format string where no
+  collector can filter on them; turning those into attrs means rewriting every
+  message, and should wait until the message set has settled.
+
+  The `Logf func(string, ...any)` hook on the adapter configs, the ingress and
+  the router is unchanged, so no call site moved and `t.Logf` still works as a
+  test logger.
 - The relay reads the daemon's `status-update` and `capabilities` frames (#33).
   `inbox` and `pause` remain advertised and unconsumed.
 
