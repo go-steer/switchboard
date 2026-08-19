@@ -28,6 +28,8 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/go-steer/switchboard/pkg/chat"
 )
 
 // slackTextLimit is the per-message character budget. Slack accepts far more
@@ -218,74 +220,16 @@ func toMrkdwn(content string) string {
 	return ph.restore(text)
 }
 
-// chunkMessage splits rendered mrkdwn into <= limit-byte pieces on newline
-// boundaries (falling back to a hard cut at a rune boundary), so a long model
-// turn becomes several ordered in-thread posts. When a hard cut would land
-// inside a ``` code span, the fence is closed at the end of the piece and
-// reopened at the start of the next so each renders correctly on its own.
+// chunkMessage splits rendered mrkdwn into <= limit-byte pieces for posting as
+// several ordered in-thread messages. The splitting itself — newline
+// preference, rune safety, and closing/reopening a ``` block that a cut lands
+// inside — is shared with the other adapters in pkg/chat, since every platform
+// switchboard speaks to renders an unbalanced fence literally.
 func chunkMessage(text string, limit int) []string {
-	if len(text) <= limit {
-		return []string{text}
-	}
-	splitLimit := limit
-	if strings.Contains(text, "```") {
-		// Reserve headroom for the close/reopen markers the balancing pass adds.
-		splitLimit = limit - 8
-		if half := limit / 2; splitLimit < half {
-			splitLimit = half
-		}
-		if splitLimit < 1 {
-			splitLimit = 1
-		}
-	}
-
-	var out []string
-	remaining := text
-	for len(remaining) > splitLimit {
-		cut := strings.LastIndexByte(remaining[:splitLimit], '\n')
-		if cut <= 0 {
-			cut = runeBoundary(remaining, splitLimit)
-			if cut == 0 {
-				// splitLimit lands inside the first rune: emit that whole rune
-				// so the loop always makes progress (never a zero-length cut).
-				_, sz := utf8.DecodeRuneInString(remaining)
-				cut = sz
-			}
-		}
-		out = append(out, remaining[:cut])
-		remaining = strings.TrimLeft(remaining[cut:], "\n")
-	}
-	if remaining != "" {
-		out = append(out, remaining)
-	}
-
-	if len(out) > 1 && strings.Contains(text, "```") {
-		balanced := make([]string, 0, len(out))
-		reopen := false
-		for _, c := range out {
-			if reopen {
-				c = "```\n" + c
-			}
-			odd := strings.Count(c, "```")%2 == 1
-			if odd {
-				c += "\n```"
-			}
-			reopen = odd
-			balanced = append(balanced, c)
-		}
-		out = balanced
-	}
-	return out
+	return chat.ChunkText(text, limit)
 }
 
 // runeBoundary returns the largest index <= n that starts a rune, so a hard
-// cut never splits a multi-byte character.
-func runeBoundary(s string, n int) int {
-	if n >= len(s) {
-		return len(s)
-	}
-	for n > 0 && !utf8.RuneStart(s[n]) {
-		n--
-	}
-	return n
-}
+// cut never splits a multi-byte character. Shared with the other adapters,
+// which cut to a byte budget in the same places for the same reason.
+func runeBoundary(s string, n int) int { return chat.RuneBoundary(s, n) }

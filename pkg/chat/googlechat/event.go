@@ -38,9 +38,10 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-	"unicode/utf8"
 
 	chatv1 "google.golang.org/api/chat/v1"
+
+	"github.com/go-steer/switchboard/pkg/chat"
 )
 
 // Legacy (interaction-events) event types the gateway acts on. The add-on
@@ -540,40 +541,13 @@ func splitConversation(key string) (space, thread string, ok bool) {
 	return space, thread, true
 }
 
-// chunk splits s into pieces no longer than limit bytes, preferring to break on
-// a newline so a reply's block structure survives the split, and never cutting
-// a multi-byte rune. A short string is returned whole.
+// chunk splits s into pieces no longer than limit bytes for posting as several
+// ordered in-thread messages. Shared with the other adapters (pkg/chat), which
+// is what closes #31: Chat text uses the same ``` syntax as markdown and
+// renders an odd one literally, so a split landing inside a fenced block used
+// to put raw backticks on screen in both halves of a long answer.
 func chunk(s string, limit int) []string {
-	if len(s) <= limit {
-		return []string{s}
-	}
-	if limit < 1 {
-		return []string{s} // nothing sensible to split on
-	}
-	var out []string
-	for len(s) > limit {
-		cut := limit
-		// Back up to a rune boundary so a multi-byte rune is never split.
-		for cut > 0 && !utf8.RuneStart(s[cut]) {
-			cut--
-		}
-		if cut == 0 {
-			// limit is smaller than the first rune; emit that whole rune so the
-			// loop always makes progress (unreachable at Chat's 4096 limit, but
-			// keeps chunk total for any caller).
-			_, size := utf8.DecodeRuneInString(s)
-			cut = size
-		} else if nl := strings.LastIndexByte(s[:cut], '\n'); nl > 0 {
-			// Prefer the last newline within the window for a cleaner break.
-			cut = nl + 1
-		}
-		out = append(out, s[:cut])
-		s = s[cut:]
-	}
-	if len(s) > 0 {
-		out = append(out, s)
-	}
-	return out
+	return chat.ChunkText(s, limit)
 }
 
 // compactJSON renders a payload as one line for the event log, falling back to

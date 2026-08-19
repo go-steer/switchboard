@@ -31,7 +31,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"unicode/utf8"
+
+	"github.com/go-steer/switchboard/pkg/chat"
 )
 
 // Precompiled patterns. Order and intent mirror toChatText below.
@@ -321,21 +322,6 @@ func clamp(s string, limit int) string {
 	if limit < len(ellipsis) {
 		return "" // no room for even the marker; better empty than over budget
 	}
-	cut := runeBoundary(s, limit-len(ellipsis))
+	cut := chat.RuneBoundary(s, limit-len(ellipsis))
 	return strings.TrimRight(s[:cut], " ") + ellipsis
-}
-
-// runeBoundary returns the largest index <= n that starts a rune, so a hard cut
-// never splits a multi-byte character.
-func runeBoundary(s string, n int) int {
-	if n >= len(s) {
-		return len(s)
-	}
-	if n < 0 {
-		return 0
-	}
-	for n > 0 && !utf8.RuneStart(s[n]) {
-		n--
-	}
-	return n
 }

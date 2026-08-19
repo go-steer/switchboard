@@ -297,6 +297,39 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   is the captured payload that shows it.
 
 ### Fixed
+- A long Google Chat reply split mid-code-fence, so the backticks rendered
+  literally. Chat's per-message ceiling is 4096 characters — counted here in
+  bytes, which is conservative for multi-byte text — and an answer over it is
+  posted as several messages; the split preferred a newline but knew nothing
+  about `` ``` ``, so a break landing inside a fenced block left an odd number of
+  fences in each half — raw backticks on screen in both, and the monospace lost
+  in one. Slack's renderer had already solved that case, so the splitting itself
+  now lives in `pkg/chat` and both adapters call it rather than keeping two
+  copies to fix separately. They still differ where they should: Chat allows
+  4096 to Slack's 3900.
+
+  Four further ways a split could corrupt a code block, found reviewing the
+  shared version and fixed there, so Slack gets them too:
+  - A break with no newline in reach could land *inside* the `` ``` `` itself.
+    Both halves then hold a stray backtick, both count even, and no amount of
+    balancing sees it — the same bug by another route. A break now never falls
+    through a run of backticks.
+  - The newline the break was taken on was trimmed along with every newline
+    after it, so a blank line inside a YAML or Python block was deleted and the
+    reader had no way to know. Exactly one line ending is consumed now, and the
+    pieces rejoin into the answer the model actually wrote.
+  - A break landing right after an opening fence posted `` ```/``` `` — an empty
+    code block — and opened the real one on the next message. It now moves back
+    a line so the opener travels with its code.
+  - Fences were counted with `strings.Count`, which reads ```` ```` ```` as one
+    delimiter plus a loose backtick and gets the parity backwards. A model
+    reaches for a four-backtick fence when the answer is itself about markdown.
+    Each run of three or more backticks is one delimiter now.
+
+  Not fixed here: in `--googlechat-cards rich` an answer goes out as a card
+  whose paragraphs are clamped at 3500 bytes with an ellipsis, so a long one is
+  still truncated (and can still be cut mid-fence) — that is #32, which spills
+  over-long widgets instead of clamping them.
 - A turn that failed inside the daemon posted nothing. The daemon emits
   `turn-error` when a turn dies — a bad model name, a rejected credential, a
   rate limit — and nothing in switchboard parsed it, so the thread went quiet

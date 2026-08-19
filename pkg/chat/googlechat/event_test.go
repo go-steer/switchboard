@@ -15,6 +15,7 @@
 package googlechat
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -480,10 +481,13 @@ func TestChunk(t *testing.T) {
 			t.Fatalf("chunk %q exceeds limit 12", c)
 		}
 	}
-	if strings.Join(got, "") != body {
-		t.Fatalf("chunks do not reassemble: %q", strings.Join(got, ""))
+	// Rejoined on the boundary newline the split consumed: a chunk that opens
+	// with blank lines reads as a gap in the conversation, so the shared
+	// chunker trims them rather than carrying them over.
+	if strings.Join(got, "\n") != body {
+		t.Fatalf("chunks do not reassemble: %q", strings.Join(got, "\n"))
 	}
-	if got[0] != "line one\n" {
+	if got[0] != "line one" {
 		t.Fatalf("first chunk should break on newline, got %q", got[0])
 	}
 
@@ -499,6 +503,58 @@ func TestChunk(t *testing.T) {
 		}
 		if strings.ContainsRune(p, '�') {
 			t.Fatalf("chunk %q split a multi-byte rune", p)
+		}
+	}
+}
+
+// TestLongFencedReplySurvivesTheSplit is #31 end to end: the reported failure
+// was a real Terraform answer, several fenced blocks and a little over 6 KB,
+// which Chat's 4096-byte ceiling cut in two. The break landed inside a block,
+// so both halves carried an odd number of ``` and Chat rendered the backticks
+// literally — one half lost its monospace entirely. The reproduction runs the
+// answer through the same pair of calls Send does, toChatText then chunk.
+func TestLongFencedReplySurvivesTheSplit(t *testing.T) {
+	var b strings.Builder
+	b.WriteString("Here is the Terraform for the three services.\n\n")
+	b.WriteString("## Project services\n\n```hcl\n")
+	for i := range 40 {
+		fmt.Fprintf(&b, "resource \"google_project_service\" \"svc_%02d\" {\n  service            = \"service-%02d.googleapis.com\"\n  disable_on_destroy = false\n}\n", i, i)
+	}
+	b.WriteString("```\n\nAnd the **variables** that go with them:\n\n```hcl\n")
+	for i := range 30 {
+		fmt.Fprintf(&b, "variable \"region_%02d\" {\n  type    = string\n  default = \"us-central1\"\n}\n", i)
+	}
+	b.WriteString("```\n\nApply with `terraform apply`.\n")
+	if b.Len() < 6000 {
+		t.Fatalf("reproduction is %d bytes, want something like the reported 6.4 KB", b.Len())
+	}
+
+	converted := toChatText(b.String())
+	parts := chunk(converted, chatTextLimit)
+	if len(parts) < 2 {
+		t.Fatalf("got %d part(s), want the reply to actually split", len(parts))
+	}
+	for i, p := range parts {
+		if n := strings.Count(p, "```"); n%2 != 0 {
+			t.Errorf("part %d has %d fences (odd), so Chat renders them literally", i, n)
+		}
+		if len(p) > chatTextLimit {
+			t.Errorf("part %d is %d bytes, over the %d-byte limit", i, len(p), chatTextLimit)
+		}
+	}
+
+	// The markers are the only thing added: strip them and every line of the
+	// answer is still present, in order.
+	var rebuilt strings.Builder
+	for _, p := range parts {
+		p = strings.TrimSuffix(p, "\n```")
+		p = strings.TrimPrefix(p, "```\n")
+		rebuilt.WriteString(p)
+		rebuilt.WriteString("\n")
+	}
+	for _, want := range []string{"svc_00", "svc_39", "region_00", "region_29", "terraform apply"} {
+		if !strings.Contains(rebuilt.String(), want) {
+			t.Errorf("the split lost %q", want)
 		}
 	}
 }

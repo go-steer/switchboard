@@ -125,8 +125,10 @@ In the order that shows what is there:
    the thread is told contact was lost and the progress message is retired.
    Bring the daemon back up before then and the relay resumes silently, which
    is the point — a rolling restart should not interrupt anyone.
-8. **Ask for a very long answer** (over ~3900 characters). It is split into
-   several ordered in-thread posts rather than being truncated.
+8. **Ask for a very long answer** (over ~3900 characters), with a fenced code
+   block in it. It is split into several ordered in-thread posts rather than
+   being truncated, and a block the split lands inside is closed and reopened
+   so every post renders its code as code.
 
 Not on this list, because Slack has no equivalent: the Chat welcome card. Slack
 apps get no "added to space" event the gateway acts on.
