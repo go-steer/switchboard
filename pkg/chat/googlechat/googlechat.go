@@ -17,11 +17,19 @@
 //
 // Ingress is Pub/Sub — the add-on is configured to publish events to a topic
 // and switchboard pulls them from a subscription, so (like Slack Socket Mode)
-// no public webhook is exposed, matching the distroless posture. That choice
-// costs one add-on feature: a dialog needs a synchronous HTTP response, so
-// there are none here; interaction happens through card buttons instead, whose
-// clicks arrive as ordinary events and are answered by patching the card. In
-// exchange the gateway stays a pull-only client with no inbound surface.
+// no public webhook is exposed, matching the distroless posture. In exchange
+// the gateway stays a pull-only client with no inbound surface.
+//
+// What that costs is everything needing a synchronous HTTP response, which
+// rules out dialogs. Callback buttons are a separate and harsher limit, not a
+// consequence of that one: a click could have been answered asynchronously by
+// patching the hosting message, but it never arrives to be answered. The
+// add-on's connection settings route four triggers (message, app command,
+// added-to-space, removed-from-space), a card click is not one of them, and a
+// live click was answered with "Switchboard is unable to process your request"
+// while nothing at all reached the subscription (#28). Cards here are therefore
+// output, and a setting is changed by typing the command. The click path is
+// written and tested for the HTTP ingress in #29.
 //
 // Egress is the Google Chat REST API (spaces.messages create/patch/delete),
 // which lets every long-turn progress mode work: the placeholder can be edited
@@ -265,9 +273,8 @@ func (a *Adapter) commandOf(in inbound) chat.Command {
 
 // runCommand runs a gateway command and posts its acknowledgment back into the
 // invoking thread. Google Chat has no ephemeral async reply, so (like the Slack
-// mention subcommand) the ack is a normal in-thread message — a card carrying a
-// button per accepted value when the handler reports its choices, so the next
-// change is a click rather than another typed command.
+// mention subcommand) the ack is a normal in-thread message, rendered as a card
+// so its icon marks it as the gateway talking about itself.
 func (a *Adapter) runCommand(ctx context.Context, h chat.Handler, conv string, cmd chat.Command) {
 	ack, err := h.HandleCommand(ctx, cmd)
 	if err != nil {
@@ -277,17 +284,21 @@ func (a *Adapter) runCommand(ctx context.Context, h chat.Handler, conv string, c
 	if ack == "" {
 		return
 	}
-	if _, err := a.post(ctx, conv, a.ackCardFor(h, cmd.Name, ack), toChatText(ack)); err != nil {
+	if _, err := a.post(ctx, conv, a.ackCardFor(ack), toChatText(ack)); err != nil {
 		a.logf("googlechat: command ack %s: %v", conv, err)
 	}
 }
 
 // runButton handles a click on a card the gateway posted. The click carries the
 // command it stands for, so it runs exactly as though the invoker had typed it;
-// the hosting card is then patched with the new acknowledgment, which is how a
-// Pub/Sub add-on answers an interaction at all (there is no synchronous
-// response to return one in). Patching is idempotent — the same click twice
-// writes the same card — so a Pub/Sub redelivery is harmless.
+// the hosting card is then patched with the new acknowledgment rather than
+// returned, since a pulled event has no synchronous response to return one in.
+// Patching is idempotent — the same click twice writes the same card — so a
+// redelivery is harmless.
+//
+// Not reached under Pub/Sub ingress, which is the only ingress today: no card
+// this gateway sends has a button, because Chat delivered no click over it
+// (#28). This is here for the HTTP endpoint in #29.
 func (a *Adapter) runButton(ctx context.Context, h chat.Handler, in inbound, conv string) {
 	name := in.params[paramCommand]
 	if name == "" {
@@ -309,37 +320,42 @@ func (a *Adapter) runButton(ctx context.Context, h chat.Handler, in inbound, con
 	// a card we cannot locate still deserves an answer, so it falls back to a
 	// fresh reply in the thread.
 	if in.messageName == "" {
-		if _, err := a.post(ctx, conv, a.ackCardFor(h, cmd.Name, ack), toChatText(ack)); err != nil {
+		if _, err := a.post(ctx, conv, a.ackCardFor(ack), toChatText(ack)); err != nil {
 			a.logf("googlechat: button ack %s: %v", conv, err)
 		}
 		return
 	}
-	if err := a.rewrite(ctx, in.messageName, a.ackCardFor(h, cmd.Name, ack), toChatText(ack)); err != nil {
+	if err := a.rewrite(ctx, in.messageName, a.ackCardFor(ack), toChatText(ack)); err != nil {
 		a.logf("googlechat: button ack %s: %v", in.messageName, err)
 	}
 }
 
 // welcome greets a space the app was just added to, explaining what a mention
-// does and offering the progress modes as buttons.
+// does and naming the progress modes the handler accepts.
 func (a *Adapter) welcome(ctx context.Context, h chat.Handler, conv string) {
+	choices := choicesOf(h, "progress")
 	var card *chatv1.GoogleAppsCardV1Card
 	if a.cards != CardsOff {
-		card = welcomeCard(choicesOf(h, "progress"))
+		card = welcomeCard(choices)
 	}
-	if _, err := a.post(ctx, conv, card, toChatText(welcomeText)); err != nil {
+	if _, err := a.post(ctx, conv, card, toChatText(welcomeTextFor(choices))); err != nil {
 		a.logf("googlechat: welcome %s: %v", conv, err)
 	}
 }
 
 // ackCardFor renders a command acknowledgment as a card, or nil when cards are
-// off. The accepted values come from the handler, so the buttons stay in step
-// with what the command actually takes and this package learns no router
-// vocabulary.
-func (a *Adapter) ackCardFor(h chat.Handler, name, ack string) *chatv1.GoogleAppsCardV1Card {
+// off. The card is the handler's ack and nothing else: it used to add the
+// command's accepted values as a row of buttons, and #28 removed the row rather
+// than restating the values, because the acks where a value list actually helps
+// — the one that reports the current mode, help, and the unknown-value error —
+// already carry it in their own text. The ack that confirms a change does not,
+// which is the one thing this loses; naming four modes back at someone who just
+// picked one is not worth a line.
+func (a *Adapter) ackCardFor(ack string) *chatv1.GoogleAppsCardV1Card {
 	if a.cards == CardsOff {
 		return nil
 	}
-	return ackCard(ack, name, choicesOf(h, name))
+	return gatewayCard(chat.KindAck, ack)
 }
 
 // choicesOf asks a handler for a command's accepted values, tolerating one that
@@ -432,7 +448,8 @@ func (a *Adapter) post(ctx context.Context, conv string, card *chatv1.GoogleApps
 }
 
 // Update replaces a previously posted message in place — the mechanism behind
-// long-turn status edits, and how a card answers a button click. A zero ref
+// long-turn status edits, and how a card would answer a click if one ever
+// arrived, which over this ingress it does not (#28). A zero ref
 // no-ops. Google Chat supports editing an app's own messages, so this never
 // returns chat.ErrUnsupported. An update cannot be split across messages, so an
 // over-long text is clamped rather than chunked.

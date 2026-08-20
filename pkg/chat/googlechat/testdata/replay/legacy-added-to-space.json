@@ -3,8 +3,8 @@
   "posts": [
     {
       "target": "spaces/AAQAXbGkY1s|",
-      "fallback": "_switchboard_ is connected. Mention me in a thread and I'll relay the turn to the agent; every reply lands back in the same thread, and a thread is one conversation. Set how much progress you see with `progress <off|indicator|status|stream>`.",
-      "card": "header=switchboard [Mention me in a thread and I'll relay the turn to the agent. Every reply lands back in the same thread, and a thread is one conversation.][waving_hand:Long turns report progress while they run — pick how much you want to see.][buttons:off,indicator,status,stream]"
+      "fallback": "_switchboard_ is connected. Mention me in a thread and I'll relay the turn to the agent; every reply lands back in the same thread, and a thread is one conversation. Long turns report progress while they run. Set how much you see with `progress <off|indicator|status|stream>`.",
+      "card": "header=switchboard [Mention me in a thread and I'll relay the turn to the agent. Every reply lands back in the same thread, and a thread is one conversation.][waving_hand:Long turns report progress while they run. Set how much you see with `progress &lt;off|indicator|status|stream&gt;`.]"
     }
   ]
 }

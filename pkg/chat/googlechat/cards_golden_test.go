@@ -99,11 +99,18 @@ func TestCardsGolden(t *testing.T) {
 		{"activity", gatewayCard(chat.KindActivity, toChatText("🔧 Running `bash`")), 0},
 		{"notice", gatewayCard(chat.KindNotice, toChatText(
 			"⚠️ That turn didn't go through — the daemon returned 503. Try again.")), 0},
-		{"ack-with-choices", ackCard(
+		// The ack that names the accepted values: the angle brackets around
+		// them have to arrive escaped, since DecoratedText accepts only
+		// <b> <i> <s> <a> <br> and renders anything else as broken markup.
+		{"ack-with-values", gatewayCard(chat.KindAck,
 			toChatText("Progress mode for this channel is *indicator*. "+
-				"Change it with `progress <off|indicator|status|stream>`."),
-			"progress", []string{"off", "indicator", "status", "stream"}), 0},
-		{"ack-plain", ackCard(toChatText("Progress mode set to *stream*."), "progress", nil), 0},
+				"Change it with `progress <off|indicator|status|stream>`.")), 0},
+		// The other ack: the one confirming a change, which names no values.
+		// That is the surface the button row was removed from without anything
+		// taking its place (#28), so it is pinned to keep the difference from
+		// the ack above visible rather than remembered.
+		{"ack-plain", gatewayCard(chat.KindAck,
+			toChatText("Progress mode for this channel set to *stream*.")), 0},
 		{"welcome", welcomeCard([]string{"off", "indicator", "status", "stream"}), 0},
 		{"answer", answerCard(goldenAnswer), 0},
 		// The whole fence has to survive, across as many widgets as it takes.
@@ -132,12 +139,17 @@ func TestCardsGolden(t *testing.T) {
 				t.Fatalf("card has %d widgets, want at least %d — the fixture no longer "+
 					"exercises what it was written for", n, tc.minWidgets)
 			}
-			// An encoder rather than json.Marshal: the default escapes < and &
-			// to < / &, which would hide the very HTML these cards
-			// are built to emit behind unreadable escapes.
+			// An encoder rather than json.MarshalIndent, for the trailing
+			// newline the goldens carry — the one a text editor and git both
+			// expect at the end of a file.
+			//
+			// No SetEscapeHTML(false): it would not reach the angle brackets
+			// and ampersands in the widget text anyway, because the generated
+			// chatv1 types marshal themselves and hand back bytes already
+			// \u-escaped. That is what a golden here looks like, and Card
+			// Builder reads it either way, which is what the fixtures are for.
 			var buf bytes.Buffer
 			enc := json.NewEncoder(&buf)
-			enc.SetEscapeHTML(false)
 			enc.SetIndent("", "  ")
 			if err := enc.Encode(tc.card); err != nil {
 				t.Fatalf("marshal: %v", err)

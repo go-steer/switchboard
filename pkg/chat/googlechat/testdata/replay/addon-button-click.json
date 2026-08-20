@@ -13,7 +13,7 @@
   "patches": [
     {
       "target": "spaces/AAQAXbGkY1s/messages/pQ4Lm9xZaBc.rS7Nv1yWcDe",
-      "card": "[tune:Progress mode for this channel is <b>status</b>.][buttons:off,indicator,status,stream]"
+      "card": "[tune:Progress mode for this channel is <b>status</b>.]"
     }
   ]
 }

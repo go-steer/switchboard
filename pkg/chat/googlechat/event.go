@@ -56,6 +56,20 @@ const (
 	legacyTypeAppCommand = "APP_COMMAND"
 )
 
+// Action parameter keys on a card button. A click reaches HandleCommand as
+// though the invoker had typed the command, so the parameters are exactly a
+// command's verb and its single argument — and they are where the identity has
+// to live, because an add-on that extends Chat never populates
+// commonEventObject.invokedFunction. The legacy dialect carries the same keys
+// in common.parameters, so one encoding serves both.
+//
+// Decode-only today: no card this gateway sends has a button, since Chat
+// delivers no click over Pub/Sub (#28). The writer comes back with #29.
+const (
+	paramCommand = "switchboard_command"
+	paramArg     = "switchboard_arg"
+)
+
 // senderTypeBot marks a message authored by an app (including this one). Chat
 // does not normally deliver an app its own messages, but guarding on it keeps a
 // misconfiguration from looping the gateway against itself.
@@ -83,9 +97,14 @@ const (
 	kindMessage
 	// kindCommand is a gateway control command (slash or quick command).
 	kindCommand
-	// kindButton is a click on a button the gateway put on one of its own
-	// cards. It carries a command like kindCommand, but also the message that
-	// hosts the card, so the card can be updated in place afterwards.
+	// kindButton is a click on a button on one of the gateway's own cards. It
+	// carries a command like kindCommand, but also the message that hosts the
+	// card, so the card can be updated in place afterwards.
+	//
+	// Unreached today, in both directions: no card this gateway sends has a
+	// button, because a click never arrived over Pub/Sub (#28). Decoding is
+	// kept for the HTTP interaction endpoint (#29), which is the ingress that
+	// delivers them.
 	kindButton
 	// kindWelcome is the app being added to a space.
 	kindWelcome

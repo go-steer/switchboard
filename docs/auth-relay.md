@@ -116,7 +116,11 @@ Small and confined to the seams switchboard already owns:
 > Note on Google Chat: the native `ActionResponse{REQUEST_CONFIG}` auth flow is
 > tied to a *synchronous* app-command interaction and can't be used for an async
 > relayed message. A card with an OpenLink button (or a plain link) is the
-> portable choice across platforms.
+> portable choice across platforms — but no card this gateway sends carries a
+> button today, because a click never reached it (#28), and an `openLink`
+> button, which sends the app no event at all, has not been tried here. Prove
+> that one renders and opens before designing around it; a plain link in the
+> text is the fallback that certainly works.
 
 ## 5. Security considerations (mostly core-agent's)
 

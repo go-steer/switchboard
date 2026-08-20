@@ -89,7 +89,7 @@ func ParseCallerMode(s string) (CallerMode, bool) {
 // ReplyKind classifies what a Reply *is*, so an adapter can present it in
 // the platform's idiom rather than as one undifferentiated blob of text: a
 // progress placeholder can render as a card with a spinner, an error notice
-// in a warning colour, a command acknowledgment with buttons. It is
+// in a warning colour, a command acknowledgment as a compact one-liner. It is
 // deliberately provider-neutral — the router says what a message means and
 // the adapter decides how that looks, which is the same division of labour
 // as the rest of this seam. An adapter that ignores Kind entirely still
@@ -293,17 +293,23 @@ type Handler interface {
 }
 
 // CommandChoices is an optional Handler capability: reporting the values a
-// gateway setting accepts. It exists so an adapter on a platform with
-// interactive controls can offer those values as buttons instead of asking
-// the invoker to type one — clicking a button re-invokes HandleCommand with
-// the chosen value as the single argument, which is exactly what typing it
-// would have done. The handler stays the authority on what a command means;
-// the adapter learns only the surface, so no platform gains a special case
-// in the router and no router vocabulary is hard-coded in an adapter.
+// gateway setting accepts. It exists so an adapter can name those values in
+// whatever way its platform affords — spelled out in the message text, or, on a
+// platform whose interactive controls actually reach the app, offered as
+// buttons that re-invoke HandleCommand with the chosen value as the single
+// argument, exactly as typing it would have. The handler stays the authority on
+// what a command means; the adapter learns only the surface, so no platform
+// gains a special case in the router and no router vocabulary is hard-coded in
+// an adapter.
 //
-// A Handler that does not implement it (or returns nil for a command it has
-// no fixed choices for) simply gets the text acknowledgment, which always
-// spells the options out anyway.
+// It is asked outside a command too: the Google Chat adapter, its only caller
+// today, uses it for the welcome a new space gets, which names the values
+// before anyone has run anything. So a Handler that does not implement it (or
+// returns nil for a command it has no fixed choices for) is not merely
+// falling back to its own acknowledgment text — on that surface there is no
+// acknowledgment, and whatever the adapter says instead names nothing. An
+// adapter must still work without it, and a Handler that has a fixed list is
+// better off reporting it.
 type CommandChoices interface {
 	// Choices returns the accepted argument values for the named command,
 	// or nil when it takes none, is unknown, or is free-form.

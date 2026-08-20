@@ -73,6 +73,24 @@ const (
 	ProgressStream    ProgressMode = "stream"
 )
 
+// progressModes is every accepted mode, in the order they are offered. One
+// list, read by everything that has to agree on the set: parseProgressMode,
+// the `progress` command's own text, and the values reported to an adapter
+// through chat.CommandChoices. They used to be four independent literals, so
+// a fifth mode could reach the flag parser while going missing from the help
+// text and from what a card offers.
+var progressModes = []ProgressMode{ProgressOff, ProgressIndicator, ProgressStatus, ProgressStream}
+
+// progressModeNames is progressModes as plain strings — the form both the
+// capability and the message text want.
+func progressModeNames() []string {
+	names := make([]string, len(progressModes))
+	for i, m := range progressModes {
+		names[i] = string(m)
+	}
+	return names
+}
+
 // workingText is the initial progress message posted on wake under the
 // indicator and status modes while a turn is in flight. It is always a
 // transient message — retired when the reply is delivered — never the answer.
@@ -547,21 +565,22 @@ func (r *Router) HandleCommand(_ context.Context, cmd chat.Command) (string, err
 
 // commandHelp is the one-line usage surfaced for an empty, "help", or unknown
 // command.
-const commandHelp = "Try `progress <off|indicator|status|stream>` to set this " +
+var commandHelp = "Try `progress <" + strings.Join(progressModeNames(), "|") + ">` to set this " +
 	"channel's long-turn feedback, or `progress` to see the current mode."
 
-// Router reports its commands' accepted values, so an adapter on a platform
-// with interactive controls can render them as buttons.
+// Router reports its commands' accepted values, so an adapter can name them in
+// whatever its platform affords — today that is the text of Google Chat's
+// welcome card, and buttons once a click can reach the app (#29).
 var _ chat.CommandChoices = (*Router)(nil)
 
 // Choices implements chat.CommandChoices: the values `progress` accepts. The
-// list is derived from the same constants parseProgressMode validates against,
-// so a mode added there cannot go missing from the buttons.
+// list is progressModes, which is also what parseProgressMode validates
+// against, so a mode added there cannot go missing from what an adapter shows.
 func (r *Router) Choices(name string) []string {
 	if name != "progress" {
 		return nil
 	}
-	return []string{string(ProgressOff), string(ProgressIndicator), string(ProgressStatus), string(ProgressStream)}
+	return progressModeNames()
 }
 
 // progressCommand reads or sets the calling channel's progress mode. With no
@@ -573,11 +592,12 @@ func (r *Router) progressCommand(cmd chat.Command) string {
 	}
 	if len(cmd.Args) == 0 {
 		return fmt.Sprintf("Progress mode for this channel is *%s*. Change it with "+
-			"`progress <off|indicator|status|stream>`.", r.progressFor(cmd.Channel))
+			"`progress <%s>`.", r.progressFor(cmd.Channel), strings.Join(progressModeNames(), "|"))
 	}
 	mode, err := parseProgressMode(strings.ToLower(cmd.Args[0]))
 	if err != nil {
-		return fmt.Sprintf("Unknown progress mode %q. Choose one of: off, indicator, status, stream.", cmd.Args[0])
+		return fmt.Sprintf("Unknown progress mode %q. Choose one of: %s.",
+			cmd.Args[0], strings.Join(progressModeNames(), ", "))
 	}
 	r.setProgress(cmd.Channel, mode)
 	return fmt.Sprintf("Progress mode for this channel set to *%s*.", mode)

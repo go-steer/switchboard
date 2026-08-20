@@ -36,16 +36,26 @@ check a card before anyone tries it for real.
 
 Worth looking at specifically:
 
-- `ack-with-choices.json` — the button row, and the escaped `&lt;off|…&gt;` in
-  the `decoratedText`. Chat accepts only `<b> <i> <s> <a> <br>` there, so the
-  angle brackets in the command's argument list have to arrive escaped.
+- `ack-with-values.json` — the escaped `&lt;off|…&gt;` in the `decoratedText`.
+  Chat accepts only `<b> <i> <s> <a> <br>` there, so the angle brackets in the
+  command's argument list have to arrive escaped. The values are in the ack the
+  router wrote, not added by the card: no card carries a button row any more
+  (#28), and `ack-plain.json` is the other ack — the one confirming a change,
+  which names nothing.
 - `answer.json` — the only card using `textSyntax: MARKDOWN`. Checked in the
   Card Builder on 2026-08-17: `[label](url)` renders as a live hyperlink, and a
   fenced block renders as monospace with its interior newlines and indentation
   intact. That is what lets `answerCard` pass a model turn's own markup
   through instead of translating it to HTML first — so a diff here that turns
   a link literal is a regression worth chasing, not a rendering quirk.
-- `welcome.json` — the first thing anyone installing the app will see.
+- `welcome.json` — the first thing anyone installing the app will see. It is
+  also where a card's markup stops short of the text path's: `toCardHTML`
+  passes backticks through verbatim, because a card has no monospace style to
+  map them onto, so the `` `progress <off|…>` `` in the second line renders as
+  literal backticks around plain text. The same is true of `ack-with-values`,
+  and it has not been checked in the Card Builder — worth a look next time
+  someone has it open, and worth fixing in the renderer rather than the
+  wording if it reads badly.
 
 ## B. Event replay
 
@@ -67,6 +77,11 @@ prove the decoder matches somebody's reading of the documentation. Replace them
 with real traffic as soon as you have a live app (below). Comparing
 `addon-slash-command.json` with `legacy-slash-command.json` is the dialect
 invariant in one glance — equivalent events must produce identical outcomes.
+
+The card-click payloads cannot be replaced that way: no card the gateway sends
+has a button, and Chat delivered no click to the subscription when one did
+(#28). They stay hand-written, pinning the decode path for the HTTP ingress in
+[#29](https://github.com/go-steer/switchboard/issues/29).
 
 ### Capturing real payloads
 
@@ -232,9 +247,10 @@ Two Chat-specific notes on top of that page:
   that identity is the address on the event payload; with `--caller-id id` it is
   the raw `users/1234567890`, which you cannot know before the first message —
   the first rejection is where you learn it.
-- **Steps 2 and 7 of the demo script need a real model.** Echo covers commands,
-  buttons, progress modes and the welcome card, but not markdown or a structured
-  answer, because those are things the daemon has to actually write.
+- **Steps 2, 5 and 6 of the demo script need a real model.** Echo covers
+  commands, card rendering, progress modes and the welcome card, but not
+  markdown, a structured answer or a long one with code in it, because those are
+  things the daemon has to actually write.
 
 ### Run it
 
@@ -260,28 +276,30 @@ In the order that shows what is new:
 2. **Send markdown**: `**bold**`, a `[link](https://example.com)`, a `## header`,
    a fenced code block. None of the delimiters should be visible — before this
    change they were.
-3. **`/progress`** with no argument → an ack card with a button per mode.
-4. **Click a button** → the card is rewritten *in place*; no second message.
-5. **Click the same button again** → the card ends in the same state. Pub/Sub
-   redelivers, so idempotence is a property to actually check.
-6. **Long turn** → a progress card; **stop the daemon before sending** → an
+3. **`/progress`** with no argument → an ack card naming the modes it takes.
+   No buttons: a click never reached the subscription and errored in the UI
+   ([#28](https://github.com/go-steer/switchboard/issues/28)), so a row of them
+   would be a control that can only fail. Then **`/progress stream`** → the ack
+   confirms the new mode, and names nothing, which is the one thing the row's
+   removal cost.
+4. **Long turn** → a progress card; **stop the daemon before sending** → an
    error notice card. **Stop it mid-turn** and the notice takes about 90
    seconds of failed reconnects to arrive, because a daemon that comes back
    inside that window should not have interrupted anyone.
-7. **Ask for something structured** — "compare Cloud Run and GKE, with headings"
+5. **Ask for something structured** — "compare Cloud Run and GKE, with headings"
    → a sectioned answer card, which is what the default `rich` is for. Ask for
    something conversational and it stays plain text: an answer with no heading
    and no rule is not laid out as a card in any mode.
-8. **Ask for a long answer with code in it** — "write me the Terraform for three
+6. **Ask for a long answer with code in it** — "write me the Terraform for three
    project services, with the variables" is enough to clear the 4096-character
    ceiling. Under `rich` it is one card and a section too long for a single
    widget spills across several; restart with `--googlechat-cards=status` and
    the same answer arrives as several ordered posts instead. Either way every
    piece renders its code as code: no stray backticks at the seam, which is what
    used to happen when the split landed inside a fenced block.
-9. Restart with `--googlechat-cards=off` → everything degrades to text.
-10. **@-mention the app into a new room** → the welcome card, exactly once. A
-    mention-add sends two events and only one may be answered.
+7. Restart with `--googlechat-cards=off` → everything degrades to text.
+8. **@-mention the app into a new room** → the welcome card, exactly once. A
+   mention-add sends two events and only one may be answered.
 
 ### Testing both dialects
 

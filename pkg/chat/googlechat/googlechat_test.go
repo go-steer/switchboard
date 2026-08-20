@@ -579,8 +579,9 @@ func (h *fakeHandler) HandleCommand(_ context.Context, c chat.Command) (string, 
 	return h.ack, h.err
 }
 
-// choiceHandler adds the optional chat.CommandChoices capability, which is what
-// turns an acknowledgment into a card with buttons.
+// choiceHandler adds the optional chat.CommandChoices capability, which is how
+// the welcome — card and text fallback both — names the progress modes without
+// this package knowing them.
 type choiceHandler struct{ fakeHandler }
 
 func (h *choiceHandler) Choices(name string) []string {
@@ -817,10 +818,14 @@ func TestNewDefaultsAndValidatesCallerMode(t *testing.T) {
 	}
 }
 
-// TestDispatchAckOffersChoicesAsButtons is the point of the CommandChoices
-// capability: the values come from the handler, so this package hard-codes no
-// router vocabulary.
-func TestDispatchAckOffersChoicesAsButtons(t *testing.T) {
+// TestDispatchAckCarriesNoButtons: a handler that reports choices used to turn
+// them into a button row on the ack. A click never reaches this app (#28), so
+// the row was a control that could only fail, and the ack is now exactly what
+// the handler said — this one names the values itself, the one confirming a
+// change does not. Asserted at dispatch level because the regression to catch
+// is the wiring growing the row back from CommandChoices, which the builder
+// cannot see: gatewayCard is never handed the choices at all.
+func TestDispatchAckCarriesNoButtons(t *testing.T) {
 	f := &fakeMessenger{}
 	h := &choiceHandler{}
 	h.ack = "Progress mode for this channel is *off*."
@@ -842,20 +847,17 @@ func TestDispatchAckOffersChoicesAsButtons(t *testing.T) {
 	if len(f.creates) != 1 || f.creates[0].card == nil {
 		t.Fatalf("expected an ack card, got %+v", f.creates)
 	}
-	var buttons int
-	for _, w := range f.creates[0].card.Sections[0].Widgets {
-		if w.ButtonList != nil {
-			buttons = len(w.ButtonList.Buttons)
-		}
-	}
-	if buttons != 4 {
-		t.Fatalf("want a button per choice, got %d", buttons)
+	assertNothingClickable(t, "dispatched ack", f.creates[0].card)
+	if got := cardText(f.creates[0].card); !strings.Contains(got, "Progress mode for this channel is") {
+		t.Fatalf("the ack card should carry the handler's ack, got %q", got)
 	}
 }
 
-// TestDispatchButtonClickRunsTheCommandAndPatchesTheCard covers the whole
-// interactive round trip a Pub/Sub add-on can do: no dialog, no synchronous
-// response — the click runs the command and the hosting card is rewritten.
+// TestDispatchButtonClick covers the round trip a click would make if one ever
+// arrived: no dialog, no synchronous response — the click runs the command and
+// the hosting card is rewritten. Nothing sends this event today, since no card
+// the gateway posts has a button (#28); the path is kept, and kept tested, for
+// the HTTP interaction endpoint in #29.
 func TestDispatchButtonClick(t *testing.T) {
 	f := &fakeMessenger{}
 	h := &choiceHandler{}
@@ -893,8 +895,9 @@ func TestDispatchButtonClick(t *testing.T) {
 	}
 }
 
-// TestDispatchButtonClickIsIdempotent: Pub/Sub may redeliver, so the same click
-// twice must leave the same card rather than compounding.
+// TestDispatchButtonClickIsIdempotent: an at-least-once ingress may deliver the
+// same click twice — Pub/Sub redelivery, or a retried POST under #29 — so
+// handling it twice must leave the same card rather than compounding.
 func TestDispatchButtonClickIsIdempotent(t *testing.T) {
 	f := &fakeMessenger{}
 	h := &choiceHandler{}
@@ -970,6 +973,17 @@ func TestDispatchWelcomesANewSpace(t *testing.T) {
 	}
 	if f.creates[0].card.Header == nil {
 		t.Fatalf("the welcome should introduce the app")
+	}
+	// The point of the CommandChoices capability: the values reach the card
+	// from the handler, so this package hard-codes no router vocabulary. They
+	// are named in the text now that a button row cannot be clicked (#28).
+	if text := cardText(f.creates[0].card); !strings.Contains(text, "progress &lt;off|stream&gt;") {
+		t.Fatalf("the welcome should name the handler's progress modes, got %q", text)
+	}
+	// And the fallback the same list, from the same place — it is the text of
+	// this very message, shown wherever the card cannot render.
+	if got := f.creates[0].fallback; !strings.Contains(got, "progress <off|stream>") {
+		t.Fatalf("the welcome fallback should name the same modes, got %q", got)
 	}
 	if len(h.msgs) != 0 || len(h.cmds) != 0 {
 		t.Fatalf("a welcome is not a turn: msgs=%+v cmds=%+v", h.msgs, h.cmds)

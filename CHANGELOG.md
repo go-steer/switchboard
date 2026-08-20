@@ -167,19 +167,27 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the dialect **per event** and understands both, so the console conversion —
   which is irreversible and applies to all users at once — needs no coordination
   with a switchboard deploy. Pub/Sub remains the ingress, preserving the
-  no-public-webhook posture; the cost is no dialogs (they need a synchronous
-  response) and whole-message patches for card updates. Card clicks are
-  delivered over Pub/Sub and handled idempotently, since delivery may retry.
+  no-public-webhook posture; the cost is that nothing needing a synchronous
+  response works, so no dialogs — and, separately, **no card clicks**: the
+  connection settings route four triggers (message, app command,
+  added-to-space, removed-from-space) and a click is not among them, so a live
+  one errored in the UI with nothing reaching the subscription (#28). A click
+  would not have needed a synchronous response, since it can be answered by
+  patching the hosting message; it simply never arrives. Card updates are
+  whole-message patches either way. No card the gateway sends carries a button,
+  since one could only ever fail: the welcome names the accepted `progress`
+  values in its text instead, still sourced from the handler rather than
+  hard-coded, and the command ack is just the ack. Decoding and dispatching a
+  click stays implemented and tested for the HTTP ingress in #29.
 - Google Chat `cardsV2` rendering, gated by `--googlechat-cards`
-  (`off` / `status` / `rich`, default `status`). `status` renders the gateway's
-  own messages — progress, tool activity, error notices, command acks — as small
-  icon cards, and offers a setting's valid values as buttons; `rich` also lays a
-  structured agent reply out as a card (a section per heading, dividers for
-  rules, code fences verbatim). Plain text is always sent as the message
-  fallback and a card Chat rejects falls back to posting the text, so a rich
-  render never costs a reply. Three levels rather than Slack's boolean because
-  gateway cards are short and authored here while an answer card lays out
-  arbitrary model output.
+  (`off` / `status` / `rich`, default `rich`). `status` renders the gateway's
+  own messages — progress, tool activity, error notices, command acks, the
+  welcome — as small icon cards; `rich` also lays a structured agent reply out
+  as a card (a section per heading, dividers for rules, code fences verbatim).
+  Plain text is always sent as the message fallback and a card Chat rejects
+  falls back to posting the text, so a rich render never costs a reply. Three
+  levels rather than Slack's boolean because gateway cards are short and
+  authored here while an answer card lays out arbitrary model output.
 - Google Chat replies are now translated into Chat's text dialect
   (`**bold**` → `*bold*`, `[label](url)` → `<url|label>`, headings → bold,
   rules, strikethrough, fences), mirroring the Slack `toMrkdwn` pass. Previously
@@ -221,8 +229,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   render the gateway's own chatter in the platform's idiom. Advisory: an adapter
   that ignores it (Slack) behaves exactly as before.
 - `chat.CommandChoices`, an optional adapter-facing capability reporting the
-  values a gateway setting accepts. It is what lets the Google Chat adapter
-  offer `progress` as buttons with the router remaining the single source of
+  values a gateway setting accepts. It is what lets the Google Chat adapter name
+  `progress`'s values on a card with the router remaining the single source of
   truth for the list.
 - Outbound ingress (`--ingress-addr`, default disabled): an authenticated HTTP
   surface that lets another service post — and later edit — a message in a
