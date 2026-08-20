@@ -164,8 +164,12 @@ and degrades if they are absent:
 
 - `chat.TextFitter` — does this text fit one message on this platform?
 - `chat.CommandChoices` — what values does this gateway setting accept? This is
-  what lets an adapter offer `progress` as buttons without hard-coding the
+  what lets an adapter name `progress`'s values — in the message text, or as
+  buttons on a platform where a click reaches the app — without hard-coding the
   router's vocabulary; the router is the single source of truth for the list.
+  It is asked outside a command, too — Google Chat's welcome names the values
+  before anyone has run anything — so a handler that does not report them
+  leaves that message with nothing to name.
 
 ### 3.3 Google Chat: dialects, Pub/Sub, and cards
 
@@ -181,19 +185,47 @@ deploy therefore need no coordination in either direction.
 Pub/Sub is a supported add-on architecture, which is what preserves the
 no-public-ingress, distroless posture. Two costs come with it:
 
-- **No dialogs.** A dialog needs a synchronous HTTP response to the interaction;
-  a pulled event has no response channel. Interactivity is limited to buttons
-  whose effect is a message patch.
+- **Nothing that needs a response channel.** A pulled event has none, so the app
+  cannot answer an interaction — it can only act and then patch. That rules out
+  dialogs. **Callback buttons** are ruled out by something worse, and not by
+  this: a click needs no response channel — patching the hosting message
+  afterwards would have answered it — but it is **never delivered**. An add-on's
+  Connection settings enumerate exactly four routable triggers (added-to-space,
+  message, removed-from-space, app command), and a click is not among them; the
+  subscription receives nothing and the user sees "Switchboard is unable to
+  process your request".
+  Established by live testing,
+  [#28](https://github.com/go-steer/switchboard/issues/28). So no card the
+  gateway sends carries one — nor any other widget a user can operate. The
+  welcome's row of `progress` values became a list in its text; the command ack
+  is now just the ack, and the acks where a value list earns its place (the one
+  reporting the current mode, `help`, and the unknown-value error) already spell
+  the values out themselves. An `openLink` button should be unaffected, since it
+  sends no event to the app at all, but that has not been tried here.
 - **Whole-message patches.** Updating a card means `messages.patch` on the
   hosting message with a field mask covering both `text` and `cardsV2`, so a
-  message cannot end up carrying a stale card beside new text.
+  message cannot end up carrying a stale card beside new text. This is the live
+  path for the progress placeholder, which is edited in place as a turn runs.
+  Delivery may be retried, so a patch is written to be idempotent — the same
+  event twice leaves the card in the same end state.
 
-Delivery may be retried, so click handling is idempotent: a click runs the
-gateway command and rewrites the hosting card to the same end state.
+Callback buttons are therefore what an **HTTP interaction endpoint** buys
+([#29](https://github.com/go-steer/switchboard/issues/29)), not something Pub/Sub
+gives up gracefully. Only the *rendering* of a button was dropped; the decode and
+dispatch path for a click is kept and still tested, since that is the ingress it
+is waiting for, and because the legacy Chat-API dialect over Pub/Sub is expected
+— but not confirmed — to be subject to the same limit.
 
-Add-ons never report an **invoked function name** back to the app, so a button's
-identity travels in `action.parameters` — which the legacy dialect also carries,
-so one encoding serves both.
+When a click does arrive, add-ons never report an **invoked function name** back
+to the app, so a button's identity travels in `action.parameters` — which the
+legacy dialect also carries, so one encoding serves both.
+
+The values a setting accepts are still reported by the handler through
+`chat.CommandChoices` rather than hard-coded in the adapter. Which is the point
+of the capability: it names a surface, not a widget, so an adapter renders those
+values however its platform can — as the welcome's text here, both on the card
+and on the text fallback that stands in for it, and as buttons wherever a click
+gets through.
 
 Rendering is `--googlechat-cards`-gated (`off` / `status` / `rich`, default
 `rich`) rather than a boolean, because the two card families carry different

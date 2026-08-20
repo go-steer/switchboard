@@ -72,7 +72,7 @@ rejection is where you learn them.
 ## Echo, or a real model
 
 The default model is `echo`, which needs no credentials and covers every demo
-step that exercises the *gateway*: commands, buttons, progress modes, threading,
+step that exercises the *gateway*: commands, cards, progress modes, threading,
 error notices. Steps that turn on what the daemon actually *says* — markdown
 rendering, a structured answer laid out as blocks or cards — want a real one:
 

@@ -16,10 +16,9 @@
 // instead of flat text. Two families live here:
 //
 //   - Gateway cards — progress, activity, notice, welcome, and the command
-//     acknowledgment with its choice buttons. These say something *about* the
-//     gateway rather than carrying model output, and a card is what makes them
-//     legible at a glance: an icon distinguishes "still working" from "that
-//     failed", and buttons turn "type `progress stream`" into one click.
+//     acknowledgment. These say something *about* the gateway rather than
+//     carrying model output, and a card is what makes them legible at a glance:
+//     an icon distinguishes "still working" from "that failed".
 //   - The answer card — an opt-in structural render of a model turn, giving
 //     real section headers and dividers that flat text can only approximate.
 //
@@ -33,11 +32,16 @@
 //     clamped to Chat's limits before the API call — never Text *and* CardsV2
 //     on one message, which would render the same content twice.
 //
-// Buttons carry their meaning in action parameters, not in the action function
-// name: an add-on that extends Chat never populates
-// commonEventObject.invokedFunction, so a parameter is the only place a click's
-// identity can survive the round trip. The same parameters arrive in the legacy
-// dialect's common.parameters, so one encoding serves both.
+// No card here carries a button, or any other widget a user can operate. A
+// live click on one reached nothing: the app's connection settings route four
+// triggers (message, app command, added-to-space, removed-from-space) and a
+// click is not among them, so Chat answered it with "Switchboard is unable to
+// process your request" and no event arrived (#28). That was measured on the
+// add-on dialect, the one this gateway ships; the legacy Chat-API dialect over
+// Pub/Sub was never tested, and a control that fails in the configuration we
+// did measure is worse than no control. Where the welcome's row used to sit,
+// the accepted values are named in the text instead. Decoding a click is still
+// implemented, for the HTTP ingress in #29 — see event.go.
 package googlechat
 
 import (
@@ -89,14 +93,6 @@ const (
 	// cardID names the single card on a message. Chat requires an id per card;
 	// it is only used to address the card within the message.
 	cardID = "switchboard"
-)
-
-// Action parameter keys. A click reaches HandleCommand as though the invoker
-// had typed the command, so the parameters are exactly a command's verb and its
-// single argument.
-const (
-	paramCommand = "switchboard_command"
-	paramArg     = "switchboard_arg"
 )
 
 // Material icons for the gateway cards. Named rather than inlined so the set
@@ -230,26 +226,6 @@ func dividerWidget() *chatv1.GoogleAppsCardV1Widget {
 	return &chatv1.GoogleAppsCardV1Widget{Divider: &chatv1.GoogleAppsCardV1Divider{}}
 }
 
-// commandButton builds a button that re-invokes a gateway command with one
-// argument. Chat delivers the click asynchronously over Pub/Sub, so the action
-// asks for no synchronous response — the adapter answers by patching the card.
-func commandButton(label, command, arg string) *chatv1.GoogleAppsCardV1Button {
-	return &chatv1.GoogleAppsCardV1Button{
-		Text: label,
-		OnClick: &chatv1.GoogleAppsCardV1OnClick{
-			Action: &chatv1.GoogleAppsCardV1Action{
-				// Chat requires a function name even though an add-on never
-				// reports it back; the parameters carry the real identity.
-				Function: "switchboard",
-				Parameters: []*chatv1.GoogleAppsCardV1ActionParameter{
-					{Key: paramCommand, Value: command},
-					{Key: paramArg, Value: arg},
-				},
-			},
-		},
-	}
-}
-
 // singleCard wraps one card for a message's cardsV2 list, or nil when the card
 // has no sections — an empty card is rejected by Chat and would lose the reply.
 func singleCard(card *chatv1.GoogleAppsCardV1Card) []*chatv1.CardWithId {
@@ -297,38 +273,19 @@ func gatewayCard(kind chat.ReplyKind, text string) *chatv1.GoogleAppsCardV1Card 
 	return nil
 }
 
-// ackCard renders a command acknowledgment with a button per accepted value, so
-// the invoker can change a setting by clicking rather than by retyping the
-// command. choices may be empty, in which case this is just the ack card.
-func ackCard(text, command string, choices []string) *chatv1.GoogleAppsCardV1Card {
-	card := widgetCard(iconTextWidget(iconAck, text))
-	if card == nil || command == "" || len(choices) == 0 {
-		return card
-	}
-	buttons := make([]*chatv1.GoogleAppsCardV1Button, 0, len(choices))
-	for _, c := range choices {
-		if c == "" {
-			continue
-		}
-		buttons = append(buttons, commandButton(c, command, c))
-	}
-	if len(buttons) == 0 {
-		return card
-	}
-	sec := card.Sections[0]
-	sec.Widgets = append(sec.Widgets, &chatv1.GoogleAppsCardV1Widget{
-		ButtonList: &chatv1.GoogleAppsCardV1ButtonList{Buttons: buttons},
-	})
-	return card
-}
-
 // welcomeCard greets a space the app was just added to. It is the one card with
 // a header: this is the only message that has to introduce the app itself.
+//
+// choices names the progress modes in the text. It was a row of buttons until
+// #28 established that a click never reaches this app, which made the row a
+// control that could only ever fail. The values still come from the handler
+// rather than a literal here, so this package learns no router vocabulary
+// either way, and #29 is where the row can come back.
 func welcomeCard(choices []string) *chatv1.GoogleAppsCardV1Card {
 	card := widgetCard(
 		htmlWidget("Mention me in a thread and I'll relay the turn to the agent. "+
 			"Every reply lands back in the same thread, and a thread is one conversation."),
-		iconTextWidget(iconWelcome, "Long turns report progress while they run — pick how much you want to see."),
+		iconTextWidget(iconWelcome, progressHint(choices)),
 	)
 	if card == nil {
 		return nil
@@ -337,28 +294,45 @@ func welcomeCard(choices []string) *chatv1.GoogleAppsCardV1Card {
 		Title:    "switchboard",
 		Subtitle: "chat gateway for core-agent",
 	}
-	if len(choices) > 0 {
-		buttons := make([]*chatv1.GoogleAppsCardV1Button, 0, len(choices))
-		for _, c := range choices {
-			if c != "" {
-				buttons = append(buttons, commandButton(c, "progress", c))
-			}
-		}
-		if len(buttons) > 0 {
-			sec := card.Sections[0]
-			sec.Widgets = append(sec.Widgets, &chatv1.GoogleAppsCardV1Widget{
-				ButtonList: &chatv1.GoogleAppsCardV1ButtonList{Buttons: buttons},
-			})
-		}
-	}
 	return card
 }
 
-// welcomeText is the plain-text form of the welcome, used when cards are off
-// and as the card's fallback.
-const welcomeText = "*switchboard* is connected. Mention me in a thread and I'll relay the turn " +
-	"to the agent; every reply lands back in the same thread, and a thread is one conversation. " +
-	"Set how much progress you see with `progress <off|indicator|status|stream>`."
+// welcomeTextFor is the plain-text form of the welcome, used when cards are off
+// and as the card's fallback. It takes the same choices the card does: the two
+// are one message, and a literal list here would be a second copy of the
+// router's vocabulary free to drift from the card's.
+func welcomeTextFor(choices []string) string {
+	return "*switchboard* is connected. Mention me in a thread and I'll relay the turn " +
+		"to the agent; every reply lands back in the same thread, and a thread is one " +
+		"conversation. " + progressHint(choices)
+}
+
+// progressHint is the welcome's sentence about long-turn feedback, naming the
+// command and the values the handler accepts. A handler that reports no values
+// still gets the command named — the argument list is dropped, not the
+// sentence, because an empty one ("progress <>") reads as a bug while a welcome
+// that never says the word "progress" leaves the setting undiscoverable.
+func progressHint(choices []string) string {
+	list := strings.Join(nonBlank(choices), "|")
+	if list == "" {
+		return "Long turns report progress while they run. Set how much you see with `progress`."
+	}
+	return "Long turns report progress while they run. Set how much you see with " +
+		"`progress <" + list + ">`."
+}
+
+// nonBlank drops the blanks a handler's choice list may carry and trims what it
+// keeps, so neither an empty value nor a padded one can widen the rendered list
+// to "off||stream" or "off| stream".
+func nonBlank(vals []string) []string {
+	kept := make([]string, 0, len(vals))
+	for _, v := range vals {
+		if v = strings.TrimSpace(v); v != "" {
+			kept = append(kept, v)
+		}
+	}
+	return kept
+}
 
 // ---------------------------------------------------------------------------
 // Answer card

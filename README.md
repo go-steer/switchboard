@@ -93,11 +93,20 @@ applies to every user at once — so the rollout does not have to be synchronize
 with a switchboard deploy, and a rollback of switchboard does not strand the app.
 
 Pub/Sub remains a supported add-on architecture, so the no-public-webhook
-posture is unchanged. The trade-off it buys: an add-on served over Pub/Sub
-cannot open **dialogs** (those need a synchronous HTTP response), and updating a
-card means patching the whole hosting message. Card buttons still work — a click
-runs the same gateway command typing it would, and the hosting card is rewritten
-in place. Pub/Sub can redeliver, so click handling is idempotent.
+posture is unchanged. The trade-off it buys: an add-on served over Pub/Sub can
+do nothing that needs a synchronous HTTP response, so no **dialogs**. And **no
+callback buttons**, which is a separate limit rather than a consequence of that
+one — a click could have been answered by patching the message afterwards, but
+it never arrives: the connection settings route four triggers (message, app
+command, added-to-space, removed-from-space), and a live click was answered with
+*"Switchboard is unable to process your request"* while nothing at all reached
+the subscription ([#28](https://github.com/go-steer/switchboard/issues/28)).
+Cards here are therefore output only: the welcome names the progress values in
+its text and you type the one you want. An `openLink` button should be fine,
+since it sends no event to the app, but that is untested here. Updating a card
+means patching the whole hosting message, and a patch is idempotent so a
+redelivery is harmless. Clickable controls need the HTTP interaction endpoint
+tracked in [#29](https://github.com/go-steer/switchboard/issues/29).
 
 #### App commands
 
@@ -124,7 +133,7 @@ posting the text — a rich render never costs a reply.
 | Mode | Behavior |
 |------|----------|
 | `rich` (default) | everything `status` does, and lays a structured agent reply out as a card too (a section per heading, dividers for rules, code fences kept verbatim); an unstructured reply stays as text, and a section too long for one widget spills across several rather than being cut |
-| `status` | the gateway's own messages — progress, tool activity, error notices, command acks — render as small icon cards; a command ack offers its valid values as buttons. Model output stays as text |
+| `status` | the gateway's own messages — progress, tool activity, error notices, command acks, the welcome — render as small icon cards; the welcome names the accepted `progress` values in its text. Model output stays as text |
 | `off` | text only |
 
 Regardless of mode, replies are translated into Chat's text dialect

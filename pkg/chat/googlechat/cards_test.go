@@ -15,7 +15,9 @@
 package googlechat
 
 import (
+	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -89,69 +91,240 @@ func TestGatewayCardStripsTheEmojiTheIconReplaces(t *testing.T) {
 	}
 }
 
-func TestAckCardButtons(t *testing.T) {
-	card := ackCard("Progress mode is *off*.", "progress", []string{"off", "indicator", "", "stream"})
-	if card == nil {
-		t.Fatalf("no card")
+// TestGatewayCardsCarryNothingClickable: a click never reaches this app (#28),
+// so no card the gateway sends may carry a control. The list of cards is
+// hand-maintained — a new one has to be added here, and a spilled answer and
+// the usage footer are listed because those are the shapes most easily
+// forgotten — but what counts as a control is not: interactivePaths reads the
+// card's JSON, so a widget kind added to chatv1 is covered without anyone
+// remembering it.
+func TestGatewayCardsCarryNothingClickable(t *testing.T) {
+	spilled := strings.Repeat("A sentence that goes on. ", 400)
+	cards := map[string]*chatv1.GoogleAppsCardV1Card{
+		"progress":                gatewayCard(chat.KindProgress, "Working…"),
+		"activity":                gatewayCard(chat.KindActivity, "Running `bash`"),
+		"notice":                  gatewayCard(chat.KindNotice, "That turn didn't go through."),
+		"ack":                     gatewayCard(chat.KindAck, "Progress mode is *off*."),
+		"welcome":                 welcomeCard([]string{"off", "indicator", "status", "stream"}),
+		"welcome-without-choices": welcomeCard(nil),
+		"answer":                  answerCard("# Findings\n\nThe first thing.\n"),
+		"answer-spilled":          answerCard("# Findings\n\n" + spilled),
+		"answer-with-usage": withUsageFooter(answerCard("# Findings\n\nThe first thing.\n"),
+			&chat.Usage{Model: "echo", TokensIn: 10, TokensOut: 20}),
 	}
-	widgets := card.Sections[0].Widgets
-	last := widgets[len(widgets)-1]
-	if last.ButtonList == nil {
-		t.Fatalf("last widget should be the button list, got %+v", last)
-	}
-	buttons := last.ButtonList.Buttons
-	if len(buttons) != 3 {
-		t.Fatalf("want 3 buttons (the empty choice dropped), got %d", len(buttons))
-	}
-	for i, want := range []string{"off", "indicator", "stream"} {
-		b := buttons[i]
-		if b.Text != want {
-			t.Fatalf("button %d label = %q, want %q", i, b.Text, want)
+	for name, card := range cards {
+		if card == nil {
+			t.Fatalf("%s: no card", name)
 		}
-		params := map[string]string{}
-		for _, p := range b.OnClick.Action.Parameters {
-			params[p.Key] = p.Value
+		assertNothingClickable(t, name, card)
+	}
+}
+
+// assertNothingClickable fails when a card carries a control. It covers the
+// card only; Chat's message-level accessoryWidgets would be the other half,
+// and nothing here sets one.
+func assertNothingClickable(t *testing.T, name string, card *chatv1.GoogleAppsCardV1Card) {
+	t.Helper()
+	if found := interactivePaths(card); len(found) > 0 {
+		t.Errorf("%s card carries a control at %s. No card this gateway sends has one: "+
+			"an action click never reaches the app (#28), and an openLink button, which "+
+			"sends no event at all, is untested here (#29)", name, strings.Join(found, ", "))
+	}
+}
+
+// clickableFields are the words Chat spells its interactive fields with. Every
+// affordance that sends the app an event carries one of them in its JSON name —
+// buttonList, chipList, onClick, switchControl, textInput, selectionInput,
+// dateTimePicker, overflowMenu, cardActions, eventActions — so matching the name
+// catches the widget kinds chatv1 has not grown yet.
+//
+// Two deliberate edges. It is a ban on controls, not only on event-senders: an
+// openLink button sends the app nothing and would match anyway, which is right
+// while none has been tried here (#29). And it is not a ban on everything a
+// user can operate: a collapsible section and a maxLines paragraph both render
+// an expander, and neither has "control" in its name — they are inert, so they
+// are out of scope rather than missed.
+//
+// None of the fields the gateway's own cards emit contains one of these words:
+// header, title, subtitle, sections, widgets, textParagraph, text, textSyntax,
+// maxLines, decoratedText, startIcon, materialIcon, wrapText, divider.
+var clickableFields = []string{
+	"button", "chip", "onclick", "action", "control", "input", "picker", "selection", "menu",
+}
+
+// interactivePaths returns the dotted JSON paths at which a card carries a
+// control, sorted so a failure reads the same every run. It walks the marshalled
+// card rather than the Go struct because that is the shape Chat is actually
+// handed, and because a field nobody has heard of still has a name. Only keys
+// are examined, so text the model wrote cannot trip it.
+//
+// The walk stops descending at a match: the subtree under a control is more of
+// the same control, and the outermost path is the one worth naming.
+func interactivePaths(card *chatv1.GoogleAppsCardV1Card) []string {
+	b, err := json.Marshal(card)
+	if err != nil {
+		return []string{fmt.Sprintf("<unmarshalable: %v>", err)}
+	}
+	var tree any
+	if err := json.Unmarshal(b, &tree); err != nil {
+		return []string{fmt.Sprintf("<undecodable: %v>", err)}
+	}
+	var found []string
+	var walk func(path string, v any)
+	walk = func(path string, v any) {
+		switch node := v.(type) {
+		case map[string]any:
+			for k, sub := range node {
+				at := path + "." + k
+				if isClickableField(k) {
+					found = append(found, strings.TrimPrefix(at, "."))
+					continue
+				}
+				walk(at, sub)
+			}
+		case []any:
+			for _, sub := range node {
+				walk(path+"[]", sub)
+			}
 		}
-		// The identity has to ride in the parameters: an add-on that extends
-		// Chat never reports back the invoked function name.
-		if params[paramCommand] != "progress" || params[paramArg] != want {
-			t.Fatalf("button %d parameters = %v", i, params)
+	}
+	walk("", tree)
+	slices.Sort(found)
+	return found
+}
+
+func isClickableField(name string) bool {
+	lower := strings.ToLower(name)
+	for _, word := range clickableFields {
+		if strings.Contains(lower, word) {
+			return true
+		}
+	}
+	return false
+}
+
+// TestInteractivePathsFindsTheAffordancesItClaimsTo: the invariant above is only
+// as good as this, so the shapes a card could regrow a control in are checked
+// against it directly — including the two that a ButtonList-only check missed.
+func TestInteractivePathsFindsTheAffordancesItClaimsTo(t *testing.T) {
+	clean := welcomeCard([]string{"off", "stream"})
+	if got := interactivePaths(clean); len(got) != 0 {
+		t.Fatalf("the shipped welcome should be clean, got %v", got)
+	}
+	button := &chatv1.GoogleAppsCardV1Button{Text: "off"}
+	grafts := map[string]func(*chatv1.GoogleAppsCardV1Card){
+		"sections[].widgets[].buttonList": func(c *chatv1.GoogleAppsCardV1Card) {
+			c.Sections[0].Widgets = append(c.Sections[0].Widgets, &chatv1.GoogleAppsCardV1Widget{
+				ButtonList: &chatv1.GoogleAppsCardV1ButtonList{Buttons: []*chatv1.GoogleAppsCardV1Button{button}},
+			})
+		},
+		"sections[].widgets[].decoratedText.button": func(c *chatv1.GoogleAppsCardV1Card) {
+			c.Sections[0].Widgets[1].DecoratedText.Button = button
+		},
+		"fixedFooter.primaryButton": func(c *chatv1.GoogleAppsCardV1Card) {
+			c.FixedFooter = &chatv1.GoogleAppsCardV1CardFixedFooter{PrimaryButton: button}
+		},
+		"sections[].collapseControl": func(c *chatv1.GoogleAppsCardV1Card) {
+			c.Sections[0].CollapseControl = &chatv1.GoogleAppsCardV1CollapseControl{HorizontalAlignment: "START"}
+		},
+	}
+	for want, graft := range grafts {
+		card := welcomeCard([]string{"off", "stream"})
+		graft(card)
+		if got := interactivePaths(card); len(got) != 1 || got[0] != want {
+			t.Errorf("grafting %s: interactivePaths = %v, want exactly [%s]", want, got, want)
 		}
 	}
 }
 
-func TestAckCardWithoutChoices(t *testing.T) {
-	card := ackCard("Nothing to configure.", "progress", nil)
+func TestAckCardIsJustTheAck(t *testing.T) {
+	card := gatewayCard(chat.KindAck, "Nothing to configure.")
 	if card == nil {
-		t.Fatalf("an ack with no choices is still a card")
+		t.Fatalf("an ack should be a card")
 	}
-	for _, w := range card.Sections[0].Widgets {
-		if w.ButtonList != nil {
-			t.Fatalf("no choices should mean no buttons")
-		}
+	if n := len(card.Sections[0].Widgets); n != 1 {
+		t.Fatalf("want one widget, got %d", n)
 	}
-	if ackCard("   ", "progress", []string{"off"}) != nil {
+	if gatewayCard(chat.KindAck, "   ") != nil {
 		t.Fatalf("an empty ack must not produce a card")
 	}
 }
 
 func TestWelcomeCard(t *testing.T) {
-	card := welcomeCard([]string{"off", "stream"})
+	card := welcomeCard([]string{"off", "", " stream "})
 	if card == nil || card.Header == nil || card.Header.Title != "switchboard" {
 		t.Fatalf("welcome card should introduce the app: %+v", card)
 	}
-	var buttons int
-	for _, w := range card.Sections[0].Widgets {
-		if w.ButtonList != nil {
-			buttons = len(w.ButtonList.Buttons)
-		}
+	text := cardText(card)
+	// The values come from the handler and are named in the text, since a
+	// button row cannot be clicked (#28). Neither a blank choice nor a padded
+	// one may widen the list to "off||stream" or "off| stream ".
+	if !strings.Contains(text, "progress &lt;off|stream&gt;") {
+		t.Fatalf("welcome should name the accepted progress values, got %q", text)
 	}
-	if buttons != 2 {
-		t.Fatalf("want 2 progress buttons, got %d", buttons)
-	}
-	if bare := welcomeCard(nil); bare == nil || bare.Header == nil {
+	// A handler with no choices to report still gets a welcome, and must not
+	// be given an empty argument list to read.
+	bare := welcomeCard(nil)
+	if bare == nil || bare.Header == nil {
 		t.Fatalf("a welcome with no choices is still a card")
 	}
+	bareText := cardText(bare)
+	if strings.Contains(bareText, "progress &lt;") {
+		t.Fatalf("no choices should mean no argument list, got %q", bareText)
+	}
+	// The list goes, the command does not: a welcome that never says
+	// "progress" leaves the setting undiscoverable.
+	if !strings.Contains(bareText, "progress") {
+		t.Fatalf("a welcome should name the command even with no values, got %q", bareText)
+	}
+	if empty := welcomeCard([]string{"", "  "}); empty == nil ||
+		cardText(empty) != bareText {
+		t.Fatalf("choices that are all blank should read exactly the same as none")
+	}
+}
+
+// TestWelcomeTextMatchesTheCard: the card and its text fallback are one
+// message, so both name the handler's values and neither hard-codes them. They
+// used to be a derived list and a literal, free to drift apart unseen — the
+// fallback is only rendered where the card is not.
+func TestWelcomeTextMatchesTheCard(t *testing.T) {
+	choices := []string{"off", "stream"}
+	if text := welcomeTextFor(choices); !strings.Contains(text, "progress <off|stream>") {
+		t.Fatalf("the fallback should name the handler's values, got %q", text)
+	}
+	bare := welcomeTextFor(nil)
+	if strings.Contains(bare, "progress <") {
+		t.Fatalf("no choices should mean no argument list, got %q", bare)
+	}
+	if !strings.Contains(bare, "`progress`") {
+		t.Fatalf("the fallback should still name the command, got %q", bare)
+	}
+	// Same sentence in both, modulo the card's HTML escaping of the brackets.
+	hint := progressHint(choices)
+	if !strings.Contains(welcomeTextFor(choices), hint) {
+		t.Fatalf("fallback dropped the progress hint %q", hint)
+	}
+	if card := welcomeCard(choices); card == nil ||
+		!strings.Contains(cardText(card), toCardHTML(hint)) {
+		t.Fatalf("card dropped the progress hint %q", hint)
+	}
+}
+
+// cardText joins every widget's rendered text, so a test can assert on
+// what the card says without depending on which widget kind says it.
+func cardText(card *chatv1.GoogleAppsCardV1Card) string {
+	var b strings.Builder
+	for _, sec := range card.Sections {
+		for _, w := range sec.Widgets {
+			if w.TextParagraph != nil {
+				b.WriteString(w.TextParagraph.Text + "\n")
+			}
+			if w.DecoratedText != nil {
+				b.WriteString(w.DecoratedText.Text + "\n")
+			}
+		}
+	}
+	return b.String()
 }
 
 func TestAnswerCardStructure(t *testing.T) {

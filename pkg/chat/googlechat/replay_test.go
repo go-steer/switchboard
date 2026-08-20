@@ -217,5 +217,11 @@ func describeCard(card *chatv1.GoogleAppsCardV1Card) string {
 			}
 		}
 	}
+	// Anything clickable is called out by path, so a click affordance that the
+	// switch above has no case for still shows up as a golden diff rather than
+	// summarising to nothing. A click never reaches this app (#28).
+	if found := interactivePaths(card); len(found) > 0 {
+		b.WriteString("[clickable:" + strings.Join(found, ",") + "]")
+	}
 	return b.String()
 }

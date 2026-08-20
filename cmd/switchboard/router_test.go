@@ -642,6 +642,42 @@ func TestRouterHandleCommand(t *testing.T) {
 	}
 }
 
+// TestProgressModesAreOneList: everything that names the accepted modes reads
+// progressModes. They used to be four independent literals — the flag parser's
+// switch, the query ack, the unknown-value error and Choices — so a fifth mode
+// could reach the parser while every surface that tells a human about it went
+// on listing four. Choices matters most: it is what an adapter renders, and
+// this package cannot see whether it drifted.
+func TestProgressModesAreOneList(t *testing.T) {
+	r := newCommandRouter(t, ProgressIndicator)
+	ctx := context.Background()
+
+	names := r.Choices("progress")
+	if len(names) != len(progressModes) || len(names) == 0 {
+		t.Fatalf("Choices = %v, want the %d modes", names, len(progressModes))
+	}
+	if got := r.Choices("wat"); got != nil {
+		t.Errorf("Choices of an unknown command = %v, want nil", got)
+	}
+
+	query, _ := r.HandleCommand(ctx, chat.Command{Name: "progress", Channel: "C1"})
+	unknown, _ := r.HandleCommand(ctx, chat.Command{Name: "progress", Channel: "C1", Args: []string{"nope"}})
+	for _, name := range names {
+		if _, err := parseProgressMode(name); err != nil {
+			t.Errorf("Choices offers %q, which --progress-mode rejects: %v", name, err)
+		}
+		for what, text := range map[string]string{
+			"the query ack":        query,
+			"the unknown-mode ack": unknown,
+			"the usage line":       commandHelp,
+		} {
+			if !strings.Contains(text, name) {
+				t.Errorf("%s does not name the accepted mode %q: %q", what, name, text)
+			}
+		}
+	}
+}
+
 // TestRouterCommandOverridesTurnMode proves a per-channel override set via a
 // command actually changes turn handling: with the process default off, a
 // command flips channel C0 to stream, so a tool call now surfaces a standalone

@@ -383,14 +383,20 @@ func parseCallerMode(s string) (chat.CallerMode, error) {
 	return mode, nil
 }
 
-// parseProgressMode validates the --progress-mode flag value.
+// parseProgressMode validates the --progress-mode flag value against
+// progressModes, the same list the `progress` command offers and reports
+// through chat.CommandChoices.
 func parseProgressMode(s string) (ProgressMode, error) {
-	switch ProgressMode(s) {
-	case ProgressOff, ProgressIndicator, ProgressStatus, ProgressStream:
-		return ProgressMode(s), nil
-	default:
-		return "", fmt.Errorf("invalid --progress-mode %q (want \"indicator\", \"status\", \"stream\", or \"off\")", s)
+	for _, m := range progressModes {
+		if ProgressMode(s) == m {
+			return m, nil
+		}
 	}
+	quoted := make([]string, 0, len(progressModes))
+	for _, m := range progressModes {
+		quoted = append(quoted, strconv.Quote(string(m)))
+	}
+	return "", fmt.Errorf("invalid --progress-mode %q (want %s)", s, strings.Join(quoted, ", "))
 }
 
 // parseAppCommands parses the --googlechat-commands mapping. Chat identifies an
