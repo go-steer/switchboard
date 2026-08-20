@@ -39,8 +39,12 @@ func buildInfo(mainVersion string, settings ...string) *debug.BuildInfo {
 	return bi
 }
 
-// The defaults the package ships with, spelled out so a test reads as
-// the scenario it is describing rather than as three sentinels.
+// The shape of the defaults the package ships with, spelled out so a
+// test reads as the scenario it is describing rather than as three
+// sentinels. Deliberately not Version/Commit/Date themselves: resolve
+// takes all three as arguments, and a table that feeds it the package's
+// own constants would stop testing them as inputs. Only devVersion's
+// exact digits are arbitrary, and it is not bumped with a release.
 const (
 	devVersion = "v0.1.0-dev"
 	noCommit   = "none"
