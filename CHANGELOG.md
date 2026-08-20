@@ -6,6 +6,30 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [v0.1.0] — 2026-08-20
+
+The first tagged release. Everything below shipped in it; the sections are the
+work as it landed on main rather than a summary written afterwards.
+
+What it is: a chat gateway that puts a core-agent daemon in a Slack or Google
+Chat thread. Transport only — it executes no tools and resolves no credentials,
+and asserts the caller to the daemon with `X-Asserted-Caller`.
+
+Two things a reader should know before pinning it. **Google Chat runs over
+Pub/Sub**, which keeps the no-public-webhook posture and costs anything needing
+a synchronous response: no dialogs, and no card clicks at all — the connection
+settings do not route the trigger (#28). Cards are output; a setting is changed
+by typing the command. #29 tracks an HTTP interaction endpoint. And **long-turn
+progress defaults to `indicator`**: a placeholder that ticks and is retired when
+the answer lands. `stream` relays every model turn and tool call, which is the
+most transparent and the noisiest, and is opt-in per channel.
+
+Consumers should pin `v0.1.0` rather than a pseudo-version; `switchboard
+version` reports it, whether the binary came from `go install …@v0.1.0` or from
+`ghcr.io/go-steer/switchboard:0.1.0` (#43).
+
 ### Added
 - Every log line now carries the time it was written, and `--log-format json`
   (`SWITCHBOARD_LOG_FORMAT`) renders one JSON object per line for a collector
