@@ -6,6 +6,40 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [v0.2.0] — 2026-08-20
+
+A release about one mode. `--progress-mode stream` existed in v0.1.0 and said
+almost nothing: every tool call rendered as "🔧 Running `bash`", so a
+fifteen-call turn was fifteen identical notices and a parallel frame read
+`` `bash`, `bash`, `bash` ``. It now says what each tool was called with and
+whether it worked, groups a frame under one header, and edits that notice in
+place as the results land.
+
+That makes `stream` the first mode to put tool-authored text in a chat room,
+which is a disclosure decision rather than a formatting one, so the posture is
+written down in the README and enforced in the parse helper: **one scalar
+argument per call**, never the whole object; flattened to one line and clamped
+to 120 bytes; passed through a redaction pass for the credential shapes it
+recognises. Tool *output* is never shown in any mode — a failure renders as
+`exit 2` and nothing more. The redaction is a net, not a guarantee, and the
+other four steps are what bound a miss to one clamped field. A deployment that
+cannot accept even a clamped argument in the channel should run `status`, which
+names tools without arguments, or `indicator`, which shows neither.
+
+Two things carry over from v0.1.0 unchanged. **Google Chat runs over Pub/Sub**,
+which keeps the no-public-webhook posture and costs anything needing a
+synchronous response: no dialogs, and no card clicks at all (#28). #29 tracks an
+HTTP interaction endpoint. And **long-turn progress still defaults to
+`indicator`**; `stream` is opt-in per channel, and is now considerably more
+worth opting into.
+
+Upgrading from v0.1.0 needs no configuration change. Consumers should pin
+`v0.2.0` rather than a pseudo-version; `switchboard version` reports it, whether
+the binary came from `go install …@v0.2.0` or from
+`ghcr.io/go-steer/switchboard:0.2.0`.
+
 ### Added
 - `--progress-mode stream` now says what a tool was called with and whether it
   worked (#36). It rendered "🔧 Running `bash`" and nothing else, so a turn that
