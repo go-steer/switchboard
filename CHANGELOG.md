@@ -6,7 +6,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-Nothing yet.
+### Changed
+- `internal/version.Version` is `v0.2.0-dev`, so a build off main no longer
+  claims to be the release that just shipped (#43). `verify-version-fallback`
+  has demanded this since the `v0.1.0` tag was pushed — the window between the
+  tag and this bump is the one thing the check is written to keep short.
 
 ## [v0.1.0] — 2026-08-20
 
