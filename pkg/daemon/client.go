@@ -39,10 +39,12 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // Config captures the daemon-side surface switchboard posts against.
@@ -560,8 +562,15 @@ type agentFrame struct {
 			Parts []struct {
 				Text         string `json:"text"`
 				FunctionCall *struct {
-					Name string `json:"name"`
+					ID   string         `json:"id"`
+					Name string         `json:"name"`
+					Args map[string]any `json:"args"`
 				} `json:"functionCall"`
+				FunctionResponse *struct {
+					ID       string         `json:"id"`
+					Name     string         `json:"name"`
+					Response map[string]any `json:"response"`
+				} `json:"functionResponse"`
 			} `json:"parts"`
 			Role string `json:"role"`
 		} `json:"Content"`
@@ -615,13 +624,39 @@ func AgentText(data string) (r AgentReply, ok bool) {
 	return r, true
 }
 
-// ToolCalls returns the names of the tool (function) calls carried by an
-// EventAgent payload, in the order they appear, and is empty for events that
-// carry none (plain model text, tool results, user turns, or a parse failure).
-// It pairs with AgentText: an agent event is either model text (AgentText ok)
-// or tool activity (ToolCalls non-empty), letting the gateway surface "the
-// agent is running <tool>" progress distinctly from the answer text.
-func ToolCalls(data string) []string {
+// ToolCall is one tool invocation the agent started.
+type ToolCall struct {
+	// ID is the daemon's identifier for the call, echoed on the result that
+	// eventually answers it. Empty for a daemon that does not send one, which
+	// leaves the caller to pair by name.
+	ID string
+	// Name is the tool, e.g. "bash".
+	Name string
+	// Arg is a one-line summary of a single argument, or empty when the call
+	// has no argument that can be summarised safely. See summariseArg for what
+	// "safely" is doing there — it is a disclosure decision, not a formatting
+	// one, and it is deliberately lossy.
+	Arg string
+}
+
+// ToolResult is one tool result: whether the call finished, and — if it
+// failed — a short descriptor of how. Never the output. See ToolResults.
+type ToolResult struct {
+	ID     string
+	Name   string
+	Failed bool
+	// Detail is a few words about the failure, e.g. "exit 1". Empty for a
+	// success, and for a failure whose shape this does not recognise.
+	Detail string
+}
+
+// ToolCalls returns the tool (function) calls carried by an EventAgent
+// payload, in the order they appear, and is empty for events that carry none
+// (plain model text, tool results, user turns, or a parse failure). It pairs
+// with AgentText: an agent event is either model text (AgentText ok) or tool
+// activity (ToolCalls non-empty), letting the gateway surface "the agent is
+// running <tool>" progress distinctly from the answer text.
+func ToolCalls(data string) []ToolCall {
 	var f agentFrame
 	if err := json.Unmarshal([]byte(data), &f); err != nil {
 		return nil
@@ -629,13 +664,230 @@ func ToolCalls(data string) []string {
 	if f.Event == nil || f.Event.Content == nil || f.Event.Content.Role != "model" {
 		return nil
 	}
-	var names []string
+	var calls []ToolCall
 	for _, p := range f.Event.Content.Parts {
-		if p.FunctionCall != nil && p.FunctionCall.Name != "" {
-			names = append(names, p.FunctionCall.Name)
+		if p.FunctionCall == nil || p.FunctionCall.Name == "" {
+			continue
+		}
+		calls = append(calls, ToolCall{
+			ID:   p.FunctionCall.ID,
+			Name: p.FunctionCall.Name,
+			Arg:  summariseArg(p.FunctionCall.Args),
+		})
+	}
+	return calls
+}
+
+// ToolResults returns the tool results carried by an EventAgent payload.
+//
+// Unlike ToolCalls this does not filter on role. A result is authored by the
+// tool, not the model, and the daemon labels the event "user" — the same label
+// it puts on an injected turn echoed back. Requiring "model" here is how tool
+// results stayed invisible to the gateway for as long as they did.
+//
+// What comes back is a verdict, never the output. The response object of a
+// single `kubectl get pods -A` carries the whole listing, and a progress notice
+// is not where that belongs — it belongs in the answer, if the model decides it
+// does.
+func ToolResults(data string) []ToolResult {
+	var f agentFrame
+	if err := json.Unmarshal([]byte(data), &f); err != nil {
+		return nil
+	}
+	if f.Event == nil || f.Event.Content == nil {
+		return nil
+	}
+	var results []ToolResult
+	for _, p := range f.Event.Content.Parts {
+		if p.FunctionResponse == nil || p.FunctionResponse.Name == "" {
+			continue
+		}
+		failed, detail := verdict(p.FunctionResponse.Response)
+		results = append(results, ToolResult{
+			ID:     p.FunctionResponse.ID,
+			Name:   p.FunctionResponse.Name,
+			Failed: failed,
+			Detail: detail,
+		})
+	}
+	return results
+}
+
+// verdict reads success or failure out of a tool response object.
+//
+// There is no schema for this: every tool answers in its own shape. Two
+// conventions are common enough to read — a numeric exit_code, and an error
+// field — and anything else is reported as success, because a tool that
+// answered at all usually did run. Guessing failure from an unrecognised shape
+// would put a red cross against calls that worked.
+func verdict(resp map[string]any) (failed bool, detail string) {
+	if resp == nil {
+		return false, ""
+	}
+	for _, key := range []string{"exit_code", "exitCode", "returncode", "status_code"} {
+		code, ok := resp[key]
+		if !ok {
+			continue
+		}
+		n, ok := code.(float64) // encoding/json numbers
+		if !ok {
+			continue
+		}
+		if n == 0 {
+			return false, ""
+		}
+		// Non-zero is a failure whatever the number is, but the number itself
+		// is tool-authored and goes into a chat room, so only a plausible exit
+		// code is rendered. Anything else fails with no detail: int() on an
+		// out-of-range float64 is not even defined in Go, and "exit
+		// 1234567890123456789" is not what "a few words" means.
+		// The range test comes first and short-circuits, so int() is only ever
+		// reached for a value it can hold — NaN and ±Inf fail both comparisons.
+		inRange := n >= minExitCode && n <= maxExitCode
+		if !inRange || n != float64(int(n)) {
+			return true, ""
+		}
+		return true, "exit " + strconv.Itoa(int(n))
+	}
+	for _, key := range []string{"error", "err"} {
+		v, ok := resp[key]
+		if !ok || v == nil {
+			continue
+		}
+		if s, ok := v.(string); ok && strings.TrimSpace(s) == "" {
+			continue
+		}
+		// Deliberately not the error text: it is tool-authored, unbounded, and
+		// as able to carry a secret as the arguments are.
+		return true, ""
+	}
+	return false, ""
+}
+
+// minExitCode and maxExitCode bound what verdict is willing to render as an
+// exit code. A signal-killed process reports a negative code and a shell
+// reports 0-255; the ceiling is loose enough for the tools that report an HTTP
+// status here instead.
+const (
+	minExitCode = -256
+	maxExitCode = 65535
+)
+
+// argSummaryCap bounds one argument summary. Long enough for a recognisable
+// command, short enough that a notice stays a notice.
+const argSummaryCap = 120
+
+// preferredArgs are the argument names worth showing, in order. Each is the
+// one field that says what a call is actually doing — the command a shell is
+// running, the file being read — so a thread full of `bash` becomes a thread
+// full of distinguishable lines.
+var preferredArgs = []string{"command", "cmd", "path", "file_path", "filename", "query", "url", "pattern"}
+
+// summariseArg picks one argument out of a tool call and renders it as a
+// single clamped, redacted line. It returns "" when there is nothing scalar to
+// show.
+//
+// # Why this is lossy on purpose
+//
+// Tool arguments are untrusted, unbounded, and are exactly where a secret turns
+// up: a shell command line with a token in it, a private path, the contents of
+// a file being written. Posting them into a shared channel is a disclosure
+// decision, and this is the whole of that decision:
+//
+//   - one argument, never the object. A tool called with a token in a
+//     second field does not leak it because the first field is what is shown.
+//   - scalars only. Nested objects and arrays are skipped rather than
+//     serialised, so the size of what can be disclosed stays bounded by one
+//     field rather than by the call.
+//   - clamped to argSummaryCap and flattened to one line, so a file body
+//     passed as an argument contributes at most its first sentence.
+//   - run through redact, which knocks out the credential shapes it knows.
+//
+// That last step is a net, not a guarantee — no pattern set recognises every
+// secret, and the ones above are what keeps the blast radius of a miss to one
+// clamped field. A deployment that cannot accept even that should run
+// progress-mode status or indicator, which show tool names and no arguments.
+func summariseArg(args map[string]any) string {
+	if len(args) == 0 {
+		return ""
+	}
+	for _, key := range preferredArgs {
+		if s, ok := scalar(args[key]); ok {
+			return redact(clampArg(s))
 		}
 	}
-	return names
+	// No preferred key: fall back to the first scalar by name. Sorted, because
+	// map order is random and a notice that renders a different argument on
+	// every reconnect replay is worse than one that renders none.
+	keys := make([]string, 0, len(args))
+	for k := range args {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	for _, k := range keys {
+		if s, ok := scalar(args[k]); ok {
+			return redact(clampArg(s))
+		}
+	}
+	return ""
+}
+
+// scalar renders a JSON value as text if it is one, and reports false for the
+// composites (objects, arrays, null) that summariseArg refuses to flatten.
+func scalar(v any) (string, bool) {
+	switch t := v.(type) {
+	case string:
+		if strings.TrimSpace(t) == "" {
+			return "", false
+		}
+		return t, true
+	case float64:
+		return strconv.FormatFloat(t, 'f', -1, 64), true
+	case bool:
+		return strconv.FormatBool(t), true
+	}
+	return "", false
+}
+
+// clampArg flattens an argument to one line and bounds it, cutting on a rune
+// boundary so a chat client is never handed half a rune to render.
+func clampArg(s string) string {
+	s = strings.TrimSpace(strings.Join(strings.Fields(s), " "))
+	if len(s) <= argSummaryCap {
+		return s
+	}
+	cut := argSummaryCap - 1
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "…"
+}
+
+// secretish matches the credential shapes worth knocking out of an argument
+// summary: a value assigned to a suggestively named flag or variable, and the
+// issued-token prefixes that are recognisable on their own.
+//
+// Conservative by construction — it can only ever catch what it has seen
+// before. See summariseArg for why that is accepted rather than solved here.
+var secretish = regexp.MustCompile(
+	`(?i)` +
+		// --token=xyz, PASSWORD: xyz, "api_key": "xyz"
+		`((?:api[-_]?key|secret|token|passwo?r?d|passwd|credential|auth|bearer)"?\s*[:=]\s*"?)\S+` +
+		// --password xyz: the same names separated by a space rather than by an
+		// operator, but only behind a flag. Without that anchor the "auth" in
+		// `gcloud auth login` swallows the subcommand, and a summary that redacts
+		// ordinary commands teaches people to ignore it.
+		`|(--?[a-z0-9-]*(?:api[-_]?key|secret|token|passwo?r?d|passwd|credential|auth|bearer)[a-z0-9-]*\s+)\S+` +
+		// bare issued credentials: GitHub, Slack, OpenAI, AWS, Google, JWTs
+		`|\b(?:gh[pousr]_|github_pat_|xox[baprs]-|sk-|AKIA|ASIA|ya29\.|AIza|eyJ[A-Za-z0-9_-]{6})[A-Za-z0-9._\-/+]*` +
+		// anything shaped like a PEM block header
+		`|-----BEGIN[^-]*-----`)
+
+// redact blanks the credential shapes secretish knows about, keeping the flag
+// or key name so the line still says what kind of thing was elided. Only one of
+// the two name groups can match at a time, so the other expands to nothing.
+func redact(s string) string {
+	return secretish.ReplaceAllString(s, "${1}${2}<redacted>")
 }
 
 // protocolVersion is the attach protocol switchboard speaks. The daemon

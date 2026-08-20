@@ -17,6 +17,8 @@ package main
 import (
 	"context"
 	"fmt"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -129,9 +131,176 @@ func quotedTools(tools []string) string {
 	return strings.Join(quoted, ", ")
 }
 
-// activityText renders a standalone tool-activity notice, e.g. "🔧 Running
-// `lookup`" — stream mode, and status mode with no message left to edit.
-func activityText(tools []string) string { return "🔧 Running " + quotedTools(tools) }
+// toolNames pulls the names out of a call list, for the renderers that show
+// nothing else.
+func toolNames(calls []daemon.ToolCall) []string {
+	names := make([]string, len(calls))
+	for i, c := range calls {
+		names[i] = c.Name
+	}
+	return names
+}
+
+// toolGroup is a run of adjacent calls that render as one line: same tool, same
+// argument summary, same verdict so far. Fifteen `bash` calls in a turn is the
+// normal case (#36), and three of them arriving in one frame used to render as
+// "`bash`, `bash`, `bash`", which reads as a bug rather than as information.
+type toolGroup struct {
+	call daemon.ToolCall
+	res  *daemon.ToolResult
+	n    int
+}
+
+// groupCalls collapses adjacent identical calls, where identical means the
+// reader could not tell them apart anyway: same name, same summary, same
+// verdict. Calls that differ in any of those stay separate lines — the point of
+// the argument summary is that three concurrent shells become three legible
+// lines rather than one count.
+func groupCalls(calls []daemon.ToolCall, res []*daemon.ToolResult) []toolGroup {
+	var groups []toolGroup
+	for i, c := range calls {
+		var r *daemon.ToolResult
+		if i < len(res) {
+			r = res[i]
+		}
+		if n := len(groups); n > 0 {
+			if prev := groups[n-1]; prev.call.Name == c.Name && prev.call.Arg == c.Arg && sameVerdict(prev.res, r) {
+				groups[n-1].n++
+				continue
+			}
+		}
+		groups = append(groups, toolGroup{call: c, res: r, n: 1})
+	}
+	return groups
+}
+
+// sameVerdict reports whether two results would render the same, treating "no
+// result yet" as its own state.
+func sameVerdict(a, b *daemon.ToolResult) bool {
+	switch {
+	case a == nil && b == nil:
+		return true
+	case a == nil || b == nil:
+		return false
+	}
+	return a.Failed == b.Failed && a.Detail == b.Detail
+}
+
+// toolIcon is the state of one group at a glance: still running, done, failed.
+func toolIcon(r *daemon.ToolResult) string {
+	switch {
+	case r == nil:
+		return "🔧"
+	case r.Failed:
+		return "❌"
+	}
+	return "✅"
+}
+
+// toolLine renders one group: icon, tool, how many of it, why it failed, and —
+// in stream mode only — what it was called with. verb puts "Running"/"Ran"
+// after the icon, for a notice that is one line and has no header to carry it.
+func toolLine(g toolGroup, detail, verb bool) string {
+	line := toolIcon(g.res)
+	if verb {
+		if g.res == nil {
+			line += " Running"
+		} else {
+			line += " Ran"
+		}
+	}
+	line += " `" + g.call.Name + "`"
+	if g.n > 1 {
+		line += " ×" + strconv.Itoa(g.n)
+	}
+	if g.res != nil && g.res.Failed && g.res.Detail != "" {
+		line += " (" + g.res.Detail + ")"
+	}
+	if detail && g.call.Arg != "" {
+		line += " — " + g.call.Arg
+	}
+	return line
+}
+
+// activityText renders a standalone tool-activity notice — stream mode, and
+// status mode with no message left to edit. res is parallel to calls and holds
+// each call's result once it has landed, so the same function renders the
+// notice when it is posted and again as each result ticks a line off:
+//
+//	🔧 Running `bash` — kubectl get pods -A          (stream, one call)
+//	✅ Ran `bash` — kubectl get pods -A              (…once it finishes)
+//	🔧 Running 3 tools                               (stream, a parallel frame)
+//	• ✅ `bash` — kubectl get pods -A
+//	• ❌ `bash` (exit 2) — kubectl get ns --context nope
+//	• 🔧 `bash` — sleep 30
+//	🔧 Running `bash` ×3                             (status: names, no arguments)
+//
+// detail is the mode gate. Only stream carries argument summaries: status edits
+// one message in place and wants a short line, and a reader who chose indicator
+// or status did not ask to see what the agent is running things with.
+func activityText(calls []daemon.ToolCall, res []*daemon.ToolResult, detail bool) string {
+	if !detail {
+		// The terse shape, unchanged but for the count: names, comma-joined,
+		// with runs of the same name collapsed rather than repeated.
+		var parts []string
+		for _, g := range groupCalls(stripArgs(calls), nil) {
+			part := "`" + g.call.Name + "`"
+			if g.n > 1 {
+				part += " ×" + strconv.Itoa(g.n)
+			}
+			parts = append(parts, part)
+		}
+		return "🔧 Running " + strings.Join(parts, ", ")
+	}
+	groups := groupCalls(calls, res)
+	if len(groups) == 1 {
+		return toolLine(groups[0], true, true)
+	}
+	lines := make([]string, 0, len(groups)+1)
+	lines = append(lines, activityHeader(groups))
+	for _, g := range groups {
+		lines = append(lines, "• "+toolLine(g, true, false))
+	}
+	return strings.Join(lines, "\n")
+}
+
+// activityHeader summarises a multi-call notice in its first line, so a reader
+// scrolling past sees the state of the frame without reading the bullets.
+func activityHeader(groups []toolGroup) string {
+	total, done, failed := 0, 0, 0
+	for _, g := range groups {
+		total += g.n
+		if g.res == nil {
+			continue
+		}
+		done += g.n
+		if g.res.Failed {
+			failed += g.n
+		}
+	}
+	head := "🔧 Running " + strconv.Itoa(total) + " tools"
+	if done == total {
+		head = "✅ Ran " + strconv.Itoa(total) + " tools"
+		if failed > 0 {
+			head = "❌ Ran " + strconv.Itoa(total) + " tools (" + strconv.Itoa(failed) + " failed)"
+		}
+	}
+	return head
+}
+
+// stripArgs drops the argument summaries, for the renderer that must not show
+// them. Its live effect is grouping — groupCalls compares Arg, so without this
+// two `bash` calls with different commands would not collapse to `bash` ×2 in
+// a mode that never shows the difference. Not showing them is structural: the
+// terse branch reads only Name. This is the belt to that brace, so a future
+// edit that does read Arg there is still safe.
+func stripArgs(calls []daemon.ToolCall) []daemon.ToolCall {
+	bare := make([]daemon.ToolCall, len(calls))
+	for i, c := range calls {
+		bare[i] = daemon.ToolCall{ID: c.ID, Name: c.Name}
+	}
+	return bare
+}
 
 // tickText renders the progress message of a turn in flight: the working
 // marker, how long it has been running, and — status mode only — the tool it
@@ -228,7 +397,15 @@ type sessionEntry struct {
 	err     error
 	channel string       // platform channel, for resolving the channel's progress mode
 	seq     atomic.Int64 // highest agent-event seq seen, fed back as `since` on resume
-	relayed atomic.Int64 // highest seq already posted, for exactly-once delivery across reconnects
+	relayed atomic.Int64 // highest seq whose answer was posted, for exactly-once delivery across reconnects
+	// noticed is the same watermark for tool activity, kept separate from
+	// relayed on purpose. They dedupe different things — one guards the answer,
+	// the other guards a progress notice — and sharing a counter means a tool
+	// result can raise the bar the answer has to clear. Answers and tool frames
+	// share a seq space that only ever goes up, so today that costs nothing; the
+	// point of relayed is to survive a stream that does something unexpected,
+	// and the worst thing this gateway can do is swallow an answer.
+	noticed atomic.Int64
 
 	// inFlight is true from the moment a turn is handed to the daemon until
 	// something concludes it: the daemon's turn-complete or turn-error, an
@@ -311,6 +488,15 @@ type sessionEntry struct {
 	tools     []string
 	step      int
 	tickStop  chan struct{}
+
+	// amu guards notices, the tool-activity notices this session has posted and
+	// not yet seen every result for. A result names the call it answers, so the
+	// notice that announced that call can be edited in place to tick it off —
+	// which is what keeps a fifteen-tool turn at fifteen messages instead of
+	// thirty (#36). Only the modes that post standalone notices use it; status
+	// mode renders its tools into the one message it already edits.
+	amu     sync.Mutex
+	notices []*activityNote
 
 	// umu guards the usage accounting for the turn currently in flight: usage
 	// is what has accrued so far, totals the last running total seen (have
@@ -455,6 +641,7 @@ func (e *sessionEntry) beginTurnInFlight() {
 	e.failed.Store(false)
 	e.spoke.Store(false)
 	e.backstopped.Store(false)
+	e.forgetActivity()
 	e.turnSeq.Add(1)
 	e.turnGen.Store(e.streamGen.Load())
 	e.inFlight.Store(true)
@@ -581,6 +768,97 @@ func (e *sessionEntry) noteActivity(tools []string) (ref chat.MessageRef, text s
 	}
 	e.tools, e.step = tools, e.step+1
 	return e.progressMsg, tickText(time.Since(e.turnStart), e.tools, e.step), true
+}
+
+// activityNote is one posted tool-activity notice: the message it went into,
+// the calls it announced, and their results as they land. res is parallel to
+// calls, nil where the result has not arrived.
+type activityNote struct {
+	ref   chat.MessageRef
+	calls []daemon.ToolCall
+	res   []*daemon.ToolResult
+}
+
+// pending returns the index of the newest still-unanswered call of this name,
+// or -1 for none. That is the candidate for a result carrying no id to match
+// on.
+func (n *activityNote) pending(name string) int {
+	for i := len(n.calls) - 1; i >= 0; i-- {
+		if n.calls[i].Name == name && n.res[i] == nil {
+			return i
+		}
+	}
+	return -1
+}
+
+// noticeMemory bounds how many tool notices a session keeps addressable. A long
+// turn posts one per frame, and a result almost always answers the most recent
+// few; the cost of forgetting an older one is a notice that keeps its 🔧 rather
+// than a wrong edit, so this is deliberately small.
+const noticeMemory = 32
+
+// noteToolCalls records a posted notice so the results can find it later. The
+// calls are copied: the notice outlives the frame by up to noticeMemory more of
+// them and is read under a different lock, so it owns what it holds.
+func (e *sessionEntry) noteToolCalls(ref chat.MessageRef, calls []daemon.ToolCall) {
+	e.amu.Lock()
+	defer e.amu.Unlock()
+	e.notices = append(e.notices, &activityNote{
+		ref:   ref,
+		calls: slices.Clone(calls),
+		res:   make([]*daemon.ToolResult, len(calls)),
+	})
+	if n := len(e.notices) - noticeMemory; n > 0 {
+		e.notices = append([]*activityNote(nil), e.notices[n:]...)
+	}
+}
+
+// resolveTool files a result against the notice that announced its call and
+// re-renders that notice. ok is false when no notice is waiting for it — a
+// result from before switchboard connected, one already answered, or a session
+// whose mode posts no notices at all.
+//
+// Matching is by the daemon's call id where there is one. Where there is not,
+// it falls back to the most recent unanswered call of the same name, which is
+// what a reader would assume too: results arrive in no guaranteed order, but a
+// tool that is running once is the tool that just finished. The fallback can be
+// wrong for two same-named calls in flight at once, and the cost of being wrong
+// is a tick against the wrong line of a notice that lists them both — visible,
+// bounded, and preferable to leaving every line at 🔧 forever.
+func (e *sessionEntry) resolveTool(r daemon.ToolResult) (ref chat.MessageRef, text string, ok bool) {
+	e.amu.Lock()
+	defer e.amu.Unlock()
+	for i := len(e.notices) - 1; i >= 0; i-- {
+		n := e.notices[i]
+		at := -1
+		if r.ID != "" {
+			for j, c := range n.calls {
+				if c.ID == r.ID {
+					at = j
+					break
+				}
+			}
+		}
+		if at == -1 && r.ID == "" {
+			at = n.pending(r.Name)
+		}
+		if at == -1 || n.res[at] != nil {
+			continue
+		}
+		res := r
+		n.res[at] = &res
+		return n.ref, activityText(n.calls, n.res, true), true
+	}
+	return chat.MessageRef{}, "", false
+}
+
+// forgetActivity drops the previous turn's notices. They are still in the
+// thread — stream mode's trail is a record, not a transient — but nothing that
+// arrives now belongs to them.
+func (e *sessionEntry) forgetActivity() {
+	e.amu.Lock()
+	e.notices = nil
+	e.amu.Unlock()
 }
 
 // tickRender composes one tick: the message to edit and the line to put in it.
@@ -1193,19 +1471,45 @@ func (r *Router) reanchorProgress(ctx context.Context, e *sessionEntry, conv str
 // and if they disagreed the wording and the card icon would flip back and
 // forth every fifteen seconds. A standalone notice is still KindActivity,
 // where the distinction earns its icon.
-func (r *Router) postActivity(ctx context.Context, e *sessionEntry, conv string, mode ProgressMode, tools []string) {
+func (r *Router) postActivity(ctx context.Context, e *sessionEntry, conv string, mode ProgressMode, calls []daemon.ToolCall) {
 	if mode == ProgressStatus {
-		if ref, text, ok := e.noteActivity(tools); ok {
+		if ref, text, ok := e.noteActivity(toolNames(calls)); ok {
 			if err := r.out.Update(ctx, ref, chat.Reply{Conversation: conv, Text: text, Kind: chat.KindProgress}); err != nil {
 				r.logf("relay %s: status activity: %v", conv, err)
 			}
 			return
 		}
 	}
-	_, err := r.out.Send(ctx, chat.Reply{Conversation: conv, Text: activityText(tools), Kind: chat.KindActivity})
+	detail := mode == ProgressStream
+	ref, err := r.out.Send(ctx, chat.Reply{Conversation: conv, Text: activityText(calls, nil, detail), Kind: chat.KindActivity})
 	r.metrics.recordReply(err)
 	if err != nil {
 		r.logf("relay %s: activity: %v", conv, err)
+		return
+	}
+	if detail {
+		// Only stream mode's notices are worth remembering: they are the only
+		// ones that carry per-call state a result can tick off.
+		e.noteToolCalls(ref, calls)
+	}
+}
+
+// postToolResults ticks finished calls off the notice that announced them.
+// Editing rather than posting is the point — a turn that makes fifteen calls
+// would otherwise put thirty messages in the thread, and the second fifteen
+// carry one bit each.
+//
+// A result nothing is waiting for is dropped in silence. That is the normal
+// state of every mode but stream, and of a stream that connected mid-turn.
+func (r *Router) postToolResults(ctx context.Context, e *sessionEntry, conv string, results []daemon.ToolResult) {
+	for _, res := range results {
+		ref, text, ok := e.resolveTool(res)
+		if !ok {
+			continue
+		}
+		if err := r.out.Update(ctx, ref, chat.Reply{Conversation: conv, Text: text, Kind: chat.KindActivity}); err != nil {
+			r.logf("relay %s: tool result: %v", conv, err)
+		}
 	}
 }
 
@@ -1441,13 +1745,25 @@ func (r *Router) relay(ctx context.Context, conv string, e *sessionEntry, owner 
 				return nil
 			}
 			// Otherwise it may be tool activity — surfaced only in the modes
-			// that show progress, and gated by the same seq so a reconnect
-			// replay does not repost it. The mode is resolved per event so a
-			// mid-session command takes effect on the next turn.
+			// that show progress, and gated by its own seq watermark so a
+			// reconnect replay does not repost it. Its own, not the answer's:
+			// sharing one would let a tool result raise the bar the answer has
+			// to clear. The mode is resolved per event so a mid-session command
+			// takes effect on the next turn.
 			if mode := r.progressFor(e.channel); mode == ProgressStream || mode == ProgressStatus {
-				if tools := daemon.ToolCalls(ev.Data); len(tools) > 0 && reply.Seq > e.relayed.Load() {
-					e.relayed.Store(reply.Seq)
-					r.postActivity(ctx, e, conv, mode, tools)
+				if reply.Seq <= e.noticed.Load() {
+					return nil
+				}
+				if calls := daemon.ToolCalls(ev.Data); len(calls) > 0 {
+					e.noticed.Store(reply.Seq)
+					r.postActivity(ctx, e, conv, mode, calls)
+					return nil
+				}
+				// Tool results ride the same event, under the "user" role the
+				// daemon gives anything the model did not author (#36).
+				if results := daemon.ToolResults(ev.Data); len(results) > 0 {
+					e.noticed.Store(reply.Seq)
+					r.postToolResults(ctx, e, conv, results)
 				}
 			}
 			return nil
