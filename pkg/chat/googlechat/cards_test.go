@@ -73,6 +73,32 @@ func TestGatewayCardIcons(t *testing.T) {
 	if gatewayCard(chat.KindAnswer, "an answer") != nil {
 		t.Fatalf("an agent answer is not a gateway card")
 	}
+	// A tool notice carries its verdict in the emoji it leads with, and
+	// iconTextWidget strips that emoji on the reasoning that the widget's icon
+	// already says the same thing. Once tool notices gained verdicts (#36) it
+	// no longer did: ✅ and ❌ were both deleted and replaced by the same gear,
+	// so a card reader could not see that a tool had failed. Translate, don't
+	// discard.
+	verdicts := []struct {
+		text string
+		icon string
+	}{
+		{"✅ Ran `bash` — make test", iconToolOK},
+		{"❌ Ran 3 tools (1 failed)", iconToolFail},
+		{"🔧 Running `bash`", iconActivity},
+		{"Ran `bash`", iconActivity},
+	}
+	for _, tt := range verdicts {
+		// Through toChatText, as cardFor calls it: activityIcon reads the lead
+		// emoji off that output, not off the router's raw text.
+		card := gatewayCard(chat.KindActivity, toChatText(tt.text))
+		if card == nil {
+			t.Fatalf("%q: no card", tt.text)
+		}
+		if got := card.Sections[0].Widgets[0].DecoratedText.StartIcon.MaterialIcon.Name; got != tt.icon {
+			t.Fatalf("%q: icon = %q, want %q", tt.text, got, tt.icon)
+		}
+	}
 	if gatewayCard(chat.KindNotice, "   ") != nil {
 		t.Fatalf("empty text must not produce a card")
 	}

@@ -210,6 +210,18 @@ func TestStripArgsIsUnconditional(t *testing.T) {
 	}
 }
 
+// fileResult files a single result and reports the edit it produced, which is
+// what the relay does for a frame carrying one. Results arrive in frames, so
+// applyToolResults is the real entry point; this keeps the one-at-a-time tests
+// reading as one at a time.
+func fileResult(e *sessionEntry, r daemon.ToolResult) (chat.MessageRef, string, bool) {
+	edits := e.applyToolResults([]daemon.ToolResult{r})
+	if len(edits) == 0 {
+		return chat.MessageRef{}, "", false
+	}
+	return edits[0].ref, edits[0].text, true
+}
+
 // TestResolveToolMatchesOnCallID is the ordinary path: the daemon gives every
 // call an id and echoes it on the result, so a result finds its own line even
 // when several of the same tool are in flight.
@@ -219,9 +231,9 @@ func TestResolveToolMatchesOnCallID(t *testing.T) {
 		{ID: "a", Name: "bash", Arg: "make test"},
 		{ID: "b", Name: "bash", Arg: "make lint"},
 	}
-	e.noteToolCalls(chat.MessageRef{ID: "ts1"}, calls)
+	e.noteToolCalls(chat.MessageRef{ID: "ts1"}, calls, 0, true)
 
-	ref, text, ok := e.resolveTool(daemon.ToolResult{ID: "b", Name: "bash", Failed: true, Detail: "exit 1"})
+	ref, text, ok := fileResult(e, daemon.ToolResult{ID: "b", Name: "bash", Failed: true, Detail: "exit 1"})
 	if !ok {
 		t.Fatal("a result carrying a known call id found no notice")
 	}
@@ -241,38 +253,40 @@ func TestResolveToolMatchesOnCallID(t *testing.T) {
 // re-edit the notice — the content is identical and the edit is an API call.
 func TestResolveToolIgnoresADuplicateResult(t *testing.T) {
 	e := &sessionEntry{}
-	e.noteToolCalls(chat.MessageRef{ID: "ts1"}, []daemon.ToolCall{{ID: "a", Name: "bash", Arg: "make test"}})
+	e.noteToolCalls(chat.MessageRef{ID: "ts1"}, []daemon.ToolCall{{ID: "a", Name: "bash", Arg: "make test"}}, 0, true)
 
-	if _, _, ok := e.resolveTool(daemon.ToolResult{ID: "a", Name: "bash"}); !ok {
+	if _, _, ok := fileResult(e, daemon.ToolResult{ID: "a", Name: "bash"}); !ok {
 		t.Fatal("the first result found no notice")
 	}
-	if _, _, ok := e.resolveTool(daemon.ToolResult{ID: "a", Name: "bash", Failed: true, Detail: "exit 9"}); ok {
+	if _, _, ok := fileResult(e, daemon.ToolResult{ID: "a", Name: "bash", Failed: true, Detail: "exit 9"}); ok {
 		t.Fatal("a repeat of an answered result was filed again")
 	}
 }
 
-// TestResolveToolFallsBackToTheNewestUnansweredCall covers a daemon that sends
-// no call ids. The fallback can be wrong for two same-named calls in flight,
-// and the cost is a tick against the wrong line of a notice listing both —
-// which is why it is bounded to unanswered calls rather than any call.
-func TestResolveToolFallsBackToTheNewestUnansweredCall(t *testing.T) {
+// TestResolveToolFallsBackToTheOldestUnansweredCall covers a daemon that sends
+// no call ids. The fallback matches in submission order, because within a frame
+// the calls are in the order the model asked for them and a run of same-named
+// calls answered in that order is the ordinary case. Matching newest-first
+// inverted every pair: three `bash` calls answered in order each got ticked off
+// against the wrong line, so every argument shown was another call's.
+func TestResolveToolFallsBackToTheOldestUnansweredCall(t *testing.T) {
 	e := &sessionEntry{}
-	e.noteToolCalls(chat.MessageRef{ID: "ts1"}, []daemon.ToolCall{call("bash", "one"), call("bash", "two")})
+	e.noteToolCalls(chat.MessageRef{ID: "ts1"}, []daemon.ToolCall{call("bash", "one"), call("bash", "two")}, 0, true)
 
-	if _, text, ok := e.resolveTool(daemon.ToolResult{Name: "bash"}); !ok {
+	if _, text, ok := fileResult(e, daemon.ToolResult{Name: "bash"}); !ok {
 		t.Fatal("the first result found no notice")
-	} else if !strings.Contains(text, "• ✅ `bash` — two") {
-		t.Fatalf("the first result did not land on the newest call:\n%s", text)
-	}
-	// The newest is answered now, so the second result takes the older line
-	// rather than overwriting the one just filled.
-	if _, text, ok := e.resolveTool(daemon.ToolResult{Name: "bash"}); !ok {
-		t.Fatal("the second result found no notice")
 	} else if !strings.Contains(text, "• ✅ `bash` — one") {
-		t.Fatalf("the second result did not fall through to the older call:\n%s", text)
+		t.Fatalf("the first result did not land on the oldest call:\n%s", text)
+	}
+	// The oldest is answered now, so the second result takes the next line
+	// rather than overwriting the one just filled.
+	if _, text, ok := fileResult(e, daemon.ToolResult{Name: "bash"}); !ok {
+		t.Fatal("the second result found no notice")
+	} else if !strings.Contains(text, "• ✅ `bash` — two") {
+		t.Fatalf("the second result did not fall through to the next call:\n%s", text)
 	}
 	// Both are answered; a third has nowhere to go and must not overwrite.
-	if _, _, ok := e.resolveTool(daemon.ToolResult{Name: "bash"}); ok {
+	if _, _, ok := fileResult(e, daemon.ToolResult{Name: "bash"}); ok {
 		t.Fatal("a third result was filed against a fully answered notice")
 	}
 }
@@ -282,14 +296,14 @@ func TestResolveToolFallsBackToTheNewestUnansweredCall(t *testing.T) {
 // the normal state of every mode but stream.
 func TestResolveToolIgnoresWhatItIsNotWaitingFor(t *testing.T) {
 	e := &sessionEntry{}
-	if _, _, ok := e.resolveTool(daemon.ToolResult{ID: "x", Name: "bash"}); ok {
+	if _, _, ok := fileResult(e, daemon.ToolResult{ID: "x", Name: "bash"}); ok {
 		t.Fatal("a result matched against a session with no notices")
 	}
-	e.noteToolCalls(chat.MessageRef{ID: "ts1"}, []daemon.ToolCall{{ID: "a", Name: "bash"}})
-	if _, _, ok := e.resolveTool(daemon.ToolResult{Name: "read"}); ok {
+	e.noteToolCalls(chat.MessageRef{ID: "ts1"}, []daemon.ToolCall{{ID: "a", Name: "bash"}}, 0, true)
+	if _, _, ok := fileResult(e, daemon.ToolResult{Name: "read"}); ok {
 		t.Fatal("a result matched a notice that announced a different tool")
 	}
-	if _, _, ok := e.resolveTool(daemon.ToolResult{ID: "zzz", Name: "bash"}); ok {
+	if _, _, ok := fileResult(e, daemon.ToolResult{ID: "zzz", Name: "bash"}); ok {
 		t.Fatal("a result carrying an unknown id fell back on the name")
 	}
 }
@@ -299,13 +313,13 @@ func TestResolveToolIgnoresWhatItIsNotWaitingFor(t *testing.T) {
 // must still find its line.
 func TestResolveToolSearchesOlderNotices(t *testing.T) {
 	e := &sessionEntry{}
-	e.noteToolCalls(chat.MessageRef{ID: "ts1"}, []daemon.ToolCall{{ID: "slow", Name: "bash", Arg: "sleep 30"}})
-	e.noteToolCalls(chat.MessageRef{ID: "ts2"}, []daemon.ToolCall{{ID: "fast", Name: "bash", Arg: "echo hi"}})
+	e.noteToolCalls(chat.MessageRef{ID: "ts1"}, []daemon.ToolCall{{ID: "slow", Name: "bash", Arg: "sleep 30"}}, 0, true)
+	e.noteToolCalls(chat.MessageRef{ID: "ts2"}, []daemon.ToolCall{{ID: "fast", Name: "bash", Arg: "echo hi"}}, 0, true)
 
-	if ref, _, ok := e.resolveTool(daemon.ToolResult{ID: "fast", Name: "bash"}); !ok || ref.ID != "ts2" {
+	if ref, _, ok := fileResult(e, daemon.ToolResult{ID: "fast", Name: "bash"}); !ok || ref.ID != "ts2" {
 		t.Fatalf("newest result edited %q (ok=%v), want ts2", ref.ID, ok)
 	}
-	if ref, _, ok := e.resolveTool(daemon.ToolResult{ID: "slow", Name: "bash"}); !ok || ref.ID != "ts1" {
+	if ref, _, ok := fileResult(e, daemon.ToolResult{ID: "slow", Name: "bash"}); !ok || ref.ID != "ts1" {
 		t.Fatalf("older result edited %q (ok=%v), want ts1", ref.ID, ok)
 	}
 }
@@ -318,7 +332,7 @@ func TestNoticeMemoryIsBounded(t *testing.T) {
 	e := &sessionEntry{}
 	for i := range noticeMemory + extra {
 		ref := chat.MessageRef{ID: fmt.Sprintf("ts%d", i)}
-		e.noteToolCalls(ref, []daemon.ToolCall{{ID: fmt.Sprintf("c%d", i), Name: "bash"}})
+		e.noteToolCalls(ref, []daemon.ToolCall{{ID: fmt.Sprintf("c%d", i), Name: "bash"}}, 0, true)
 	}
 	e.amu.Lock()
 	n, oldest, newest := len(e.notices), e.notices[0].ref.ID, e.notices[len(e.notices)-1].ref.ID
@@ -336,22 +350,185 @@ func TestNoticeMemoryIsBounded(t *testing.T) {
 		t.Errorf("newest surviving notice = %s, want %s", newest, want)
 	}
 	// And the survivors are still addressable, not just present.
-	if ref, _, ok := e.resolveTool(daemon.ToolResult{ID: fmt.Sprintf("c%d", noticeMemory+extra-1), Name: "bash"}); !ok {
+	if ref, _, ok := fileResult(e, daemon.ToolResult{ID: fmt.Sprintf("c%d", noticeMemory+extra-1), Name: "bash"}); !ok {
 		t.Error("the newest notice survived the trim but no longer resolves")
 	} else if ref.ID != newest {
 		t.Errorf("resolved to %s, want %s", ref.ID, newest)
 	}
 }
 
-// TestForgetActivityDropsThePreviousTurn: the notices stay in the thread —
-// stream mode's trail is a record — but nothing arriving now belongs to them.
-// Without this, a result in turn two ticks a line off turn one's notice.
-func TestForgetActivityDropsThePreviousTurn(t *testing.T) {
+// TestTheTurnTransitionDropsThePreviousTurnsNotices: a notice is registered
+// only after the Send that posted it returns, while the turn transition runs on
+// the goroutine handling the next turn. So the notice lands on either side of
+// the transition, and each side needs its own guard.
+//
+// Registered first, it is in e.notices when the transition runs, and the clear
+// is what drops it. Registered after — a Send slow enough to outlive the turn
+// that made it — there is nothing to clear, and the stamp it carries is what
+// drops it. Miss either and turn two's results tick lines off turn one's
+// notice: the wrong message edited with another turn's verdicts.
+//
+// beginTurnInFlight takes both halves under one lock, so there is no third
+// case: a notice cannot land midway through the transition and slip past both.
+func TestTheTurnTransitionDropsThePreviousTurnsNotices(t *testing.T) {
+	note := func(e *sessionEntry, turn int64) {
+		e.noteToolCalls(chat.MessageRef{ID: "ts1"}, []daemon.ToolCall{{ID: "a", Name: "bash"}}, turn, true)
+	}
+	for _, tc := range []struct {
+		name string
+		run  func(e *sessionEntry, turn int64)
+	}{
+		{"the notice is registered before the transition", func(e *sessionEntry, turn int64) {
+			note(e, turn)
+			e.beginTurnInFlight()
+		}},
+		{"the notice is registered after it", func(e *sessionEntry, turn int64) {
+			e.beginTurnInFlight()
+			note(e, turn)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := &sessionEntry{}
+			tc.run(e, e.turnSeq.Load()) // the stamp postActivity read before its Send
+			if _, _, ok := fileResult(e, daemon.ToolResult{ID: "a", Name: "bash"}); ok {
+				t.Fatal("a notice from the previous turn collected this turn's results")
+			}
+		})
+	}
+}
+
+// TestResolveToolSearchesNoticesOldestFirstOnAName: the FIFO argument that
+// pending makes within one notice has to hold across notices too, or two
+// same-named calls in two frames are paired up backwards — which is what
+// searching the notices newest-first did.
+func TestResolveToolSearchesNoticesOldestFirstOnAName(t *testing.T) {
 	e := &sessionEntry{}
-	e.noteToolCalls(chat.MessageRef{ID: "ts1"}, []daemon.ToolCall{{ID: "a", Name: "bash"}})
-	e.forgetActivity()
-	if _, _, ok := e.resolveTool(daemon.ToolResult{ID: "a", Name: "bash"}); ok {
-		t.Fatal("a result was filed against the previous turn's notice")
+	e.noteToolCalls(chat.MessageRef{ID: "ts1"}, []daemon.ToolCall{call("bash", "first")}, 0, true)
+	e.noteToolCalls(chat.MessageRef{ID: "ts2"}, []daemon.ToolCall{call("bash", "second")}, 0, true)
+
+	if ref, text, ok := fileResult(e, daemon.ToolResult{Name: "bash"}); !ok || ref.ID != "ts1" {
+		t.Fatalf("the first result edited %q (ok=%v), want ts1\n%s", ref.ID, ok, text)
+	}
+	if ref, _, ok := fileResult(e, daemon.ToolResult{Name: "bash"}); !ok || ref.ID != "ts2" {
+		t.Fatalf("the second result edited %q (ok=%v), want ts2", ref.ID, ok)
+	}
+}
+
+// TestApplyToolResultsCoalescesAFrame: a frame answering several calls on one
+// notice is one edit, not one per result. Editing per result costs an API call
+// each and writes intermediate states that were already stale — the reader sees
+// the notice flicker through partial verdicts to reach the same place.
+func TestApplyToolResultsCoalescesAFrame(t *testing.T) {
+	e := &sessionEntry{}
+	e.noteToolCalls(chat.MessageRef{ID: "ts1"}, []daemon.ToolCall{
+		{ID: "a", Name: "bash", Arg: "one"},
+		{ID: "b", Name: "bash", Arg: "two"},
+	}, 0, true)
+
+	edits := e.applyToolResults([]daemon.ToolResult{
+		{ID: "a", Name: "bash"},
+		{ID: "b", Name: "bash", Failed: true, Detail: "exit 2"},
+	})
+	if len(edits) != 1 {
+		t.Fatalf("got %d edits for one notice, want 1", len(edits))
+	}
+	want := "❌ Ran 2 tools (1 failed)\n" +
+		"• ✅ `bash` — one\n" +
+		"• ❌ `bash` (exit 2) — two"
+	if edits[0].text != want {
+		t.Fatalf("the single edit is not the final state:\n%s\nwant\n%s", edits[0].text, want)
+	}
+}
+
+// TestApplyToolResultsFilesIdsBeforeGuessingByName: within one frame an id is a
+// claim on a specific line and a name is only a guess, so every id in the frame
+// is honoured before any name is. Filing in arrival order let the guess take the
+// line the claim owned: the id-carrying result then found it answered and was
+// dropped, so one call wore another's verdict and the other stayed at 🔧.
+func TestApplyToolResultsFilesIdsBeforeGuessingByName(t *testing.T) {
+	e := &sessionEntry{}
+	e.noteToolCalls(chat.MessageRef{ID: "ts1"}, []daemon.ToolCall{
+		{ID: "a", Name: "bash", Arg: "one"},
+		{ID: "b", Name: "bash", Arg: "two"},
+	}, 0, true)
+
+	// The id-less result arrives first, but "a" is spoken for.
+	edits := e.applyToolResults([]daemon.ToolResult{
+		{Name: "bash", Failed: true, Detail: "exit 7"},
+		{ID: "a", Name: "bash"},
+	})
+	if len(edits) != 1 {
+		t.Fatalf("got %d edits for one notice, want 1", len(edits))
+	}
+	want := "❌ Ran 2 tools (1 failed)\n" +
+		"• ✅ `bash` — one\n" +
+		"• ❌ `bash` (exit 7) — two"
+	if edits[0].text != want {
+		t.Fatalf("the frame was filed in arrival order, not ids first:\n%s\nwant\n%s", edits[0].text, want)
+	}
+}
+
+// TestResolveToolPrefersTheNewestNoticeHoldingARepeatedID: ids are meant to be
+// unique, and nothing switchboard can see enforces that. A daemon numbering its
+// calls per frame repeats them, and the newest notice is the one still being
+// answered — so a repeat resolves there rather than against a straggler two
+// frames back. Where ids really are unique this changes nothing.
+func TestResolveToolPrefersTheNewestNoticeHoldingARepeatedID(t *testing.T) {
+	e := &sessionEntry{}
+	e.noteToolCalls(chat.MessageRef{ID: "ts1"}, []daemon.ToolCall{{ID: "0", Name: "bash", Arg: "first"}}, 0, true)
+	e.noteToolCalls(chat.MessageRef{ID: "ts2"}, []daemon.ToolCall{{ID: "0", Name: "bash", Arg: "second"}}, 0, true)
+
+	if ref, text, ok := fileResult(e, daemon.ToolResult{ID: "0", Name: "bash"}); !ok || ref.ID != "ts2" {
+		t.Fatalf("a repeated id resolved to %q (ok=%v), want ts2\n%s", ref.ID, ok, text)
+	}
+}
+
+// TestAFailedEditHealsOnTheNextResult: a notice is re-rendered whole every
+// time, so a result whose edit never reached the platform is carried in by the
+// next one that does. This is why a failed edit leaves its result *filed*:
+// un-filing it to allow a retry would make the next render draw that call as
+// still running, and the verdict would be lost for good — and there is no
+// retry to allow, because the relay's watermark has already moved past the
+// frame that carried it.
+func TestAFailedEditHealsOnTheNextResult(t *testing.T) {
+	e := &sessionEntry{}
+	e.noteToolCalls(chat.MessageRef{ID: "ts1"}, []daemon.ToolCall{
+		{ID: "a", Name: "bash", Arg: "one"},
+		{ID: "b", Name: "bash", Arg: "two"},
+	}, 0, true)
+
+	// The edit for this one fails to reach the platform; nothing is un-filed.
+	if edits := e.applyToolResults([]daemon.ToolResult{{ID: "a", Name: "bash", Failed: true, Detail: "exit 2"}}); len(edits) != 1 {
+		t.Fatalf("got %d edits, want 1", len(edits))
+	}
+
+	_, text, ok := fileResult(e, daemon.ToolResult{ID: "b", Name: "bash"})
+	if !ok {
+		t.Fatal("the second result found no notice")
+	}
+	want := "❌ Ran 2 tools (1 failed)\n" +
+		"• ❌ `bash` (exit 2) — one\n" +
+		"• ✅ `bash` — two"
+	if text != want {
+		t.Fatalf("the lost verdict was not carried in:\n%s\nwant\n%s", text, want)
+	}
+}
+
+// TestResolveToolRerendersInTheModeItWasPostedIn. The notice records the mode
+// it was rendered in rather than assuming stream. Only stream registers a
+// notice today, so this pins the property rather than a live path: the
+// no-arguments guarantee that status and indicator make should not rest on a
+// single `if detail` at the registration site.
+func TestResolveToolRerendersInTheModeItWasPostedIn(t *testing.T) {
+	e := &sessionEntry{}
+	e.noteToolCalls(chat.MessageRef{ID: "ts1"}, []daemon.ToolCall{call("bash", "kubectl get secret x -o yaml")}, 0, false)
+
+	_, text, ok := fileResult(e, daemon.ToolResult{Name: "bash"})
+	if !ok {
+		t.Fatal("the result found no notice")
+	}
+	if strings.Contains(text, "kubectl") {
+		t.Fatalf("a terse notice re-rendered with its argument:\n%s", text)
 	}
 }
 

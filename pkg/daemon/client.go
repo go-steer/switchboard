@@ -724,7 +724,24 @@ func verdict(resp map[string]any) (failed bool, detail string) {
 	if resp == nil {
 		return false, ""
 	}
-	for _, key := range []string{"exit_code", "exitCode", "returncode", "status_code"} {
+	// An HTTP status is not an exit code: 0 is not success and 200 is not
+	// failure. Read it on its own terms, and only in the failing direction.
+	// A 4xx or 5xx settles the call, but a 2xx says only that the request
+	// arrived — the least specific signal in the object, not the most — so
+	// {"status_code": 200, "error": "connection reset"} must go on to read the
+	// error rather than stop here calling it a success.
+	// Both spellings, as with exit_code below: statusCode is what a tool built
+	// on Node reports, since that is the field name on its response object.
+	for _, key := range []string{"status_code", "statusCode"} {
+		code, ok := resp[key].(float64)
+		if !ok {
+			continue
+		}
+		if code >= 400 && code < 600 && code == float64(int(code)) {
+			return true, "HTTP " + strconv.Itoa(int(code))
+		}
+	}
+	for _, key := range []string{"exit_code", "exitCode", "returncode"} {
 		code, ok := resp[key]
 		if !ok {
 			continue
@@ -751,10 +768,7 @@ func verdict(resp map[string]any) (failed bool, detail string) {
 	}
 	for _, key := range []string{"error", "err"} {
 		v, ok := resp[key]
-		if !ok || v == nil {
-			continue
-		}
-		if s, ok := v.(string); ok && strings.TrimSpace(s) == "" {
+		if !ok || !truthy(v) {
 			continue
 		}
 		// Deliberately not the error text: it is tool-authored, unbounded, and
@@ -762,6 +776,28 @@ func verdict(resp map[string]any) (failed bool, detail string) {
 		return true, ""
 	}
 	return false, ""
+}
+
+// truthy reports whether a JSON value in an "error" field actually says an
+// error happened. A tool that reports success as `"error": false`, `"error": 0`
+// or `"error": {}` is as common as one that omits the field, and reading mere
+// presence as failure marks every one of those calls ❌.
+func truthy(v any) bool {
+	switch t := v.(type) {
+	case nil:
+		return false
+	case bool:
+		return t
+	case float64:
+		return t != 0
+	case string:
+		return strings.TrimSpace(t) != ""
+	case []any:
+		return len(t) > 0
+	case map[string]any:
+		return len(t) > 0
+	}
+	return true
 }
 
 // minExitCode and maxExitCode bound what verdict is willing to render as an
@@ -799,21 +835,23 @@ var preferredArgs = []string{"command", "cmd", "path", "file_path", "filename", 
 //   - scalars only. Nested objects and arrays are skipped rather than
 //     serialised, so the size of what can be disclosed stays bounded by one
 //     field rather than by the call.
-//   - clamped to argSummaryCap and flattened to one line, so a file body
-//     passed as an argument contributes at most its first sentence.
+//   - flattened to one line, and clamped to argSummaryCap on both sides of the
+//     redaction pass — see safeArg — so a file body passed as an argument
+//     contributes at most its first sentence.
 //   - run through redact, which knocks out the credential shapes it knows.
 //
 // That last step is a net, not a guarantee — no pattern set recognises every
 // secret, and the ones above are what keeps the blast radius of a miss to one
 // clamped field. A deployment that cannot accept even that should run
-// progress-mode status or indicator, which show tool names and no arguments.
+// progress-mode status, which names tools and shows no arguments, or
+// indicator, which shows neither.
 func summariseArg(args map[string]any) string {
 	if len(args) == 0 {
 		return ""
 	}
 	for _, key := range preferredArgs {
 		if s, ok := scalar(args[key]); ok {
-			return redact(clampArg(s))
+			return safeArg(s)
 		}
 	}
 	// No preferred key: fall back to the first scalar by name. Sorted, because
@@ -826,10 +864,35 @@ func summariseArg(args map[string]any) string {
 	slices.Sort(keys)
 	for _, k := range keys {
 		if s, ok := scalar(args[k]); ok {
-			return redact(clampArg(s))
+			return safeArg(s)
 		}
 	}
 	return ""
+}
+
+// safeArg turns one raw argument into the line that goes in a chat room:
+// clamped, redacted, and clamped again.
+//
+// The order matters in both directions. Clamping first bounds the work the
+// redaction pass does on an argument that may be a whole file body. Clamping
+// again after it is what makes argSummaryCap true: `<redacted>` is longer than
+// some of what it replaces, so redaction can *grow* a string, and a bound that
+// only holds before the growth is not a bound. A second cut can land inside a
+// `<redacted>` marker, which is ugly and still redacted — the direction the
+// tradeoff should fail in.
+//
+// The first cut is to redactWindow rather than to argSummaryCap, and it lands
+// on a word boundary, because a cut through the middle of a token destroys the
+// very shape redaction matches on: an `sk-` key truncated below its length
+// floor stops looking like a key, and its head is then published where the
+// whole thing would have been elided. Widening the window does not fix that on
+// its own — redaction *shrinks* what it matches, so three long secrets ahead of
+// the key can pull the cut back into view no matter where it was put. Keeping
+// whole tokens does fix it: a credential is one token, so it is either wholly
+// inside the window and matched, or wholly outside it and absent. Absent is
+// safe; half of one is not.
+func safeArg(s string) string {
+	return clampArg(redact(clampWords(s, redactWindow)))
 }
 
 // scalar renders a JSON value as text if it is one, and reports false for the
@@ -849,14 +912,41 @@ func scalar(v any) (string, bool) {
 	return "", false
 }
 
-// clampArg flattens an argument to one line and bounds it, cutting on a rune
-// boundary so a chat client is never handed half a rune to render.
-func clampArg(s string) string {
+// redactWindow bounds the input the redaction pass sees. An argument can be a
+// whole file body, and while RE2 is linear there is no reason to scan a
+// megabyte to produce 120 bytes. Comfortably wider than argSummaryCap so that
+// redaction, which shrinks what it matches, still has material to fill the
+// visible summary with — see safeArg.
+const redactWindow = 8 * argSummaryCap
+
+// clampArg flattens an argument to one line and bounds it to argSummaryCap.
+func clampArg(s string) string { return clamp(s, argSummaryCap) }
+
+// clampWords bounds s to roughly limit bytes without ever splitting a word,
+// running on to the end of the one the limit falls inside. That overshoot is
+// the point: this is the window redaction reads, not text anyone sees, and a
+// pattern cannot recognise a credential it has been handed half of. A single
+// token longer than the limit is returned whole, since there is no boundary to
+// stop at before it ends.
+func clampWords(s string, limit int) string {
 	s = strings.TrimSpace(strings.Join(strings.Fields(s), " "))
-	if len(s) <= argSummaryCap {
+	if len(s) <= limit {
 		return s
 	}
-	cut := argSummaryCap - 1
+	if i := strings.IndexByte(s[limit:], ' '); i >= 0 {
+		return s[:limit+i]
+	}
+	return s
+}
+
+// clamp flattens s to one line and bounds it to limit bytes, cutting on a rune
+// boundary so a chat client is never handed half a rune to render.
+func clamp(s string, limit int) string {
+	s = strings.TrimSpace(strings.Join(strings.Fields(s), " "))
+	if len(s) <= limit {
+		return s
+	}
+	cut := limit - 1
 	for cut > 0 && !utf8.RuneStart(s[cut]) {
 		cut--
 	}
@@ -869,25 +959,92 @@ func clampArg(s string) string {
 //
 // Conservative by construction — it can only ever catch what it has seen
 // before. See summariseArg for why that is accepted rather than solved here.
+// The credential words, and the two ways a name can be built around them.
+//
+// What the word may be followed by is where the false positives are decided.
+// A separator continues a credential name (AWS_SECRET_ACCESS_KEY), and so do
+// digits (SECRET1) and the plurals that are themselves credential words
+// (--secrets, "credentials":). A letter does not, which is what tells those
+// from --max_tokens (a sampling parameter), tokenizer:rename and
+// /var/log/tokens:latest — a summary that redacts ordinary commands teaches
+// people to ignore it, and this repository's own tooling is full of
+// --max-tokens. `token` is therefore the one word left unpluralised: a
+// `tokens` is nearly always a count, and reading it as a secret costs more
+// than the rare `TOKENS=` it would catch.
+//
+// What comes *before* the word is deliberately unconstrained: a credential
+// word at the tail of a longer name is still a credential name, so mytoken=
+// and accessToken: both match, and the leading text is simply left outside the
+// match and preserved.
+const (
+	credWord = `(?:api[-_]?keys?|secrets?|token|passwo?r?ds?|passwds?|credentials?)`
+	// A variable or field name: AWS_SECRET_ACCESS_KEY, github.token, TOKEN.
+	credName = `(?:[a-z0-9_.-]*[_.-])?` + credWord + `(?:[_.-][a-z0-9_.-]*|[0-9]+)?`
+	// A flag name. `auth` and `bearer` are here and not in credName because as
+	// bare words they are far too common — and even here the boundary matters:
+	// unanchored, the `auth` in curl's real `--anyauth` matched, so
+	// `--anyauth -u alice:letmein` hid the flag and left the credential.
+	credFlag = `(?:[a-z0-9-]*-)?(?:` + credWord + `|auth|bearer)(?:-[a-z0-9-]*)?`
+)
+
 var secretish = regexp.MustCompile(
-	`(?i)` +
-		// --token=xyz, PASSWORD: xyz, "api_key": "xyz"
-		`((?:api[-_]?key|secret|token|passwo?r?d|passwd|credential|auth|bearer)"?\s*[:=]\s*"?)\S+` +
+	// "api_key": "xyz" — a quoted value, ended by its own closing quote so the
+	// JSON punctuation around it survives.
+	`(?i:("?` + credName + `"?\s*[:=]\s*")[^"]*)` +
+		// TOKEN=xyz, --token=xyz — an unquoted value adjacent to the operator.
+		`|(?i:("?` + credName + `"?\s*[:=])[^\s"]+)` +
+		// password: hunter2 — an unquoted value a space after the colon.
+		`|(?i:("?` + credName + `"?\s*:\s+)\S+)` +
+		// api_key = abc, export TOKEN = abc — the same, with an operator that
+		// has space on *both* sides. Requiring the leading space is what stops
+		// an empty flag value reaching forward to take the next word:
+		// `run --token= next` became `run --token= <redacted>`, hiding an
+		// argument and redacting no secret. `--token=` has no space before its
+		// operator, so it can only ever match the adjacent form above, which
+		// needs a value hard against it.
+		`|(?i:("?` + credName + `"?\s+=\s+)\S+)` +
 		// --password xyz: the same names separated by a space rather than by an
 		// operator, but only behind a flag. Without that anchor the "auth" in
-		// `gcloud auth login` swallows the subcommand, and a summary that redacts
-		// ordinary commands teaches people to ignore it.
-		`|(--?[a-z0-9-]*(?:api[-_]?key|secret|token|passwo?r?d|passwd|credential|auth|bearer)[a-z0-9-]*\s+)\S+` +
-		// bare issued credentials: GitHub, Slack, OpenAI, AWS, Google, JWTs
-		`|\b(?:gh[pousr]_|github_pat_|xox[baprs]-|sk-|AKIA|ASIA|ya29\.|AIza|eyJ[A-Za-z0-9_-]{6})[A-Za-z0-9._\-/+]*` +
+		// `gcloud auth login` swallows the subcommand.
+		`|(?i:(--?` + credFlag + `\s+)\S+)` +
+		// Authorization: Bearer xyz — the header form, where the credential
+		// follows the scheme rather than the field name. Matching the field
+		// name instead would elide the word "Bearer" and leave the token, so
+		// `auth` is absent from the alternatives above. The length floor keeps
+		// prose ("Bearer authentication is required") out of it.
+		`|(?i:(bearer\s+)[A-Za-z0-9._\-/+=]{16,})` +
+		// Bare issued credentials: GitHub, Slack, OpenAI, AWS, Google, JWTs.
+		// Case-sensitive, deliberately: these prefixes are issued in one
+		// casing, so matching either way only adds false positives. `sk-` also
+		// carries a length floor, because an issued key is dozens of characters
+		// and `sk-` alone appears inside ordinary words — it was redacting
+		// `s3://bucket/some-sk-thing`, which destroys information and finds
+		// no secret.
+		`|\b(?:gh[pousr]_|github_pat_|xox[baprs]-|sk-[A-Za-z0-9_-]{20,}|AKIA|ASIA|ya29\.|AIza|eyJ[A-Za-z0-9_-]{6})[A-Za-z0-9._\-/+]*` +
 		// anything shaped like a PEM block header
-		`|-----BEGIN[^-]*-----`)
+		`|(?i:-----BEGIN[^-]*-----)`)
 
-// redact blanks the credential shapes secretish knows about, keeping the flag
-// or key name so the line still says what kind of thing was elided. Only one of
-// the two name groups can match at a time, so the other expands to nothing.
+// urlCreds matches a password in a URL's userinfo: postgres://user:pw@host,
+// and redis://:pw@host, where the username is empty. It is a pass of its own
+// because the trailing "@" is what distinguishes a credential from an ordinary
+// host:port, and it has to be matched to be required — RE2 has no lookahead —
+// which means putting it back afterwards.
+//
+// Having to reach forward for that "@" is why the character class is as narrow
+// as it is. The argument has already been flattened to one line, so whitespace
+// alone does not bound the search: in {"url":"http://host:8080","email":
+// "alice@example.com"} the run from the port to a perfectly ordinary email
+// address is unbroken, and a class that allowed quotes and commas ate the lot.
+// Nothing that terminates a URL in running text belongs in a userinfo field.
+var urlCreds = regexp.MustCompile(`(://[^:@/?\s"',;<>{}\[\]]*:)[^@/?\s"',;<>{}\[\]]+@`)
+
+// redact blanks the credential shapes it knows about, keeping the flag, key
+// name or scheme so the line still says what kind of thing was elided. At most
+// one of secretish's six prefix groups can match at a time — they are in
+// different alternatives — so the other five expand to nothing.
 func redact(s string) string {
-	return secretish.ReplaceAllString(s, "${1}${2}<redacted>")
+	s = urlCreds.ReplaceAllString(s, "${1}<redacted>@")
+	return secretish.ReplaceAllString(s, "${1}${2}${3}${4}${5}${6}<redacted>")
 }
 
 // protocolVersion is the attach protocol switchboard speaks. The daemon
