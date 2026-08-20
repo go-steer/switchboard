@@ -31,8 +31,24 @@ Slack half. Design rationale is in [DESIGN.md](DESIGN.md).
 
   ```sh
   go build -o /tmp/switchboard ./cmd/switchboard
-  /tmp/switchboard version   # confirms the build identity you are testing
+  /tmp/switchboard version
   ```
+
+  `version` prints the commit Go stamped into the binary, and a plain `go build`
+  from a linked `git worktree` does not stamp the commit you built: it reports
+  the enclosing checkout's HEAD if there is one and nothing at all if there is
+  not, and the output gives no sign either way. Pass the commit yourself when it
+  has to be right:
+
+  ```sh
+  go build -ldflags "-X github.com/go-steer/switchboard/internal/version.Commit=$(git rev-parse --short=8 HEAD)" \
+    -o /tmp/switchboard ./cmd/switchboard
+  ```
+
+  That costs you `built unknown` and the `, modified` dirty marker, since an
+  injected commit short-circuits the whole VCS stamp.
+  [docs/googlechat-setup.md](googlechat-setup.md) has the full account, including
+  how to put the date back.
 
 ## Create the app
 

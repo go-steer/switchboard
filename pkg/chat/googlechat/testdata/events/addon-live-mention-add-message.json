@@ -1,0 +1,89 @@
+{
+  "commonEventObject": {
+    "hostApp": "CHAT",
+    "platform": "WEB"
+  },
+  "chat": {
+    "user": {
+      "name": "users/106508980999999999999",
+      "displayName": "Ada Lovelace",
+      "avatarUrl": "https://lh3.googleusercontent.com/a/REDACTED",
+      "email": "ada@example.com",
+      "type": "HUMAN",
+      "domainId": "REDACTED"
+    },
+    "eventTime": "2026-08-18T19:47:27.977519Z",
+    "messagePayload": {
+      "space": {
+        "name": "spaces/AAQAKk9wRt4",
+        "type": "ROOM",
+        "displayName": "sre-oncall",
+        "spaceThreadingState": "THREADED_MESSAGES",
+        "spaceType": "SPACE",
+        "spaceHistoryState": "HISTORY_ON",
+        "lastActiveTime": "2026-08-18T19:47:27.251583Z",
+        "membershipCount": {
+          "joinedDirectHumanUserCount": 1
+        },
+        "customer": "customers/REDACTED",
+        "spaceUri": "https://chat.google.com/room/AAQAKk9wRt4?cls=11"
+      },
+      "message": {
+        "name": "spaces/AAQAKk9wRt4/messages/Ng5tXw3kQm8.Ng5tXw3kQm8",
+        "sender": {
+          "name": "users/106508980999999999999",
+          "displayName": "Ada Lovelace",
+          "avatarUrl": "https://lh3.googleusercontent.com/a/REDACTED",
+          "email": "ada@example.com",
+          "type": "HUMAN",
+          "domainId": "REDACTED"
+        },
+        "createTime": "2026-08-18T19:47:27.251583Z",
+        "text": "@Switchboard",
+        "annotations": [
+          {
+            "type": "USER_MENTION",
+            "startIndex": 0,
+            "length": 12,
+            "userMention": {
+              "user": {
+                "name": "users/103000000000000000001",
+                "displayName": "Switchboard",
+                "avatarUrl": "https://fonts.gstatic.com/s/i/short-term/release/googlesymbols/hub/default/48px.svg",
+                "type": "BOT"
+              },
+              "type": "ADD"
+            }
+          }
+        ],
+        "thread": {
+          "name": "spaces/AAQAKk9wRt4/threads/Ng5tXw3kQm8",
+          "retentionSettings": {
+            "state": "PERMANENT"
+          }
+        },
+        "space": {
+          "name": "spaces/AAQAKk9wRt4",
+          "type": "ROOM",
+          "displayName": "sre-oncall",
+          "spaceThreadingState": "THREADED_MESSAGES",
+          "spaceType": "SPACE",
+          "spaceHistoryState": "HISTORY_ON",
+          "lastActiveTime": "2026-08-18T19:47:27.251583Z",
+          "membershipCount": {
+            "joinedDirectHumanUserCount": 1
+          },
+          "customer": "customers/REDACTED",
+          "spaceUri": "https://chat.google.com/room/AAQAKk9wRt4?cls=11"
+        },
+        "retentionSettings": {
+          "state": "PERMANENT"
+        },
+        "messageHistoryState": "HISTORY_ON",
+        "formattedText": "@Switchboard",
+        "markupSyntax": "MARKUP_SYNTAX_CHAT"
+      },
+      "configCompleteRedirectUri": "https://chat.google.com/api/bot_config_complete?token=REDACTED"
+    }
+  }
+}

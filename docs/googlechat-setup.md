@@ -101,20 +101,34 @@ deliverable of layer C** — it is the only thing that can tell you the decoder
 was wrong.
 
 Scrub before committing. A real payload carries the sender's display name,
-email, avatar URL, and `domainId`; the space name and `spaceUri`; and a
+email, avatar URL, and `domainId`; the Workspace `customer` id; the space id,
+its `displayName` and its `spaceUri`; the message and thread ids, which are
+derived from the same base64url id and appear in `message.name` and
+`thread.name`; the client's `commonEventObject.timeZone`; and a
 `configCompleteRedirectUri` with a token in the query string. Replace each value
 with something of the same shape — `addon-live-message.json` is the worked
-example — and change nothing else: the shape is the whole point.
+example, and the fabricated ids in the corpus all follow one template so a real
+one left behind stands out — and change nothing else: the shape is the whole
+point.
 
 The flag is off by default because payloads carry message text and sender
 identity. Do not leave it on in production.
 
 Two add-on field names were transcribed from prose and appear nowhere in the
-generated client, so nothing offline could confirm them:
+generated client, so nothing offline could confirm them. Both have since been
+confirmed against captured traffic:
 
-- `chat.addedToSpacePayload.interactionAdd`. **Still unconfirmed** — it takes an
-  @mention-add into a brand-new space. If the real name differs it decodes to
-  `false`, and every such add double-posts a welcome *and* an answer.
+- `chat.addedToSpacePayload.interactionAdd`. **Confirmed** by
+  `addon-live-mention-add.json` — an @mention-add into a brand-new space really
+  does arrive with `"interactionAdd": true`, spelled exactly that way, so the
+  suppression fires rather than decoding to `false`. That was the risk this
+  bullet was written about, and it is retired. What the pair then showed is a
+  different bug: `addon-live-mention-add-message.json` is the second event Chat
+  sends for the same action, and it is a bare `@Switchboard` with no
+  `argumentText`, which the decoder ignores too. The suppression defers to a
+  follow-up that never gets answered, so an @mention-add gets no reply at all —
+  see #55. Both fixtures replay to `ignored`, which is what makes them its
+  reproduction.
 - `chat.user`. **Confirmed** by `addon-live-message.json`, along with two things
   the corpus had wrong: the actor object carries an `email`, which the generated
   `chat/v1` `User` type has no field for and therefore silently dropped (hence
@@ -140,8 +154,47 @@ generated client, so nothing offline could confirm them:
 
   ```sh
   go build -o /tmp/switchboard ./cmd/switchboard
-  /tmp/switchboard version   # confirms the build identity you are testing
+  /tmp/switchboard version
   ```
+
+  `version` prints the commit Go stamped into the binary, and a plain `go build`
+  from a **linked `git worktree`** does not stamp the commit you built. Go looks
+  for a `.git` *directory*; a worktree's `.git` is a file, so it keeps walking
+  up. Which of two things happens depends on where the worktree sits:
+
+  - Nested inside another checkout — the layout this repo's own
+    `.claude/worktrees/` uses — Go finds *that* repository and stamps **its**
+    HEAD. A real commit, from a real repository, that is not the code in front
+    of you, and nothing in the output says so. This is the dangerous one.
+  - Anywhere else (`git worktree add ../feature`) there is no `.git` directory
+    to find and Go stamps nothing: `commit none, built unknown`. Wrong, but
+    visibly wrong.
+
+  Pass the commit yourself when it has to be right:
+
+  ```sh
+  go build -ldflags "-X github.com/go-steer/switchboard/internal/version.Commit=$(git rev-parse --short=8 HEAD)" \
+    -o /tmp/switchboard ./cmd/switchboard
+  ```
+
+  An injected `Commit` short-circuits the VCS stamp entirely, so read what that
+  costs before trusting the output: the build date goes (`built unknown`) and so
+  does the `, modified` marker — the binary will name an exact commit without
+  admitting the tree had uncommitted changes, which is usually the very reason
+  you are building locally. `internal/version/version.go` is the precedence
+  rule. Add the date back with a second `-X` **inside the same quotes**:
+
+  ```sh
+  go build -ldflags "\
+    -X github.com/go-steer/switchboard/internal/version.Commit=$(git rev-parse --short=8 HEAD) \
+    -X github.com/go-steer/switchboard/internal/version.Date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    -o /tmp/switchboard ./cmd/switchboard
+  ```
+
+  Nothing restores the dirty flag; only committing does. This is the same
+  mechanism the `Dockerfile` uses, which is why the published images have never
+  had the problem — though a local `docker build` without `--build-arg COMMIT`
+  falls back to its `ARG COMMIT=none` default and lands in the same place.
 
   The published image works too (`ghcr.io/go-steer/switchboard:main`), but a
   local binary is easier to restart between demo steps, and several of them ask
@@ -298,8 +351,12 @@ In the order that shows what is new:
    piece renders its code as code: no stray backticks at the seam, which is what
    used to happen when the split landed inside a fenced block.
 7. Restart with `--googlechat-cards=off` → everything degrades to text.
-8. **@-mention the app into a new room** → the welcome card, exactly once. A
-   mention-add sends two events and only one may be answered.
+8. **@-mention the app into a new room** → **nothing, today.** A mention-add
+   sends two events, the second is a bare `@Switchboard` with no argument text,
+   and the gateway ignores both — #55. Expect silence and do not read it as a
+   broken Pub/Sub grant. An add that is *not* an interaction — from the app
+   directory rather than by mention — should still get the welcome, since only
+   `interactionAdd` suppresses it, but no capture of that path exists yet.
 
 ### Testing both dialects
 
