@@ -418,7 +418,56 @@ func TestVerdict(t *testing.T) {
 		{name: "zero exit", resp: map[string]any{"exit_code": float64(0)}},
 		{name: "camel exit", resp: map[string]any{"exitCode": float64(3)}, wantFailed: true, wantDetail: "exit 3"},
 		{name: "returncode", resp: map[string]any{"returncode": float64(1)}, wantFailed: true, wantDetail: "exit 1"},
-		{name: "status_code", resp: map[string]any{"status_code": float64(404)}, wantFailed: true, wantDetail: "exit 404"},
+		// An HTTP status is not an exit code. Reading it as one inverted every
+		// call an HTTP tool made: 200 is not a non-zero exit, it is the whole
+		// point of the request succeeding.
+		{name: "http 200 is a success", resp: map[string]any{"status_code": float64(200)}},
+		{name: "http 204 is a success", resp: map[string]any{"status_code": float64(204)}},
+		{name: "http 302 is a success", resp: map[string]any{"status_code": float64(302)}},
+		{name: "http 101 is not a failure", resp: map[string]any{"status_code": float64(101)}},
+		{name: "http 404 fails, and says so as a status", resp: map[string]any{"status_code": float64(404)}, wantFailed: true, wantDetail: "HTTP 404"},
+		{name: "http 500 fails", resp: map[string]any{"status_code": float64(500)}, wantFailed: true, wantDetail: "HTTP 500"},
+		{
+			// Both spellings, as for exit_code: statusCode is the field name
+			// on a Node response object, so a tool built on one reports its
+			// 404 that way and had it read as a success.
+			name:       "http status in camelCase",
+			resp:       map[string]any{"statusCode": float64(404)},
+			wantFailed: true,
+			wantDetail: "HTTP 404",
+		},
+		{
+			// Not in the range a status code occupies, so it is not one: fall
+			// through rather than invent a verdict for it.
+			name: "a status code out of HTTP range is ignored",
+			resp: map[string]any{"status_code": float64(0)},
+		},
+		{
+			name:       "a status code out of HTTP range defers to exit_code",
+			resp:       map[string]any{"status_code": float64(9999), "exit_code": float64(2)},
+			wantFailed: true,
+			wantDetail: "exit 2",
+		},
+		// A 2xx says the request arrived and nothing more — the least specific
+		// signal in the object. Returning success on it hid every failure a
+		// tool reported alongside a successful transport.
+		{
+			name:       "a 2xx does not overrule an error the tool reported",
+			resp:       map[string]any{"status_code": float64(200), "error": "connection reset by peer"},
+			wantFailed: true,
+		},
+		{
+			name:       "a 2xx does not overrule a non-zero exit code",
+			resp:       map[string]any{"status_code": float64(200), "exit_code": float64(1)},
+			wantFailed: true,
+			wantDetail: "exit 1",
+		},
+		{
+			name:       "a 4xx settles the call before the other keys are read",
+			resp:       map[string]any{"status_code": float64(503), "exit_code": float64(0)},
+			wantFailed: true,
+			wantDetail: "HTTP 503",
+		},
 		{
 			// A string exit code is not a number, so the exit branch declines it
 			// and the error branch has nothing to say either.
@@ -441,6 +490,15 @@ func TestVerdict(t *testing.T) {
 		{name: "err string", resp: map[string]any{"err": "boom"}, wantFailed: true},
 		{name: "null error is not a failure", resp: map[string]any{"error": nil}},
 		{name: "blank error is not a failure", resp: map[string]any{"error": "  "}},
+		// A tool that reports success as a falsy error field is as common as
+		// one that omits it. Reading mere presence as failure marked every one
+		// of those calls ❌.
+		{name: "error false is not a failure", resp: map[string]any{"error": false}},
+		{name: "error zero is not a failure", resp: map[string]any{"error": float64(0)}},
+		{name: "an empty error object is not a failure", resp: map[string]any{"error": map[string]any{}}},
+		{name: "an empty error list is not a failure", resp: map[string]any{"error": []any{}}},
+		{name: "error true is a failure", resp: map[string]any{"error": true}, wantFailed: true},
+		{name: "a populated error object is a failure", resp: map[string]any{"error": map[string]any{"code": "E1"}}, wantFailed: true},
 		{
 			// The tool answered with output and no verdict field at all. Success.
 			name: "output only",
@@ -551,6 +609,86 @@ func TestClampArgCutsOnARuneBoundary(t *testing.T) {
 	}
 }
 
+// TestSummariseArgHoldsItsBoundAfterRedaction pins the bound README and
+// summariseArg both promise. `<redacted>` is longer than some of what it
+// replaces, so redaction can grow a string: clamping only before it meant the
+// documented cap was not a cap, and an argument with several short secrets in
+// it came out longer than the one that had none.
+func TestSummariseArgHoldsItsBoundAfterRedaction(t *testing.T) {
+	// Short values under credential names: every replacement is a net gain.
+	var b strings.Builder
+	for i := 0; i < 40; i++ {
+		fmt.Fprintf(&b, "--token=%d ", i)
+	}
+	in := b.String()
+	got := summariseArg(map[string]any{"command": in})
+	if len(got) > argSummaryCap+len("…") {
+		t.Fatalf("summariseArg = %d bytes for a %d-byte argument, want at most %d\n%q",
+			len(got), len(in), argSummaryCap+len("…"), got)
+	}
+	if !utf8.ValidString(got) {
+		t.Fatalf("summariseArg produced invalid UTF-8: %q", got)
+	}
+	if !strings.Contains(got, "<redacted>") {
+		t.Fatalf("summariseArg = %q, want the secrets redacted before the cut", got)
+	}
+}
+
+// TestSummariseArgDoesNotPublishATruncatedKey. The first cut has to be wider
+// than the visible summary, because cutting can destroy the shape redaction
+// matches on: an `sk-` key truncated below its length floor stops looking like
+// a key, and clamping to argSummaryCap first published its head where the whole
+// thing would have been elided.
+func TestSummariseArgDoesNotPublishATruncatedKey(t *testing.T) {
+	key := "sk-" + strings.Repeat("K", 40)
+	got := summariseArg(map[string]any{"command": strings.Repeat("a", 100) + " " + key})
+	if strings.Contains(got, "sk-K") {
+		t.Fatalf("summariseArg published the head of a key that was cut below its floor:\n%s", got)
+	}
+}
+
+// TestRedactionWindowLeavesEnoughToFillTheSummary. With the first cut landing
+// on a word boundary, the window's width is no longer what keeps a credential
+// whole — it is what keeps the summary worth reading. Redaction shrinks what it
+// matches, so a window as narrow as the summary itself can spend the whole of
+// it on one long secret and return two words where there was a command.
+func TestRedactionWindowLeavesEnoughToFillTheSummary(t *testing.T) {
+	arg := "SECRET_ONE=" + strings.Repeat("a", 300) + " " +
+		strings.Repeat("run-a-real-command ", 12)
+	got := summariseArg(map[string]any{"command": arg})
+	if strings.Contains(got, "aaa") {
+		t.Fatalf("the secret was not redacted, so this measures nothing:\n%s", got)
+	}
+	if len(got) < argSummaryCap-10 {
+		t.Fatalf("the summary is %d bytes of a %d-byte budget; the window left nothing to say:\n%s",
+			len(got), argSummaryCap, got)
+	}
+}
+
+// TestSummariseArgDoesNotPublishAKeyStraddlingTheRedactionWindow. Widening the
+// first cut is not on its own enough, because redaction *shrinks* what it
+// matches: enough long secrets ahead of a key pull the cut back into the
+// visible summary however wide the window was made, and the same truncated head
+// is published from one boundary further out. Here three named secrets collapse
+// 900-odd bytes to 65, and the key lands astride the window.
+//
+// Cutting on a word boundary is what actually settles it — a credential is one
+// token, so it is either matched whole or absent.
+func TestSummariseArgDoesNotPublishAKeyStraddlingTheRedactionWindow(t *testing.T) {
+	filler := func(name string, n int, c string) string {
+		return name + "=" + strings.Repeat(c, n) + " "
+	}
+	arg := filler("SECRET_ONE", 300, "a") + filler("SECRET_TWO", 300, "b") +
+		filler("SECRET_TRE", 303, "c") + "sk-" + strings.Repeat("K", 48)
+	if len(arg) <= redactWindow {
+		t.Fatalf("the fixture is %d bytes, which does not reach the %d-byte window", len(arg), redactWindow)
+	}
+	got := summariseArg(map[string]any{"command": arg})
+	if strings.Contains(got, "sk-K") {
+		t.Fatalf("summariseArg published the head of a key cut by the redaction window:\n%s", got)
+	}
+}
+
 // TestRedact covers the credential shapes the net claims to catch, and records
 // that it is a net: the last case is a secret it does not recognise. That is
 // accepted, not a bug — see summariseArg.
@@ -570,19 +708,150 @@ func TestRedact(t *testing.T) {
 			want: "gcloud auth login --quiet",
 		},
 		{
-			// The value run is \S+, so trailing punctuation goes with it. Over-
-			// redaction is the safe direction for a notice.
-			name: "json field, punctuation and all",
+			// A quoted value ends at its own closing quote, so the JSON around
+			// it stays readable.
+			name: "json field",
 			in:   `{"api_key": "sk-live-xyz"}`,
-			want: `{"api_key": "<redacted>`,
+			want: `{"api_key": "<redacted>"}`,
 		},
 		{name: "env assignment", in: "SECRET=shh run", want: "SECRET=<redacted> run"},
+		{
+			// The name may sit inside a longer identifier: this is how the
+			// environment variables that hold real credentials are spelled, and
+			// requiring the keyword to be the whole name missed all of them.
+			name: "a credential word inside a longer identifier",
+			in:   "set AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMIbPx",
+			want: "set AWS_SECRET_ACCESS_KEY=<redacted>",
+		},
+		{
+			// The header form: the credential follows the scheme, not the field
+			// name. Matching "Authorization:" instead would have elided the
+			// word "Bearer" and left the token in the room.
+			name: "an authorization header",
+			in:   "curl -H 'Authorization: Bearer c2VjcmV0LXRva2VuLXY5' https://internal",
+			want: "curl -H 'Authorization: Bearer <redacted>' https://internal",
+		},
+		{
+			name: "a password in a url",
+			in:   "psql postgres://user:s3cr3t@db/app",
+			want: "psql postgres://user:<redacted>@db/app",
+		},
+		{
+			// The "@" is what makes userinfo userinfo. Without requiring it,
+			// every URL with a port read as a credential.
+			name: "a host and port is not a credential",
+			in:   "curl https://example.com:8080/path",
+			want: "curl https://example.com:8080/path",
+		},
+		{
+			// Reaching forward for that "@" has to stop at the punctuation
+			// that ends a URL in running text. The argument is already
+			// flattened to one line, so whitespace alone does not bound the
+			// search, and a class that allowed quotes and commas ran from this
+			// port all the way to an ordinary email address — eating the port,
+			// the key and the local part, and leaving invalid JSON behind.
+			name: "a url and an email address in one line",
+			in:   `{"url":"http://host:8080","email":"alice@example.com"}`,
+			want: `{"url":"http://host:8080","email":"alice@example.com"}`,
+		},
+		{
+			// An empty value must stay empty. Reaching across the space took
+			// the next word instead, hiding a flag and redacting no secret.
+			// The spaced form now needs whitespace on *both* sides of its
+			// operator, which `--token=` cannot offer.
+			name: "an empty flag value does not swallow the next flag",
+			in:   "run --token= --verbose next",
+			want: "run --token= --verbose next",
+		},
+		{
+			// The same guard, with the next token not a flag: excluding a
+			// leading "-" on the value covered only the case where it was one.
+			name: "an empty flag value does not swallow the next word",
+			in:   "run --token= next --verbose",
+			want: "run --token= next --verbose",
+		},
+		{
+			// And the inverse cost of that exclusion: a real secret is allowed
+			// to begin with "-".
+			name: "a spaced value may begin with a dash",
+			in:   "password: -abc123def",
+			want: "password: <redacted>",
+		},
+		{
+			// A plural credential word is still a credential word. The suffix
+			// rule required a separator, so `credentials` and `secrets` — the
+			// spelling GCP payloads and Compose files use — matched nothing.
+			name: "a plural credential word",
+			in:   `gcloud --credentials abcdef123456 --secrets=xyz789`,
+			want: `gcloud --credentials <redacted> --secrets=<redacted>`,
+		},
+		{
+			// Digits continue a name too: SECRET1 is not a different kind of
+			// thing from SECRET.
+			name: "a numbered credential name",
+			in:   "SECRET1=abcdef123456 TOKEN2=xyz789",
+			want: "SECRET1=<redacted> TOKEN2=<redacted>",
+		},
+		{
+			// `token` is the word left unpluralised, because a `tokens` is
+			// nearly always a count. This is the cost of that and it is meant.
+			name: "a plural token is read as a count, not a secret",
+			in:   "--max-tokens=4096 --max_tokens 512",
+			want: "--max-tokens=4096 --max_tokens 512",
+		},
+		{
+			// `sk-` needs a length floor: an issued key is dozens of characters
+			// and the bare prefix turns up inside ordinary words.
+			name: "sk- inside an ordinary word is not a key",
+			in:   "aws s3 cp s3://bucket/some-sk-thing .",
+			want: "aws s3 cp s3://bucket/some-sk-thing .",
+		},
+		{
+			name: "a real openai-shaped key",
+			in:   "export OPENAI_KEY=sk-abcdefghijklmnopqrstuvwxyz01",
+			want: "export OPENAI_KEY=<redacted>",
+		},
+		// `name: value` — the dominant shape in YAML, k8s manifests, .env dumps
+		// and `printenv | grep`, all of which reach a `command` argument.
+		{name: "a spaced colon value", in: "password: hunter2", want: "password: <redacted>"},
+		{name: "a spaced equals value", in: "api_key = abc123", want: "api_key = <redacted>"},
+		{name: "an unquoted json value", in: `{"api_key": abc123}`, want: `{"api_key": <redacted>`},
+		{
+			name: "a password in a url with no username",
+			in:   "redis://:onlypass@host:6379/0",
+			want: "redis://:<redacted>@host:6379/0",
+		},
+		{name: "a lowercase pem header", in: "-----begin rsa private key----- MII", want: "<redacted> MII"},
+		// The credential word must sit at a separator boundary. Unanchored, it
+		// matched inside any identifier containing it, and redacting ordinary
+		// commands teaches people to ignore the marker — `--max-tokens` alone
+		// would have fired on most of this repository's own tooling.
+		{name: "a sampling parameter is not a credential", in: "llm --max-tokens=512 --temp=0.2", want: "llm --max-tokens=512 --temp=0.2"},
+		{name: "an underscored sampling parameter", in: "python train.py --max_tokens=4096", want: "python train.py --max_tokens=4096"},
+		{name: "a path that ends in tokens", in: "cat /var/log/tokens:latest", want: "cat /var/log/tokens:latest"},
+		{name: "a word beginning with a credential word", in: "rg 'tokenizer:rename' src/", want: "rg 'tokenizer:rename' src/"},
+		{
+			// The worst kind of false positive: a flag hidden and the actual
+			// credential left in the room. `--anyauth` is a real curl flag.
+			name: "a flag that merely contains auth",
+			in:   "curl --anyauth -u alice:letmein https://x",
+			want: "curl --anyauth -u alice:letmein https://x",
+		},
+		{
+			// The length floor keeps prose out of the bearer alternative.
+			name: "bearer as an english word",
+			in:   "Bearer authentication is required",
+			want: "Bearer authentication is required",
+		},
 		{name: "space-separated auth flag", in: "myctl --auth s3cr3t deploy", want: "myctl --auth <redacted> deploy"},
 		{name: "space-separated bearer flag", in: "myctl --bearer opaque-value", want: "myctl --bearer <redacted>"},
 		{name: "bare github token", in: "echo ghp_abcdefghijklmnop", want: "echo <redacted>"},
 		{name: "bare slack token", in: "post xoxb-1-2-abcdef", want: "post <redacted>"},
 		{name: "bare google key", in: "AIzaSyAAAAAAAAAAAAAAA is the key", want: "<redacted> is the key"},
-		{name: "a jwt", in: "Bearer eyJhbGciOiJIUzI1NiJ9.e30.x", want: "Bearer <redacted>"},
+		// No "Bearer " prefix on purpose: with one, this passed on the bearer
+		// alternative and would have stayed green with the JWT branch deleted.
+		{name: "a bare jwt", in: "cookie=eyJhbGciOiJIUzI1NiJ9.e30.x", want: "cookie=<redacted>"},
+		{name: "a jwt with no name around it", in: "eyJhbGciOiJIUzI1NiJ9.e30.x", want: "<redacted>"},
 		{name: "pem header", in: "-----BEGIN RSA PRIVATE KEY----- MII", want: "<redacted> MII"},
 		{name: "ordinary text is untouched", in: "kubectl get pods -A", want: "kubectl get pods -A"},
 		{

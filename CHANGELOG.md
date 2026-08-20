@@ -25,8 +25,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The disclosure posture for tool arguments is written down, in the README and
   on the parse helper (#36). Arguments are untrusted, unbounded and exactly
   where a secret shows up, so `stream` shows one scalar argument per call,
-  clamped to 120 characters, flattened to one line and passed through a
-  redaction pass; `status` and `indicator` show tool names and no arguments;
+  clamped to 120 bytes and an ellipsis, flattened to one line and passed
+  through a redaction pass; `status` names tools without arguments and
+  `indicator` shows neither;
   tool output is never shown in any mode. The redaction is a net, not a
   guarantee — the other four steps are what bound a miss to one clamped field.
   Until now the seam stopped at names with nothing saying why, which read as an
@@ -50,6 +51,83 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   A tool reporting `{"exit_code": 1e300}` produced a nineteen-digit "exit …"
   from a Go conversion whose result is undefined for an out-of-range float.
   Non-zero is still a failure; only the number is dropped.
+- An HTTP tool no longer reports every successful call as a failure (#36).
+  `status_code` was in the exit-code key list, where non-zero means failure, so
+  `200` rendered ❌ with "exit 200" and a frame of them said "(3 failed)" — the
+  verdict inverted for every tool that speaks HTTP. It is now read on its own
+  terms, and only in the failing direction: 4xx and 5xx fail as "HTTP 404",
+  while anything else says the request arrived and nothing more — the least
+  specific signal in the object — so `{"status_code": 200, "error": …}` goes on
+  to read the error rather than stopping there calling it a success.
+- A falsy `error` field is no longer read as a failure (#36). `{"error": false}`,
+  `{"error": 0}` and `{"error": {}}` are how many tools report success, and
+  testing the field's presence marked all of them ❌.
+- Tool arguments hold the documented 120-byte bound (#36). Redaction ran after
+  the clamp, and `<redacted>` is longer than some of what it replaces, so a
+  120-byte argument could reach the channel at 208 — README and the parse helper
+  both promised a bound the code did not hold. Clamped on both sides now.
+- Redaction catches the shapes it names (#36). `Authorization: Bearer …`,
+  `AWS_SECRET_ACCESS_KEY=…` and a password in a URL's userinfo all went through
+  untouched: the credential words had to be the whole name and sit immediately
+  before the separator, which none of those forms do. The test suite used an
+  authorization header as its exemplar secret and passed on a different
+  alternative matching the token inside it, so the gap read as covered. A
+  credential word may now sit inside a longer name, but only at a separator
+  boundary — `AWS_SECRET_ACCESS_KEY` yes, `--max-tokens` and curl's `--anyauth`
+  no, the last of which would otherwise hide the flag and leave the credential
+  beside it. In the other direction `sk-` was matching inside ordinary words
+  (`s3://bucket/some-sk-thing`), an empty flag value reached across the space
+  and redacted the *next* flag, and a URL's `host:port` looked like userinfo.
+  A plural or numbered credential name is recognised too — `--credentials`,
+  `--secrets=`, `SECRET1=` — where requiring a separator after the word missed
+  all of them. `token` is the one word left unpluralised, because a `tokens` is
+  nearly always a count.
+- A password in a URL is matched without reaching across the line for its `@`
+  (#36). The argument is flattened to one line before redaction, so a run of
+  non-space characters can span a whole JSON object: in
+  `{"url":"http://host:8080","email":"alice@example.com"}` the search ran from
+  the port to an ordinary email address and ate the port, the key and the local
+  part, leaving invalid JSON and no secret found.
+- An argument is redacted over a wider window than it is shown in, and that
+  window never splits a word (#36). Clamping to the visible 120 bytes before
+  redacting could cut a credential below the length that makes it recognisable,
+  so an `sk-` key's head was published where the whole key would have been
+  elided — and widening the window alone did not fix it, since redaction
+  *shrinks* what it matches and enough secrets ahead of the key pull the cut
+  back into view wherever it is put. On a word boundary a credential is either
+  matched whole or absent.
+- `statusCode` is read as well as `status_code` (#36), as `exitCode` already was
+  beside `exit_code`. It is the field name on a Node response object, so a tool
+  built on one reported its 404 as a success.
+- A tool verdict survives onto a Google Chat card (#36). Cards strip the
+  notice's leading emoji because the widget's icon says the same thing — true
+  until tool notices gained verdicts, after which ✅ and ❌ were both deleted and
+  replaced by the same static gear, and a card reader could not see that a tool
+  had failed. The emoji now selects the icon.
+- A frame answering several calls on one notice is one edit, not one per result
+  (#36). Each result edited the message separately, and every edit but the last
+  wrote a state that was already stale.
+- A tool notice can no longer be registered against the wrong turn (#36). It is
+  recorded after the send that posted it returns, and the next turn clears the
+  list from another goroutine, so a slow send let the previous turn's calls
+  collect this turn's results. Notices now carry the turn they were sent in, and
+  the turn transition bumps the counter and clears the list under one lock — as
+  two steps it left a window between them that a late notice could slip through
+  whichever way round they were taken.
+- An id-less tool result matches the *oldest* unanswered call of its name, not
+  the newest (#36), across notices as well as within one. Calls go out in the
+  order the model asked for them, so answering in that order — the ordinary
+  case — meant every result was ticked off against the wrong line, and every
+  argument shown next to a verdict belonged to another call. A result carrying
+  an id switchboard has not seen no longer falls back on the name.
+- Every id in a frame is honoured before any name in it is guessed at (#36). An
+  id-less result filed first could take by name the very line an id-carrying
+  result later in the same frame owned; that one then found the line answered
+  and was dropped, so one call wore another's verdict and a second stayed at 🔧.
+- A repeated call id resolves against the newest notice holding it (#36). Ids
+  are meant to be unique and nothing here can check that, and a daemon numbering
+  its calls per frame would repeat them — in which case the frame still being
+  answered is the right one.
 - A turn that talks before it answers no longer loses its progress clock (#42).
   "Let me check the logs…" arrives as a completed model turn indistinguishable
   from the answer, and was delivered as one: placeholder deleted, clock stopped,

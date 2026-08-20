@@ -641,8 +641,21 @@ func (e *sessionEntry) beginTurnInFlight() {
 	e.failed.Store(false)
 	e.spoke.Store(false)
 	e.backstopped.Store(false)
-	e.forgetActivity()
+	// The bump and the clear are one step, under the lock noteToolCalls takes.
+	// A notice is registered only if turnSeq still matches what postActivity
+	// read before its send, and the previous turn's notices are dropped here —
+	// they are still in the thread, since stream mode's trail is a record
+	// rather than a transient, but nothing arriving now belongs to them.
+	// Taking the two halves separately leaves a window between them that
+	// neither guard covers, and the order does not close it: a late notice
+	// landing in the gap either passes a stamp that has not been bumped yet or
+	// appends behind a clear that has already run. Under one lock there is no
+	// gap, so a late notice lands wholly before the transition, where the clear
+	// drops it, or wholly after, where the stamp does.
+	e.amu.Lock()
 	e.turnSeq.Add(1)
+	e.notices = nil
+	e.amu.Unlock()
 	e.turnGen.Store(e.streamGen.Load())
 	e.inFlight.Store(true)
 }
@@ -773,18 +786,30 @@ func (e *sessionEntry) noteActivity(tools []string) (ref chat.MessageRef, text s
 // activityNote is one posted tool-activity notice: the message it went into,
 // the calls it announced, and their results as they land. res is parallel to
 // calls, nil where the result has not arrived.
+//
+// detail records the mode the notice was rendered in, so a re-render on a
+// result reproduces it rather than assuming.
 type activityNote struct {
-	ref   chat.MessageRef
-	calls []daemon.ToolCall
-	res   []*daemon.ToolResult
+	ref    chat.MessageRef
+	calls  []daemon.ToolCall
+	res    []*daemon.ToolResult
+	detail bool
 }
 
-// pending returns the index of the newest still-unanswered call of this name,
+// pending returns the index of the oldest still-unanswered call of this name,
 // or -1 for none. That is the candidate for a result carrying no id to match
 // on.
+//
+// Oldest and not newest: within one frame the calls are in the order the model
+// asked for them, and a run of same-named calls answered in that same order is
+// the ordinary case. Matching newest-first inverts every pair — three `bash`
+// calls answered in order would each be ticked off against the wrong line, so
+// the argument shown next to a verdict would be another call's. Neither
+// direction is *correct* without an id, but this one is right whenever the
+// order is preserved and wrong only when it is not.
 func (n *activityNote) pending(name string) int {
-	for i := len(n.calls) - 1; i >= 0; i-- {
-		if n.calls[i].Name == name && n.res[i] == nil {
+	for i, c := range n.calls {
+		if c.Name == name && n.res[i] == nil {
 			return i
 		}
 	}
@@ -800,13 +825,21 @@ const noticeMemory = 32
 // noteToolCalls records a posted notice so the results can find it later. The
 // calls are copied: the notice outlives the frame by up to noticeMemory more of
 // them and is read under a different lock, so it owns what it holds.
-func (e *sessionEntry) noteToolCalls(ref chat.MessageRef, calls []daemon.ToolCall) {
+//
+// turn is the turn that was current when the notice was *sent*. A newer one
+// having started since means forgetActivity has already run and this note is
+// the previous turn's, so it is dropped rather than appended behind the clear.
+func (e *sessionEntry) noteToolCalls(ref chat.MessageRef, calls []daemon.ToolCall, turn int64, detail bool) {
 	e.amu.Lock()
 	defer e.amu.Unlock()
+	if e.turnSeq.Load() != turn {
+		return
+	}
 	e.notices = append(e.notices, &activityNote{
-		ref:   ref,
-		calls: slices.Clone(calls),
-		res:   make([]*daemon.ToolResult, len(calls)),
+		ref:    ref,
+		calls:  slices.Clone(calls),
+		res:    make([]*daemon.ToolResult, len(calls)),
+		detail: detail,
 	})
 	if n := len(e.notices) - noticeMemory; n > 0 {
 		e.notices = append([]*activityNote(nil), e.notices[n:]...)
@@ -818,47 +851,98 @@ func (e *sessionEntry) noteToolCalls(ref chat.MessageRef, calls []daemon.ToolCal
 // result from before switchboard connected, one already answered, or a session
 // whose mode posts no notices at all.
 //
-// Matching is by the daemon's call id where there is one. Where there is not,
-// it falls back to the most recent unanswered call of the same name, which is
-// what a reader would assume too: results arrive in no guaranteed order, but a
-// tool that is running once is the tool that just finished. The fallback can be
-// wrong for two same-named calls in flight at once, and the cost of being wrong
-// is a tick against the wrong line of a notice that lists them both — visible,
-// bounded, and preferable to leaving every line at 🔧 forever.
-func (e *sessionEntry) resolveTool(r daemon.ToolResult) (ref chat.MessageRef, text string, ok bool) {
-	e.amu.Lock()
-	defer e.amu.Unlock()
-	for i := len(e.notices) - 1; i >= 0; i-- {
-		n := e.notices[i]
-		at := -1
-		if r.ID != "" {
+// Matching is by the daemon's call id where there is one. Those are meant to be
+// unique, in which case the order the notices are searched in cannot matter —
+// but nothing here can check that, and a daemon that numbers its calls per
+// frame ("0", "1", …) would repeat them, so the search runs newest-first. That
+// is the safe reading of a repeat: the newest notice is the one still being
+// answered. Under ids that really are unique it changes nothing.
+//
+// Without an id it falls back to the oldest unanswered call of the same name,
+// searching the notices oldest-first for the same reason pending scans its
+// calls that way: calls go out in order and are usually answered in order, so
+// searching from either end newest-first pairs them up backwards. The fallback
+// can still be wrong for two same-named calls genuinely in flight at once, and
+// the cost is a tick against the wrong line of a notice that lists them both —
+// visible, bounded, and preferable to leaving every line at 🔧 forever.
+//
+// The caller must hold amu.
+func (e *sessionEntry) resolveTool(r daemon.ToolResult) (*activityNote, bool) {
+	if r.ID != "" {
+		for i := len(e.notices) - 1; i >= 0; i-- {
+			n := e.notices[i]
 			for j, c := range n.calls {
-				if c.ID == r.ID {
-					at = j
-					break
+				if c.ID == r.ID && n.res[j] == nil {
+					res := r
+					n.res[j] = &res
+					return n, true
 				}
 			}
 		}
-		if at == -1 && r.ID == "" {
-			at = n.pending(r.Name)
-		}
-		if at == -1 || n.res[at] != nil {
-			continue
-		}
-		res := r
-		n.res[at] = &res
-		return n.ref, activityText(n.calls, n.res, true), true
+		// An id we have never seen does not fall back on the name: it belongs
+		// to a call some other notice announced, or to none.
+		return nil, false
 	}
-	return chat.MessageRef{}, "", false
+	for _, n := range e.notices {
+		if at := n.pending(r.Name); at != -1 {
+			res := r
+			n.res[at] = &res
+			return n, true
+		}
+	}
+	return nil, false
 }
 
-// forgetActivity drops the previous turn's notices. They are still in the
-// thread — stream mode's trail is a record, not a transient — but nothing that
-// arrives now belongs to them.
-func (e *sessionEntry) forgetActivity() {
+// toolEdit is one notice a batch of results changed: where to send the edit
+// and what it should now say.
+type toolEdit struct {
+	note *activityNote
+	ref  chat.MessageRef
+	text string
+}
+
+// applyToolResults files a whole frame of results and returns one edit per
+// notice touched, not one per result. A frame of three results answering the
+// same notice is one message edit carrying all three verdicts, rather than
+// three edits of which the first two show a state that was already stale when
+// it was written.
+func (e *sessionEntry) applyToolResults(results []daemon.ToolResult) []toolEdit {
 	e.amu.Lock()
-	e.notices = nil
-	e.amu.Unlock()
+	defer e.amu.Unlock()
+	var edits []toolEdit
+	file := func(r daemon.ToolResult) {
+		note, ok := e.resolveTool(r)
+		if !ok {
+			return
+		}
+		if slices.ContainsFunc(edits, func(ed toolEdit) bool { return ed.note == note }) {
+			return
+		}
+		edits = append(edits, toolEdit{note: note, ref: note.ref})
+	}
+	// Ids first, across the whole frame, before any guess by name. Filing in
+	// arrival order lets an id-less result take by name the very line an
+	// id-carrying result later in the frame owns outright; that later result
+	// then finds the line already answered and is dropped, so one call wears
+	// another's verdict and a second stays at 🔧 for good. The name fallback
+	// should only ever be offered what is genuinely left over.
+	for _, r := range results {
+		if r.ID != "" {
+			file(r)
+		}
+	}
+	for _, r := range results {
+		if r.ID == "" {
+			file(r)
+		}
+	}
+	// Rendered after every result in the frame is filed, so each notice is
+	// rendered once, in its final state.
+	for i := range edits {
+		n := edits[i].note
+		edits[i].text = activityText(n.calls, n.res, n.detail)
+	}
+	return edits
 }
 
 // tickRender composes one tick: the message to edit and the line to put in it.
@@ -1481,6 +1565,10 @@ func (r *Router) postActivity(ctx context.Context, e *sessionEntry, conv string,
 		}
 	}
 	detail := mode == ProgressStream
+	// Read before the Send, not after: the notice belongs to the turn that was
+	// running when it was posted, and Send is a network call the next turn can
+	// start underneath.
+	turn := e.turnSeq.Load()
 	ref, err := r.out.Send(ctx, chat.Reply{Conversation: conv, Text: activityText(calls, nil, detail), Kind: chat.KindActivity})
 	r.metrics.recordReply(err)
 	if err != nil {
@@ -1490,7 +1578,7 @@ func (r *Router) postActivity(ctx context.Context, e *sessionEntry, conv string,
 	if detail {
 		// Only stream mode's notices are worth remembering: they are the only
 		// ones that carry per-call state a result can tick off.
-		e.noteToolCalls(ref, calls)
+		e.noteToolCalls(ref, calls, turn, detail)
 	}
 }
 
@@ -1502,12 +1590,13 @@ func (r *Router) postActivity(ctx context.Context, e *sessionEntry, conv string,
 // A result nothing is waiting for is dropped in silence. That is the normal
 // state of every mode but stream, and of a stream that connected mid-turn.
 func (r *Router) postToolResults(ctx context.Context, e *sessionEntry, conv string, results []daemon.ToolResult) {
-	for _, res := range results {
-		ref, text, ok := e.resolveTool(res)
-		if !ok {
-			continue
-		}
-		if err := r.out.Update(ctx, ref, chat.Reply{Conversation: conv, Text: text, Kind: chat.KindActivity}); err != nil {
+	for _, ed := range e.applyToolResults(results) {
+		if err := r.out.Update(ctx, ed.ref, chat.Reply{Conversation: conv, Text: ed.text, Kind: chat.KindActivity}); err != nil {
+			// Logged and left filed. The results stay recorded against the
+			// notice, so the next result to land on it re-renders the whole
+			// thing and carries this verdict in — an edit that failed heals on
+			// the next one. Un-filing them would lose the verdict for good:
+			// that later render would draw this call as still running.
 			r.logf("relay %s: tool result: %v", conv, err)
 		}
 	}
@@ -1760,10 +1849,15 @@ func (r *Router) relay(ctx context.Context, conv string, e *sessionEntry, owner 
 					return nil
 				}
 				// Tool results ride the same event, under the "user" role the
-				// daemon gives anything the model did not author (#36).
-				if results := daemon.ToolResults(ev.Data); len(results) > 0 {
-					e.noticed.Store(reply.Seq)
-					r.postToolResults(ctx, e, conv, results)
+				// daemon gives anything the model did not author (#36). Stream
+				// mode only: it is the one mode that registers a notice for a
+				// result to tick off, so anywhere else this would be a parse
+				// and a watermark advance for a message never sent.
+				if mode == ProgressStream {
+					if results := daemon.ToolResults(ev.Data); len(results) > 0 {
+						e.noticed.Store(reply.Seq)
+						r.postToolResults(ctx, e, conv, results)
+					}
 				}
 			}
 			return nil

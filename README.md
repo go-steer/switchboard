@@ -227,17 +227,22 @@ shows them, and only like this:
 - one argument per call — never the whole object, so a token in a second field
   is not disclosed;
 - scalars only, so nested objects and arrays are skipped rather than serialised;
-- flattened to one line and clamped to 120 characters;
+- flattened to one line and clamped to 120 bytes plus an ellipsis, after
+  redaction as well as before — `<redacted>` is longer than some of what it
+  replaces, so a bound applied only beforehand is not a bound. The cut that
+  comes *first* never splits a word, because redaction cannot recognise a
+  credential it has been handed half of;
 - passed through a redaction pass for the credential shapes it recognises
-  (`--token=…`, `"api_key": …`, bare `ghp_`/`xox`/`sk-`/`AKIA`/`ya29.`/`AIza`
-  tokens, JWTs, PEM headers).
+  (`--token=…`, `--password …`, `AWS_SECRET_ACCESS_KEY=…`, `"api_key": …`,
+  `Authorization: Bearer …`, a password in a URL's userinfo, bare
+  `ghp_`/`xox`/`sk-`/`AKIA`/`ya29.`/`AIza` tokens, JWTs, PEM headers).
 
 That last step is a net, not a guarantee — no pattern set recognises every
 secret, and the steps above are what keeps the blast radius of a miss to one
 clamped field. Tool *output* is never shown in any mode: a failure renders as
 `exit 2` and nothing more. A deployment that cannot accept even a clamped
-argument in the channel should run `status` or `indicator`, which show tool
-names and no arguments at all.
+argument in the channel should run `status`, which names the tools it runs and
+shows no arguments, or `indicator`, which shows neither.
 
 Operators can override the mode **per channel** at runtime with a command — no
 restart:

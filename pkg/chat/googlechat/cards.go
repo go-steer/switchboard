@@ -100,6 +100,8 @@ const (
 const (
 	iconProgress = "hourglass_top"
 	iconActivity = "settings"
+	iconToolOK   = "check_circle"
+	iconToolFail = "cancel"
 	iconNotice   = "error"
 	iconAck      = "tune"
 	iconWelcome  = "waving_hand"
@@ -264,13 +266,31 @@ func gatewayCard(kind chat.ReplyKind, text string) *chatv1.GoogleAppsCardV1Card 
 	case chat.KindProgress:
 		return widgetCard(iconTextWidget(iconProgress, text))
 	case chat.KindActivity:
-		return widgetCard(iconTextWidget(iconActivity, text))
+		return widgetCard(iconTextWidget(activityIcon(text), text))
 	case chat.KindNotice:
 		return widgetCard(iconTextWidget(iconNotice, text))
 	case chat.KindAck:
 		return widgetCard(iconTextWidget(iconAck, text))
 	}
 	return nil
+}
+
+// activityIcon picks the material icon for a tool-activity notice from the
+// emoji the router led it with.
+//
+// iconTextWidget strips that emoji, on the reasoning that the widget's icon
+// already says what it says. That holds while every notice of a kind means the
+// same thing, and stopped holding when tool notices gained verdicts (#36): the
+// difference between ✅ and ❌ was deleted and a static gear put in its place,
+// so a card reader could not see that a tool had failed. Translate it instead.
+func activityIcon(text string) string {
+	switch {
+	case strings.HasPrefix(text, "✅"):
+		return iconToolOK
+	case strings.HasPrefix(text, "❌"):
+		return iconToolFail
+	}
+	return iconActivity
 }
 
 // welcomeCard greets a space the app was just added to. It is the one card with
