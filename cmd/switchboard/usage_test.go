@@ -224,7 +224,7 @@ func TestUsageClearedBetweenTurns(t *testing.T) {
 	e.noteTotals(daemon.UsageTotals{Model: "m", TokensIn: 150, TokensOut: 15, CostUSD: 1.5})
 	e.noteTurnComplete(daemon.TurnUsage{Latency: time.Second})
 
-	got := e.takeUsage()
+	got, _ := e.takeUsage()
 	if got == nil {
 		t.Fatal("takeUsage after noteTotals = nil")
 	}
@@ -232,14 +232,14 @@ func TestUsageClearedBetweenTurns(t *testing.T) {
 	if *got != want {
 		t.Errorf("takeUsage = %+v, want %+v", *got, want)
 	}
-	if again := e.takeUsage(); again != nil {
+	if again, _ := e.takeUsage(); again != nil {
 		t.Errorf("second takeUsage = %+v, want nil", *again)
 	}
 
 	// The next turn differences from 150, not from zero.
 	e.noteTotals(daemon.UsageTotals{Model: "m", TokensIn: 170, TokensOut: 17, CostUSD: 1.7})
 	e.noteTurnComplete(daemon.TurnUsage{Latency: time.Second})
-	second := e.takeUsage()
+	second, _ := e.takeUsage()
 	if second == nil {
 		t.Fatal("second turn banked nothing")
 	}
@@ -257,7 +257,7 @@ func TestUsageFirstReportOnlyBaselines(t *testing.T) {
 	e := &sessionEntry{}
 	e.noteTotals(daemon.UsageTotals{Model: "m", TokensIn: 500_000, TokensOut: 9_000, CostUSD: 42})
 	e.noteTurnComplete(daemon.TurnUsage{}) // release the bank, so nil means empty and not withheld
-	if got := e.takeUsage(); got != nil {
+	if got, _ := e.takeUsage(); got != nil {
 		t.Errorf("first report banked %+v, want nothing at all", *got)
 	}
 }
@@ -270,7 +270,7 @@ func TestUsageIgnoresBackwardsTotals(t *testing.T) {
 	e.noteTotals(daemon.UsageTotals{TokensIn: 100, TokensOut: 10, CostUSD: 1})
 	e.noteTotals(daemon.UsageTotals{TokensIn: 50, TokensOut: 5, CostUSD: 0.5})
 	e.noteTurnComplete(daemon.TurnUsage{Latency: time.Second})
-	got := e.takeUsage()
+	got, _ := e.takeUsage()
 	if got == nil {
 		t.Fatal("backwards totals banked nothing at all; want the latency with no counts")
 	}
@@ -281,7 +281,7 @@ func TestUsageIgnoresBackwardsTotals(t *testing.T) {
 	// differenced from 50 rather than from the stale 100.
 	e.noteTotals(daemon.UsageTotals{TokensIn: 60, TokensOut: 6, CostUSD: 0.6})
 	e.noteTurnComplete(daemon.TurnUsage{Latency: time.Second})
-	next := e.takeUsage()
+	next, _ := e.takeUsage()
 	if next == nil || next.TokensIn != 10 {
 		t.Errorf("after a backwards total the baseline did not follow the daemon: %+v", next)
 	}
@@ -296,13 +296,13 @@ func TestUsageWithheldUntilTurnComplete(t *testing.T) {
 	e := &sessionEntry{}
 	e.noteTotals(daemon.UsageTotals{Model: "m", TokensIn: 100, TokensOut: 10, CostUSD: 1})
 	e.noteTotals(daemon.UsageTotals{Model: "m", TokensIn: 150, TokensOut: 15, CostUSD: 1.5})
-	if got := e.takeUsage(); got != nil {
+	if got, _ := e.takeUsage(); got != nil {
 		t.Errorf("mid-turn takeUsage = %+v, want nil until turn-complete", *got)
 	}
 	e.noteTotals(daemon.UsageTotals{Model: "m", TokensIn: 200, TokensOut: 20, CostUSD: 2})
 	e.noteTurnComplete(daemon.TurnUsage{Latency: 2 * time.Second})
 
-	got := e.takeUsage()
+	got, _ := e.takeUsage()
 	if got == nil {
 		t.Fatal("takeUsage after turn-complete = nil")
 	}
@@ -328,7 +328,7 @@ func TestUsageFromADeadTurnIsDropped(t *testing.T) {
 	e.noteTotals(daemon.UsageTotals{Model: "m", TokensIn: 5_100, TokensOut: 510, CostUSD: 9.5})
 	e.noteTurnComplete(daemon.TurnUsage{Latency: time.Second})
 
-	got := e.takeUsage()
+	got, _ := e.takeUsage()
 	if got == nil {
 		t.Fatal("the second turn banked nothing")
 	}

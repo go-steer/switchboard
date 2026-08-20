@@ -175,13 +175,22 @@ ended — so a turn that ends without an answer freezes rather than ticking
 forever. Fifteen seconds is deliberately coarse: each tick is an API edit. A
 failed edit backs off and is never allowed to fail the turn.
 
-Two cases stop the clock early, both because switchboard retires the placeholder
-on the first message it delivers. A model that narrates before calling a tool
-("let me check…") sends that text as a message: the placeholder is cleared and
-the clock stops, even though the turn runs on. So does a second question asked
-before the first has answered — the new turn takes over the placeholder and the
-old one goes quiet. Neither case loses an answer; both lose the running clock.
-Fixing them needs a per-turn message identity the relay does not have yet.
+A model that narrates before calling a tool ("let me check…") sends that text as
+a message, which used to retire the placeholder mid-turn. It now **re-anchors**:
+the placeholder moves below the narration and keeps the same clock, because
+`turn-complete` has not arrived yet and that is what tells the answer apart from
+anything said on the way to it. This needs a daemon that advertises
+`turn-complete`, and a turn that has not outlived its SSE connection — a
+boundary lost in a stream outage cannot be told from one that never came, so
+either way the older behaviour applies and the first text ends the turn. Once a
+turn has spoken, its boundary deletes the placeholder rather than freezing it:
+the freeze exists so a silent turn leaves some trace, and a turn with text above
+it already has one.
+
+One case still stops the clock early: a second question asked before the first
+has answered. The new turn takes over the single placeholder and the old one
+goes quiet. No answer is lost, only the clock. Fixing it needs a per-turn
+message identity the relay is not given (#42).
 
 Operators can override the mode **per channel** at runtime with a command — no
 restart:

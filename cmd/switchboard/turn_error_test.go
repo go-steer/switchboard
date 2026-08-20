@@ -274,7 +274,7 @@ func TestRelayTurnErrorCarriesNoUsage(t *testing.T) {
 	if e == nil {
 		t.Fatal("no session entry")
 	}
-	if got := e.takeUsage(); got != nil {
+	if got, _ := e.takeUsage(); got != nil {
 		t.Errorf("the dead turn left %+v banked, want nothing", *got)
 	}
 }

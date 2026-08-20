@@ -15,6 +15,26 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   incidentally reproduces #55: both halves replay to `ignored`, so an
   @mention-add is answered with silence.
 
+### Fixed
+- A turn that talks before it answers no longer loses its progress clock (#42).
+  "Let me check the logs…" arrives as a completed model turn indistinguishable
+  from the answer, and was delivered as one: placeholder deleted, clock stopped,
+  turn marked done — so the long part of the turn ran with nothing in the thread
+  saying it was running, and the stream-lost notice was disarmed while it did.
+  Interim text now re-anchors the placeholder below itself and keeps counting
+  from the original start. What tells the two apart is turn-complete, so this
+  needs a daemon that advertises it; against one that does not, every text still
+  ends the turn as before. Overlapping turns in one thread are the other half of
+  #42 and are not fixed here — that needs a turn identity switchboard is not
+  given (go-steer/core-agent#840).
+- A turn boundary now clears the progress placeholder of a turn that has already
+  spoken, instead of freezing it (#42). Freezing is right for a silent turn —
+  the stopped clock is the only sign the question was heard — but wrong once
+  there is text above it, which is the state the re-anchor creates.
+- `switchboard_agent_turns_relayed_total` no longer counts interim narration as
+  a relayed turn (#42). It is still approximate against a daemon that does not
+  advertise turn-complete, where every relayed message ends a turn as before.
+
 ### Changed
 - The runbooks no longer say `switchboard version` "confirms the build identity
   you are testing" (#30). It does not, in a linked `git worktree`: Go stamps the

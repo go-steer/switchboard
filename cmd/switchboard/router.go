@@ -109,13 +109,14 @@ const (
 	// but still recovers without waiting out the whole turn.
 	progressTickMaxBackoff = 4 * time.Minute
 
-	// progressTickMaxAge stops the clock on a turn that has neither answered
-	// nor reported itself complete. turn-complete is the real boundary; this is
-	// the backstop for when it never arrives, so a daemon that loses a turn
-	// leaves a frozen message rather than a goroutine editing a channel until
-	// the process is restarted. Generous, because switchboard cannot tell a
-	// genuinely long turn from a lost one and freezing a live one is the worse
-	// mistake.
+	// progressTickMaxAge gives up on a turn that has neither answered nor
+	// reported itself complete: the clock stops, the message freezes where it
+	// got to, and the turn stops counting as in flight. turn-complete is the
+	// real boundary; this is the backstop for when it never arrives, so a
+	// daemon that loses a turn leaves a frozen message rather than a goroutine
+	// editing a channel until the process is restarted. Generous, because
+	// switchboard cannot tell a genuinely long turn from a lost one and giving
+	// up on a live one is the worse mistake.
 	progressTickMaxAge = time.Hour
 )
 
@@ -250,6 +251,48 @@ type sessionEntry struct {
 	// each time; the interesting moment is the first one.
 	described atomic.Bool
 
+	// signalsEnd says the daemon explicitly advertised turn-complete, which is
+	// what makes "this text is not the answer yet" a thing switchboard can know
+	// rather than guess. Re-read from every capabilities frame, so a reconnect
+	// onto a different daemon build is followed rather than remembered.
+	//
+	// Strictly advertised, not Missing()'s "advertised nothing, so assume the
+	// best": being wrong here means treating the final answer as narration, and
+	// a placeholder re-anchored after the last message of a turn is one that
+	// nothing will ever retire.
+	signalsEnd atomic.Bool
+
+	// streamGen counts the session's SSE connections; turnGen is the one the
+	// turn in flight started on. A turn that outlives its connection cannot
+	// trust the absence of a turn-complete to mean the turn is still running:
+	// lifecycle frames carry no seq, so a boundary emitted during the outage is
+	// simply gone, while the answer behind it is replayed from seq. Same
+	// generation means the whole turn was watched on one connection and an
+	// absent boundary is real; a mismatch falls back to ending the turn on the
+	// first text, which is what every build before #42 did.
+	streamGen atomic.Int64
+	turnGen   atomic.Int64
+
+	// turnSeq counts the turns handed to the daemon, so anything holding a
+	// timer against a turn can tell "the turn I was armed for" from "whichever
+	// turn happens to be running when I fire". Without it the hour-long
+	// backstop below would end a *later* turn — disarming that turn's
+	// stream-lost notice for a failure it had nothing to do with.
+	turnSeq atomic.Int64
+
+	// spoke says the turn in flight has already put text in the thread and was
+	// left open for more, which is the state #42's re-anchor creates. It
+	// decides what a turn boundary does with the placeholder: normally the
+	// message is frozen rather than deleted, because it is the only trace the
+	// turn happened, but once the turn has spoken that is no longer true and a
+	// stopped "⏳ Working…" sitting under the text is just litter. Reset per
+	// turn, and consumed by whichever boundary ends it.
+	//
+	// backstopped is the claim on arming that turn's backstop, so a turn that
+	// narrates five times gets one timer rather than five.
+	spoke       atomic.Bool
+	backstopped atomic.Bool
+
 	// pmu guards progressMsg, the session's current transient progress message
 	// (the indicator placeholder, or the status message being edited with tool
 	// steps). Handle posts it before waking; relay edits it on tool activity
@@ -338,6 +381,20 @@ func (e *sessionEntry) noteTurnComplete(u daemon.TurnUsage) {
 	e.settled = true
 }
 
+// markSettled records the turn's boundary without any figures to go with it,
+// for a turn-complete whose payload could not be read.
+//
+// The event *arriving* is the boundary. daemon.TurnCompleted reports !ok for a
+// frame naming neither a model nor a latency as much as for one that will not
+// parse, and deriving the boundary from that parse made an empty turn-complete
+// mean "this turn is still running" — which then reads the answer as narration
+// and re-anchors a placeholder underneath it that nothing ever retires.
+func (e *sessionEntry) markSettled() {
+	e.umu.Lock()
+	defer e.umu.Unlock()
+	e.settled = true
+}
+
 // resetUsage discards whatever is still banked as a new turn is handed to the
 // daemon. A turn that ended without an answer — an error, an interrupt (#34) —
 // leaves its numbers with nothing to attach them to, and they must not surface
@@ -351,7 +408,11 @@ func (e *sessionEntry) resetUsage() {
 }
 
 // takeUsage reads and clears the turn's accounting, returning nil unless a
-// whole conversational turn is banked.
+// whole conversational turn is banked. settled reports whether turn-complete
+// had arrived — which is to say whether the text this is being taken for is the
+// turn's answer or something it said on the way there. It is true even when the
+// figures themselves come to nothing, so a caller can tell "the turn is over
+// and cost nothing worth printing" from "the turn is still running".
 //
 // The turn-complete gate is what keeps a fraction of a turn from being
 // reported as the whole of it. Not every agent event carrying text is the
@@ -362,24 +423,24 @@ func (e *sessionEntry) resetUsage() {
 //
 // The totals baseline survives: it is the running session figure the *next*
 // turn differences against.
-func (e *sessionEntry) takeUsage() *chat.Usage {
+func (e *sessionEntry) takeUsage() (u *chat.Usage, settled bool) {
 	e.umu.Lock()
 	defer e.umu.Unlock()
 	if !e.settled {
-		return nil
+		return nil, false
 	}
-	u := e.usage
+	banked := e.usage
 	e.usage, e.settled = daemon.TurnUsage{}, false
-	if u.Empty() {
-		return nil
+	if banked.Empty() {
+		return nil, true
 	}
 	return &chat.Usage{
-		Model:     u.Model,
-		TokensIn:  u.TokensIn,
-		TokensOut: u.TokensOut,
-		CostUSD:   u.CostUSD,
-		Latency:   u.Latency,
-	}
+		Model:     banked.Model,
+		TokensIn:  banked.TokensIn,
+		TokensOut: banked.TokensOut,
+		CostUSD:   banked.CostUSD,
+		Latency:   banked.Latency,
+	}, true
 }
 
 // beginTurnInFlight marks a turn as running and clears the previous turn's
@@ -392,8 +453,34 @@ func (e *sessionEntry) takeUsage() *chat.Usage {
 // it if the inject never lands.
 func (e *sessionEntry) beginTurnInFlight() {
 	e.failed.Store(false)
+	e.spoke.Store(false)
+	e.backstopped.Store(false)
+	e.turnSeq.Add(1)
+	e.turnGen.Store(e.streamGen.Load())
 	e.inFlight.Store(true)
 }
+
+// noteSpoke records that the turn has put text in the thread and been left
+// running, and takeSpoke consumes that at the boundary that ends it.
+func (e *sessionEntry) noteSpoke()      { e.spoke.Store(true) }
+func (e *sessionEntry) takeSpoke() bool { return e.spoke.Swap(false) }
+
+// claimBackstop reports whether this caller is the one that gets to arm the
+// turn's backstop. One per turn, however often the turn speaks.
+func (e *sessionEntry) claimBackstop() bool { return e.backstopped.CompareAndSwap(false, true) }
+
+// endTurnIf concludes the turn only if it is still the turn the caller was
+// armed against, reporting whether this call is the one that did it.
+func (e *sessionEntry) endTurnIf(turn int64) bool {
+	if e.turnSeq.Load() != turn {
+		return false
+	}
+	return e.endTurn()
+}
+
+// watchedWhole reports whether the turn in flight has been on one connection
+// for its whole life, and so whether "no turn-complete yet" can be believed.
+func (e *sessionEntry) watchedWhole() bool { return e.turnGen.Load() == e.streamGen.Load() }
 
 // endTurn concludes the turn in flight, reporting whether this call is the one
 // that did it. Nobody is waiting on the daemon once this returns, so a stream
@@ -458,6 +545,26 @@ func (e *sessionEntry) beginTurn(ref chat.MessageRef, start time.Time) (stale ch
 		close(prev)
 	}
 	return stale, stop
+}
+
+// replaceProgress swaps a freshly posted placeholder in for the one the turn
+// was using, leaving the clock, the tool trail and the running ticker exactly
+// where they were: this moves the message, it does not start a turn.
+//
+// Compare-and-swap on old, because the caller had to post the replacement
+// before it could offer one, and in that window a later turn may have begun (or
+// the turn may have ended and taken its placeholder with it). Overwriting
+// blindly would leak whatever took our place — the ticker would keep writing to
+// a message no reply is going to retire. ok is false when that happened, and
+// the caller deletes what it just posted.
+func (e *sessionEntry) replaceProgress(old, fresh chat.MessageRef) bool {
+	e.pmu.Lock()
+	defer e.pmu.Unlock()
+	if old.ID == "" || e.progressMsg != old {
+		return false
+	}
+	e.progressMsg = fresh
+	return true
 }
 
 // noteActivity records the tools the agent just started — so every later tick
@@ -791,6 +898,10 @@ var reliedOnEvents = []string{
 // runs to its backstop. None of those looks like a version mismatch from the
 // outside, so the mismatch is stated here instead of left to be deduced.
 func (r *Router) noteCapabilities(conv string, e *sessionEntry, c daemon.Capabilities) {
+	// Before the log claim, not after it: this is read on every turn and has to
+	// be refreshed by every frame, while the logging below is deliberately
+	// once-per-session.
+	e.signalsEnd.Store(c.Advertises(daemon.EventTurnComplete))
 	if !e.claimCapabilitiesLog() {
 		return
 	}
@@ -868,6 +979,15 @@ func (r *Router) tick(ctx context.Context, e *sessionEntry, conv string, start t
 		case <-stop:
 			return
 		case <-deadline.C:
+			// The clock only. Whether the *turn* is still owed is not something
+			// the renderer gets to decide — that is the backstop's job, and it
+			// runs in every mode rather than only the two that have a ticker.
+			//
+			// The message stays, frozen at the age it reached. Deleting it
+			// would leave the thread showing the question and nothing else,
+			// which reads as never having been heard; a stopped clock at least
+			// says how far the turn got. The next turn in the thread clears it
+			// as stale.
 			r.logf("progress %s: no turn boundary after %s; stopping the clock", conv, formatElapsed(time.Since(start)))
 			return
 		case <-timer.C:
@@ -886,6 +1006,68 @@ func (r *Router) tick(ctx context.Context, e *sessionEntry, conv string, start t
 	}
 }
 
+// retireSpokenPlaceholder deletes the placeholder at a turn boundary, but only
+// for a turn that has already put text in the thread.
+//
+// The boundaries deliberately freeze the message rather than delete it: for a
+// turn that ended with nothing to say, a stopped "⏳ Working… 2m30s" is the
+// only record that the question was heard at all. #42's re-anchor breaks that
+// reasoning — once the turn has spoken, the thread has its record, and what the
+// freeze leaves behind is a dead clock sitting *underneath* the text. That is
+// the shape a turn takes when it narrates and then ends without an answer, or
+// when the answer itself is misread as narration because this turn's boundary
+// never came.
+//
+// No-op for a turn that never spoke, which is every turn in the common case:
+// turn-complete arrives before the answer, so the flag is still clear and the
+// placeholder survives to be retired by the answer a moment later.
+func (r *Router) retireSpokenPlaceholder(ctx context.Context, e *sessionEntry, conv string) {
+	if e.takeSpoke() {
+		r.clearProgress(ctx, e, conv)
+	}
+}
+
+// armTurnBackstop starts the one thing standing between a turn that spoke and
+// then died without a boundary frame and an entry that claims to be working for
+// the rest of the process's life, announcing a lost turn at the next unrelated
+// outage.
+//
+// Only #42's re-anchor needs it. Every other path out of deliverText ends the
+// turn on the spot; this is the one that deliberately leaves it running on the
+// strength of an absent turn-complete, and an absence is exactly the kind of
+// evidence that can turn out to be wrong — core-agent's cost-ceiling and
+// watchdog pre-flights emit no frame at all. It is armed here rather than
+// alongside the ticker because two of the four progress modes have no ticker,
+// and the turn is in flight in all four.
+//
+// The timer is held against the turn it was armed for, not against the entry:
+// a later turn that is legitimately running must not be ended by an hour-old
+// timer belonging to the turn before it.
+func (r *Router) armTurnBackstop(ctx context.Context, e *sessionEntry, conv string) {
+	if !e.claimBackstop() {
+		return
+	}
+	maxAge := r.tickMaxAge
+	if maxAge <= 0 {
+		maxAge = progressTickMaxAge
+	}
+	turn := e.turnSeq.Load()
+	go func() {
+		timer := time.NewTimer(maxAge)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+		}
+		if !e.endTurnIf(turn) {
+			return // the turn ended on its own, or a later one replaced it
+		}
+		r.logf("relay %s: no turn boundary after %s; giving the turn up", conv, formatElapsed(maxAge))
+		e.stopTicker()
+	}()
+}
+
 // clearProgress deletes and forgets the entry's outstanding progress message,
 // if any. Called before a reply is relayed so the transient message gives way
 // to the answer. No-op when none is outstanding.
@@ -897,19 +1079,42 @@ func (r *Router) clearProgress(ctx context.Context, e *sessionEntry, conv string
 	}
 }
 
-// deliverText relays a completed model turn: retire the transient progress
-// message (a no-op unless indicator/status mode left one) and post the turn as
-// its own message. Shared by every mode, so a long answer is chunked by the
-// adapter rather than squeezed into an in-place edit. The turn's accounting is
-// taken (and cleared) here whether or not the footer is enabled, so a session
-// that runs with it off never accumulates stale numbers.
+// deliverText relays a model turn's text: retire the transient progress message
+// (a no-op unless indicator/status mode left one) and post the turn as its own
+// message. Shared by every mode, so a long answer is chunked by the adapter
+// rather than squeezed into an in-place edit. The turn's accounting is taken
+// (and cleared) here whether or not the footer is enabled, so a session that
+// runs with it off never accumulates stale numbers.
+//
+// Not every relayed text is the answer. A model turn that narrates before
+// reaching for a tool ("let me check the logs…") arrives as a completed,
+// non-partial agent event indistinguishable from a final answer except for one
+// thing: turn-complete has not landed yet. Treating narration as the end of the
+// turn is the first half of #42 — it deleted the placeholder, stopped the
+// clock and disarmed the stream-lost notice, so the rest of a turn that had
+// only just begun ran with no sign it was running at all. So the two are told
+// apart, and narration re-anchors the placeholder below itself instead of
+// retiring it.
+//
+// Two conditions have to hold before text is read as anything but the end of
+// the turn, and both are about whether the absence of a turn-complete means
+// anything. The daemon must say it sends the frame — an older one gives no way
+// to draw the distinction at all. And the turn must have spent its whole life
+// on one connection: lifecycle frames carry no seq, so a boundary emitted
+// during a stream outage is gone for good while the answer behind it is
+// replayed from seq, and believing that absence would strand a live clock under
+// a delivered answer. Failing either, every text ends the turn, as it did
+// before #42.
 func (r *Router) deliverText(ctx context.Context, e *sessionEntry, conv, text string) {
-	// An answer concludes the turn: whatever the stream does next, nobody is
-	// left waiting on it.
-	e.endTurn()
-	r.clearProgress(ctx, e, conv)
-	r.metrics.recordTurnRelayed()
-	usage := e.takeUsage()
+	usage, settled := e.takeUsage()
+	final := settled || !e.signalsEnd.Load() || !e.watchedWhole()
+	if final {
+		// An answer concludes the turn: whatever the stream does next, nobody
+		// is left waiting on it.
+		e.endTurn()
+		r.clearProgress(ctx, e, conv)
+		r.metrics.recordTurnRelayed()
+	}
 	if !r.showUsage {
 		usage = nil
 	}
@@ -918,6 +1123,63 @@ func (r *Router) deliverText(ctx context.Context, e *sessionEntry, conv, text st
 	if err != nil {
 		// A failed post should not tear down the stream; log and keep relaying.
 		r.logf("relay %s: send: %v", conv, err)
+	}
+	if final {
+		return
+	}
+	// The turn was left running on the strength of a boundary that has not
+	// arrived; make sure something ends it if it never does.
+	r.armTurnBackstop(ctx, e, conv)
+	// The rest only once the narration is actually in the thread. A re-anchor
+	// exists to put the clock back underneath something; if nothing was posted
+	// there is nothing to get under, and moving the placeholder would spend two
+	// API calls to change nothing — or, on a failed delete, leave a duplicate.
+	if err != nil {
+		return
+	}
+	// Recorded before the re-anchor, not after: what it buys is the boundary's
+	// permission to delete the placeholder instead of freezing it, and the
+	// boundary can land while the re-anchor's own Send is still in the air.
+	e.noteSpoke()
+	r.reanchorProgress(ctx, e, conv)
+}
+
+// reanchorProgress moves the turn's placeholder to the bottom of the thread
+// after something else has been posted below it, so the clock stays where a
+// reader is looking. The turn is untouched: same start time, same tool trail,
+// same ticker still running against it.
+//
+// Post first, then swap, then delete. The other order — delete then post —
+// leaves the turn with no placeholder at all if the post fails, and the failure
+// mode of this one is a duplicate for as long as the delete takes rather than a
+// clock that vanishes mid-turn. On a platform that cannot delete at all the
+// duplicate is permanent, and one per narration rather than one per turn: both
+// shipped adapters implement Delete, so that is a note for the next one.
+func (r *Router) reanchorProgress(ctx context.Context, e *sessionEntry, conv string) {
+	mode := r.progressFor(e.channel)
+	if mode != ProgressIndicator && mode != ProgressStatus {
+		return // stream and off never posted one
+	}
+	old, text, ok := e.tickRender(mode)
+	if !ok {
+		return // no placeholder outstanding: nothing to move
+	}
+	fresh, err := r.out.Send(ctx, chat.Reply{Conversation: conv, Text: text, Kind: chat.KindProgress})
+	r.metrics.recordReply(err)
+	if err != nil {
+		r.logf("progress %s: re-anchor: %v", conv, err)
+		return // the old one is still live and still ticking
+	}
+	if !e.replaceProgress(old, fresh) {
+		// A later turn claimed the slot while this was in the air. Ours is
+		// nobody's, so take it back out rather than leave an orphan ticking.
+		if derr := r.out.Delete(ctx, fresh); derr != nil {
+			r.logf("progress %s: drop orphaned re-anchor: %v", conv, derr)
+		}
+		return
+	}
+	if derr := r.out.Delete(ctx, old); derr != nil {
+		r.logf("progress %s: clear re-anchored: %v", conv, derr)
 	}
 }
 
@@ -1016,7 +1278,10 @@ func (r *Router) relay(ctx context.Context, conv string, e *sessionEntry, owner 
 		// stream outage comes back to an idle snapshot this flag discards, so
 		// the entry stays in flight until something else ends it. That is
 		// exactly what a turn-complete lost in the same gap already does today —
-		// not fixed here, not made worse. Erring the other way is worse: it
+		// not fixed here, and not made worse by #42's re-anchor either, which
+		// declines to read anything into a missing boundary once the turn has
+		// outlived the connection (sessionEntry.watchedWhole). Erring the other
+		// way is worse: it
 		// retires a live turn's placeholder and disarms the stream-lost notice
 		// meant to cover the outage. Telling the two apart needs a per-turn
 		// identity, which is #42.
@@ -1037,8 +1302,17 @@ func (r *Router) relay(ctx context.Context, conv string, e *sessionEntry, owner 
 				}
 				return nil
 			case daemon.EventTurnComplete:
+				// The boundary is the event, not its contents: a frame that
+				// carries nothing legible still ends the turn everywhere the
+				// turn's end is consulted.
 				if u, ok := daemon.TurnCompleted(ev.Data); ok {
 					e.noteTurnComplete(u)
+				} else {
+					e.markSettled()
+					// Not necessarily malformed: TurnCompleted also reports
+					// !ok for a frame naming neither a model nor a latency,
+					// which costs the footer a field and nothing else.
+					r.logf("relay %s: turn-complete carried nothing readable: %s", conv, ev.Data)
 				}
 				// The daemon's own turn boundary, and the only one that
 				// arrives when a turn ends without an answer to deliver.
@@ -1049,6 +1323,7 @@ func (r *Router) relay(ctx context.Context, conv string, e *sessionEntry, owner 
 				// when that turn made tool calls (confirmed live), so a
 				// tool-using turn is not cut short.
 				e.stopTicker()
+				r.retireSpokenPlaceholder(ctx, e, conv)
 				// Nobody is waiting on the daemon any more, whether or not
 				// this turn had anything to say. Without this, a turn that
 				// ended with no relayable text — interrupted, empty, or an
@@ -1141,6 +1416,7 @@ func (r *Router) relay(ctx context.Context, conv string, e *sessionEntry, owner 
 					// is #42.
 					e.stopTicker()
 					e.endTurn()
+					r.retireSpokenPlaceholder(ctx, e, conv)
 				}
 				return nil
 			}
@@ -1186,6 +1462,11 @@ func (r *Router) relay(ctx context.Context, conv string, e *sessionEntry, owner 
 			backoff = r.minBackoff
 		}
 		r.metrics.recordReconnect()
+		// Past this point any turn still in flight has outlived the connection
+		// that was watching it, and the boundary frames it may have emitted in
+		// the meantime are unrecoverable — they carry no seq, so the resume
+		// replays the answer without them. See deliverText.
+		e.streamGen.Add(1)
 		r.logf("relay %s: stream ended (%v); resuming from seq %d in %s", conv, err, e.seq.Load(), backoff)
 		// A stream that has carried nothing past the grace period, with a turn
 		// still waiting on it, is the one failure the daemon cannot announce —
