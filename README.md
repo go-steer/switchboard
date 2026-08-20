@@ -44,7 +44,8 @@ switchboard serve --daemon-url http://127.0.0.1:7777
 # @-mention the bot in a Slack thread to drive a session; replies land in-thread.
 # --caller-id id  asserts the raw Slack user ID instead of the resolved email.
 
-# Build identity
+# Version, and the commit Go stamped in — which is not always the commit you
+# built: see docs/googlechat-setup.md if you build from a linked git worktree.
 switchboard version
 ```
 

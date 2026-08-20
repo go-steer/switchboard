@@ -43,12 +43,23 @@ import (
 // keeping too — "ignored" is a result, and a future change that starts
 // answering a bot's own message shows up as a diff.
 //
+// Two of them are a pair, and are only legible together: addon-live-mention-add
+// and addon-live-mention-add-message are the two events Chat sends for one
+// @mention-add into a space. Both replay to "ignored", which is the bug in #55 —
+// the added-to-space event defers to the message event, and the message is a
+// bare mention the decoder drops, so the add gets no reply at all. They are here
+// as its reproduction; when it is fixed, exactly these two goldens change.
+//
 // Fixtures named *-live-* are captured traffic rather than hand-written, kept
 // under their own prefix so the provenance stays visible. Scrub before
 // committing: a real payload carries the sender's name, address, avatar URL,
-// domain, space IDs, and a configCompleteRedirectUri bearing a token. Replace
-// them, keeping each value's shape, and leave everything else exactly as Chat
-// sent it — the shape is the whole point of the fixture.
+// domain and Workspace customer id, the space id, display name and spaceUri,
+// message and thread ids, the client's timeZone, and a
+// configCompleteRedirectUri bearing a token. docs/googlechat-setup.md has the
+// checklist and the id template. Replace them, keeping each value's shape, and
+// leave everything else exactly as Chat sent it — the shape is the whole point
+// of the fixture. Space ids also appear bare, without the "spaces/" prefix,
+// inside spaceUri; grep for both.
 
 // replayResult is the observable outcome of one event: what reached the router
 // and what the gateway sent back.

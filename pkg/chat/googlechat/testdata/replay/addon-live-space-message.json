@@ -1,0 +1,11 @@
+{
+  "kind": "message",
+  "turns": [
+    {
+      "conversation": "spaces/AAQAKk9wRt4:spaces/AAQAKk9wRt4/threads/Tb7pYs1nFv2",
+      "channel": "spaces/AAQAKk9wRt4",
+      "caller": "ada@example.com",
+      "text": "how are you?"
+    }
+  ]
+}

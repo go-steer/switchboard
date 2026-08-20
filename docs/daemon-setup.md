@@ -94,7 +94,7 @@ core-agent decide. Its accepted values are core-agent's, not switchboard's
 | Value | Provider |
 |-------|----------|
 | `gemini` | Gemini API direct (`GOOGLE_API_KEY` / `GEMINI_API_KEY`) |
-| `vertex` | Gemini on Vertex (project + location, or `GOOGLE_CLOUD_PROJECT` / `GOOGLE_CLOUD_LOCATION`) |
+| `vertex` | Gemini on Vertex (project + location, or `GOOGLE_CLOUD_PROJECT` / `GOOGLE_CLOUD_LOCATION` — see the location trap below) |
 | `anthropic` | `api.anthropic.com` (`ANTHROPIC_API_KEY`) |
 | `anthropic-vertex` | Claude on Vertex |
 | `echo` | no credentials; echoes the prompt back |
@@ -102,6 +102,16 @@ core-agent decide. Its accepted values are core-agent's, not switchboard's
 
 Omitting `--provider` entirely is a real option: core-agent auto-detects from
 the environment, and says which signals it looked for if it cannot.
+
+**`vertex` and the location trap.** Observed here on 2026-08-19, running the
+demo rig against project `gke-demos-345619`: `gemini-3.7-flash` returned 404
+with `GOOGLE_CLOUD_LOCATION=us-central1` and answered normally with `global`.
+That is one model in one project on one day, not a documented rule — the
+authority is the model's own availability list, which is where to check before
+pinning a region. It is written down because of how the failure reads: a 404
+from a model name you know exists looks like a typo or a missing API
+enablement, so the location is the last thing you suspect. If a model 404s,
+try `global` before you go looking for anything else.
 
 ## What keeps this honest
 

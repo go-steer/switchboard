@@ -1,0 +1,35 @@
+{
+  "commonEventObject": {
+    "hostApp": "CHAT",
+    "platform": "WEB"
+  },
+  "chat": {
+    "user": {
+      "name": "users/106508980999999999999",
+      "displayName": "Ada Lovelace",
+      "avatarUrl": "https://lh3.googleusercontent.com/a/REDACTED",
+      "email": "ada@example.com",
+      "type": "HUMAN",
+      "domainId": "REDACTED"
+    },
+    "eventTime": "2026-08-18T19:47:27.674220Z",
+    "addedToSpacePayload": {
+      "space": {
+        "name": "spaces/AAQAKk9wRt4",
+        "type": "ROOM",
+        "displayName": "sre-oncall",
+        "spaceThreadingState": "THREADED_MESSAGES",
+        "spaceType": "SPACE",
+        "spaceHistoryState": "HISTORY_ON",
+        "lastActiveTime": "2026-08-18T19:47:27.251583Z",
+        "membershipCount": {
+          "joinedDirectHumanUserCount": 1
+        },
+        "customer": "customers/REDACTED",
+        "spaceUri": "https://chat.google.com/room/AAQAKk9wRt4?cls=11"
+      },
+      "interactionAdd": true,
+      "configCompleteRedirectUri": "https://chat.google.com/api/bot_config_complete?token=REDACTED"
+    }
+  }
+}

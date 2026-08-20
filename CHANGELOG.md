@@ -6,7 +6,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- Three scrubbed payloads from the live Google Chat run join the replay corpus:
+  the two events an @mention-add sends, and a space message carrying the
+  `USER_MENTION` annotation that no captured DM could have (#30). The add pair
+  confirms `chat.addedToSpacePayload.interactionAdd` — the last add-on field
+  name still transcribed from prose rather than read off the wire — and
+  incidentally reproduces #55: both halves replay to `ignored`, so an
+  @mention-add is answered with silence.
+
 ### Changed
+- The runbooks no longer say `switchboard version` "confirms the build identity
+  you are testing" (#30). It does not, in a linked `git worktree`: Go stamps the
+  enclosing checkout's HEAD, and the output gives no sign. Both setup docs now
+  show the `-ldflags` build that is actually trustworthy.
+- `docs/daemon-setup.md` records a Vertex 404 worth recognising (#30):
+  `gemini-3.7-flash` 404d on `us-central1` and answered on
+  `GOOGLE_CLOUD_LOCATION=global`. One model, one project, one day — noted
+  because the symptom reads as a typo or a missing enablement rather than as a
+  routing choice.
 - `internal/version.Version` is `v0.2.0-dev`, so a build off main no longer
   claims to be the release that just shipped (#43). `verify-version-fallback`
   has demanded this since the `v0.1.0` tag was pushed — the window between the

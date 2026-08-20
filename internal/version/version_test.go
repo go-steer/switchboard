@@ -260,9 +260,11 @@ func TestInstalledBinaryIsDistinguishableFromADevTree(t *testing.T) {
 		t.Errorf("installed build reports %q, want the release version", installed)
 	}
 	// Both developer builds keep the marker that says they are nobody's
-	// release. This is what the docs tell a developer to check —
-	// docs/slack-setup.md and docs/googlechat-setup.md both say to run
-	// `go build ... && switchboard version` to confirm what is running.
+	// release. That marker is the part of `switchboard version` a developer can
+	// rely on: the setup runbooks warn that the *commit* beside it can name a
+	// different repository entirely when the build ran in a linked worktree,
+	// but `-dev` comes from this package rather than from the VCS stamp, so it
+	// survives every case the docs describe.
 	for name, got := range map[string]string{"go build": built, "go run": ran} {
 		if !strings.Contains(got, devVersion) {
 			t.Errorf("%s reports %q, want the %s marker", name, got, devVersion)
