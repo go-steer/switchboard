@@ -21,8 +21,10 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func newTestClient(t *testing.T, h http.HandlerFunc) *Client {
@@ -295,22 +297,32 @@ func TestToolCalls(t *testing.T) {
 	cases := []struct {
 		name string
 		data string
-		want []string
+		want []ToolCall
 	}{
 		{
 			name: "single tool call",
 			data: `{"seq":13,"event":{"Content":{"parts":[{"functionCall":{"name":"lookup"}}],"role":"model"}}}`,
-			want: []string{"lookup"},
+			want: []ToolCall{{Name: "lookup"}},
 		},
 		{
 			name: "multiple tool calls in order",
 			data: `{"seq":14,"event":{"Content":{"parts":[{"functionCall":{"name":"a"}},{"functionCall":{"name":"b"}}],"role":"model"}}}`,
-			want: []string{"a", "b"},
+			want: []ToolCall{{Name: "a"}, {Name: "b"}},
 		},
 		{
 			name: "text mixed with a tool call yields only the call",
 			data: `{"seq":15,"event":{"Content":{"parts":[{"text":"let me check"},{"functionCall":{"name":"lookup"}}],"role":"model"}}}`,
-			want: []string{"lookup"},
+			want: []ToolCall{{Name: "lookup"}},
+		},
+		{
+			name: "id and argument summary come through",
+			data: `{"seq":16,"event":{"Content":{"parts":[{"functionCall":{"id":"c1","name":"bash","args":{"command":"kubectl get pods -A"}}}],"role":"model"}}}`,
+			want: []ToolCall{{ID: "c1", Name: "bash", Arg: "kubectl get pods -A"}},
+		},
+		{
+			name: "a call with no name is skipped",
+			data: `{"seq":17,"event":{"Content":{"parts":[{"functionCall":{"id":"c1"}},{"functionCall":{"name":"b"}}],"role":"model"}}}`,
+			want: []ToolCall{{Name: "b"}},
 		},
 		{
 			name: "plain model text has no tool calls",
@@ -330,14 +342,262 @@ func TestToolCalls(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := ToolCalls(tc.data)
-			if len(got) != len(tc.want) {
-				t.Fatalf("ToolCalls = %v, want %v", got, tc.want)
+			if got := ToolCalls(tc.data); !slices.Equal(got, tc.want) {
+				t.Fatalf("ToolCalls = %+v, want %+v", got, tc.want)
 			}
-			for i := range got {
-				if got[i] != tc.want[i] {
-					t.Fatalf("ToolCalls = %v, want %v", got, tc.want)
-				}
+		})
+	}
+}
+
+// TestToolResults pins the half of the wire the gateway was blind to. The
+// role filter that ToolCalls needs is exactly what kept results invisible:
+// they are authored by the tool and the daemon labels the event "user".
+func TestToolResults(t *testing.T) {
+	cases := []struct {
+		name string
+		data string
+		want []ToolResult
+	}{
+		{
+			name: "a user-authored result is read, not filtered out",
+			data: `{"seq":20,"event":{"Content":{"parts":[{"functionResponse":{"id":"c1","name":"bash","response":{"exit_code":0}}}],"role":"user"}}}`,
+			want: []ToolResult{{ID: "c1", Name: "bash"}},
+		},
+		{
+			name: "a non-zero exit is a failure with its code",
+			data: `{"seq":21,"event":{"Content":{"parts":[{"functionResponse":{"id":"c2","name":"bash","response":{"exit_code":2}}}],"role":"user"}}}`,
+			want: []ToolResult{{ID: "c2", Name: "bash", Failed: true, Detail: "exit 2"}},
+		},
+		{
+			name: "an error field is a failure with no detail",
+			data: `{"seq":22,"event":{"Content":{"parts":[{"functionResponse":{"name":"read","response":{"error":"no such file /etc/shadow-backup"}}}],"role":"user"}}}`,
+			want: []ToolResult{{Name: "read", Failed: true}},
+		},
+		{
+			name: "an unrecognised response shape is a success",
+			data: `{"seq":23,"event":{"Content":{"parts":[{"functionResponse":{"name":"read","response":{"content":"hello"}}}],"role":"user"}}}`,
+			want: []ToolResult{{Name: "read"}},
+		},
+		{
+			name: "several results in one frame stay in order",
+			data: `{"seq":24,"event":{"Content":{"parts":[{"functionResponse":{"id":"a","name":"x","response":{}}},{"functionResponse":{"id":"b","name":"y","response":{"exit_code":1}}}],"role":"user"}}}`,
+			want: []ToolResult{{ID: "a", Name: "x"}, {ID: "b", Name: "y", Failed: true, Detail: "exit 1"}},
+		},
+		{
+			name: "a call is not a result",
+			data: `{"seq":25,"event":{"Content":{"parts":[{"functionCall":{"name":"bash"}}],"role":"model"}}}`,
+			want: nil,
+		},
+		{
+			name: "malformed json",
+			data: `not json`,
+			want: nil,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ToolResults(tc.data); !slices.Equal(got, tc.want) {
+				t.Fatalf("ToolResults = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestVerdict covers the response shapes verdict claims to read, and — more to
+// the point — that everything else is called a success. Guessing failure from
+// an unrecognised shape would put a red cross against calls that worked.
+func TestVerdict(t *testing.T) {
+	cases := []struct {
+		name       string
+		resp       map[string]any
+		wantFailed bool
+		wantDetail string
+	}{
+		{name: "nil response", resp: nil},
+		{name: "empty response", resp: map[string]any{}},
+		{name: "zero exit", resp: map[string]any{"exit_code": float64(0)}},
+		{name: "camel exit", resp: map[string]any{"exitCode": float64(3)}, wantFailed: true, wantDetail: "exit 3"},
+		{name: "returncode", resp: map[string]any{"returncode": float64(1)}, wantFailed: true, wantDetail: "exit 1"},
+		{name: "status_code", resp: map[string]any{"status_code": float64(404)}, wantFailed: true, wantDetail: "exit 404"},
+		{
+			// A string exit code is not a number, so the exit branch declines it
+			// and the error branch has nothing to say either.
+			name: "non-numeric exit code is not read",
+			resp: map[string]any{"exit_code": "0"},
+		},
+		{
+			// Non-zero is a failure whatever the number, but the number itself
+			// is tool-authored and goes into a chat room, so an implausible one
+			// is reported without detail. int() on an out-of-range float64 is
+			// not defined in Go either.
+			name:       "an absurd exit code fails with no detail",
+			resp:       map[string]any{"exit_code": 1234567890123456789.0},
+			wantFailed: true,
+		},
+		{name: "an out-of-range exit code fails with no detail", resp: map[string]any{"exit_code": 1e300}, wantFailed: true},
+		{name: "a fractional exit code fails with no detail", resp: map[string]any{"exit_code": 2.5}, wantFailed: true},
+		{name: "a negative exit code is a signal, and renders", resp: map[string]any{"exit_code": float64(-9)}, wantFailed: true, wantDetail: "exit -9"},
+		{name: "error string", resp: map[string]any{"error": "boom"}, wantFailed: true},
+		{name: "err string", resp: map[string]any{"err": "boom"}, wantFailed: true},
+		{name: "null error is not a failure", resp: map[string]any{"error": nil}},
+		{name: "blank error is not a failure", resp: map[string]any{"error": "  "}},
+		{
+			// The tool answered with output and no verdict field at all. Success.
+			name: "output only",
+			resp: map[string]any{"stdout": "hello", "duration_ms": float64(12)},
+		},
+		{
+			// exit_code wins: a tool that reports both is reporting the code.
+			name:       "exit code is read before the error field",
+			resp:       map[string]any{"exit_code": float64(0), "error": "warning: deprecated"},
+			wantFailed: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			failed, detail := verdict(tc.resp)
+			if failed != tc.wantFailed || detail != tc.wantDetail {
+				t.Fatalf("verdict = (%v, %q), want (%v, %q)", failed, detail, tc.wantFailed, tc.wantDetail)
+			}
+		})
+	}
+}
+
+// TestSummariseArg pins the disclosure decision: one argument, scalars only,
+// clamped, redacted, and stable across replays.
+func TestSummariseArg(t *testing.T) {
+	cases := []struct {
+		name string
+		args map[string]any
+		want string
+	}{
+		{name: "no arguments", args: nil, want: ""},
+		{
+			name: "the preferred key wins over an alphabetically earlier one",
+			args: map[string]any{"command": "ls -l", "background": "true"},
+			want: "ls -l",
+		},
+		{
+			name: "preference order decides between two preferred keys",
+			args: map[string]any{"path": "/etc/hosts", "command": "cat"},
+			want: "cat",
+		},
+		{
+			name: "no preferred key falls back to the first scalar by name",
+			args: map[string]any{"zebra": "z", "alpha": "a"},
+			want: "a",
+		},
+		{
+			// Sorted fallback, not map order: a notice that renders a different
+			// argument on every reconnect replay is worse than one that renders
+			// none.
+			name: "the fallback skips composites to reach a scalar",
+			args: map[string]any{"aaa": []any{1, 2}, "bbb": map[string]any{"k": "v"}, "ccc": "shown"},
+			want: "shown",
+		},
+		{
+			name: "a composite under a preferred key is skipped, not flattened",
+			args: map[string]any{"command": []any{"sh", "-c", "echo hi"}, "note": "fallback"},
+			want: "fallback",
+		},
+		{name: "numbers render", args: map[string]any{"limit": float64(42)}, want: "42"},
+		{name: "bools render", args: map[string]any{"force": true}, want: "true"},
+		{name: "a blank string is not a scalar worth showing", args: map[string]any{"query": "   "}, want: ""},
+		{name: "nothing scalar at all", args: map[string]any{"body": map[string]any{"a": 1}}, want: ""},
+		{
+			name: "newlines are flattened to one line",
+			args: map[string]any{"command": "set -e\ncd /tmp\nls"},
+			want: "set -e cd /tmp ls",
+		},
+		{
+			name: "a long argument is clamped with an ellipsis",
+			args: map[string]any{"command": strings.Repeat("x", 300)},
+			want: strings.Repeat("x", argSummaryCap-1) + "…",
+		},
+		{
+			name: "a secret in the shown argument is redacted",
+			args: map[string]any{"command": "curl -H 'Authorization: Bearer ya29.aaaaaaaaaa' https://x"},
+			want: "curl -H 'Authorization: Bearer <redacted>' https://x",
+		},
+		{
+			// The blast radius of one shown field: a token in a second argument is
+			// not disclosed because the second argument is never rendered.
+			name: "a secret in an argument that is not shown is never rendered",
+			args: map[string]any{"command": "deploy", "token": "ghp_aaaaaaaaaaaaaaaaaaaa"},
+			want: "deploy",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := summariseArg(tc.args); got != tc.want {
+				t.Fatalf("summariseArg = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestClampArgCutsOnARuneBoundary keeps a chat client from being handed half a
+// rune. The clamp is a byte budget and the input is multi-byte on purpose.
+func TestClampArgCutsOnARuneBoundary(t *testing.T) {
+	got := clampArg(strings.Repeat("é", 200))
+	if !utf8.ValidString(got) {
+		t.Fatalf("clampArg produced invalid UTF-8: %q", got)
+	}
+	if len(got) > argSummaryCap+len("…") {
+		t.Fatalf("clampArg = %d bytes, want at most %d", len(got), argSummaryCap+len("…"))
+	}
+	if !strings.HasSuffix(got, "…") {
+		t.Fatalf("clampArg = %q, want an ellipsis on the end", got)
+	}
+}
+
+// TestRedact covers the credential shapes the net claims to catch, and records
+// that it is a net: the last case is a secret it does not recognise. That is
+// accepted, not a bug — see summariseArg.
+func TestRedact(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "flag value", in: "--token=abc123", want: "--token=<redacted>"},
+		{name: "long flag with a space", in: "curl -u user --password hunter2", want: "curl -u user --password <redacted>"},
+		{
+			// The space-separated form is anchored to a flag on purpose: an
+			// unanchored "auth" would eat the subcommand here.
+			name: "a subcommand that reads like a credential name is left alone",
+			in:   "gcloud auth login --quiet",
+			want: "gcloud auth login --quiet",
+		},
+		{
+			// The value run is \S+, so trailing punctuation goes with it. Over-
+			// redaction is the safe direction for a notice.
+			name: "json field, punctuation and all",
+			in:   `{"api_key": "sk-live-xyz"}`,
+			want: `{"api_key": "<redacted>`,
+		},
+		{name: "env assignment", in: "SECRET=shh run", want: "SECRET=<redacted> run"},
+		{name: "space-separated auth flag", in: "myctl --auth s3cr3t deploy", want: "myctl --auth <redacted> deploy"},
+		{name: "space-separated bearer flag", in: "myctl --bearer opaque-value", want: "myctl --bearer <redacted>"},
+		{name: "bare github token", in: "echo ghp_abcdefghijklmnop", want: "echo <redacted>"},
+		{name: "bare slack token", in: "post xoxb-1-2-abcdef", want: "post <redacted>"},
+		{name: "bare google key", in: "AIzaSyAAAAAAAAAAAAAAA is the key", want: "<redacted> is the key"},
+		{name: "a jwt", in: "Bearer eyJhbGciOiJIUzI1NiJ9.e30.x", want: "Bearer <redacted>"},
+		{name: "pem header", in: "-----BEGIN RSA PRIVATE KEY----- MII", want: "<redacted> MII"},
+		{name: "ordinary text is untouched", in: "kubectl get pods -A", want: "kubectl get pods -A"},
+		{
+			// The honest case. A high-entropy string under a name the pattern set
+			// has never seen goes through. This is what "a net, not a guarantee"
+			// means, and why status and indicator mode exist.
+			name: "an unrecognised secret shape survives",
+			in:   "deploy --key-material 7f3a9c1e5b2d8406",
+			want: "deploy --key-material 7f3a9c1e5b2d8406",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := redact(tc.in); got != tc.want {
+				t.Fatalf("redact(%q) = %q, want %q", tc.in, got, tc.want)
 			}
 		})
 	}

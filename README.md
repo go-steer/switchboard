@@ -153,7 +153,7 @@ the process default:
 |------|----------|
 | `indicator` (default) | posts a "⏳ Working…" placeholder with a running clock, deleted when the reply lands |
 | `status` | keeps one message per turn, edited in place with the clock and the running tool |
-| `stream` | posts a "🔧 Running `tool`" notice per tool call, plus each completed turn |
+| `stream` | posts a notice per tool frame — tool, argument, result — plus each completed turn |
 | `off` | silent until the reply is ready |
 
 In `indicator` and `status` the placeholder ticks: every 15 seconds it is
@@ -191,6 +191,53 @@ One case still stops the clock early: a second question asked before the first
 has answered. The new turn takes over the single placeholder and the old one
 goes quiet. No answer is lost, only the clock. Fixing it needs a per-turn
 message identity the relay is not given (#42).
+
+#### What `stream` shows
+
+`stream` is the mode that exists to show detail, so it shows the tool, one
+argument, and the verdict once the call finishes. One notice per *frame*, not
+per call: a frame carrying three concurrent shells is three lines under one
+header, and the results tick those lines off by editing the notice in place
+rather than posting again.
+
+```
+🔧 Running `bash` — kubectl get pods -A
+✅ Ran `bash` — kubectl get pods -A
+
+❌ Ran 3 tools (1 failed)
+• ✅ `bash` — kubectl get pods -A
+• ❌ `bash` (exit 2) — kubectl get ns --context nope
+• ✅ `bash` — sleep 30
+```
+
+Calls that a reader could not tell apart — same tool, same argument, same
+verdict — collapse to `` `bash` ×3 `` rather than repeating the word.
+
+**The notices are permanent, by decision.** `indicator` and `status` clean up
+after themselves; `stream` accumulates, and the trail it leaves is the reason to
+choose it over the other two. Retiring the notices when the answer lands would
+make `stream` a noisier `indicator`. A thread that wants no residue should use
+`indicator` or `off`.
+
+**Arguments are a disclosure decision.** Tool arguments are untrusted,
+unbounded, and exactly where a secret turns up: a shell command line with a
+token in it, a private path, the contents of a file being written. Only `stream`
+shows them, and only like this:
+
+- one argument per call — never the whole object, so a token in a second field
+  is not disclosed;
+- scalars only, so nested objects and arrays are skipped rather than serialised;
+- flattened to one line and clamped to 120 characters;
+- passed through a redaction pass for the credential shapes it recognises
+  (`--token=…`, `"api_key": …`, bare `ghp_`/`xox`/`sk-`/`AKIA`/`ya29.`/`AIza`
+  tokens, JWTs, PEM headers).
+
+That last step is a net, not a guarantee — no pattern set recognises every
+secret, and the steps above are what keeps the blast radius of a miss to one
+clamped field. Tool *output* is never shown in any mode: a failure renders as
+`exit 2` and nothing more. A deployment that cannot accept even a clamped
+argument in the channel should run `status` or `indicator`, which show tool
+names and no arguments at all.
 
 Operators can override the mode **per channel** at runtime with a command — no
 restart:

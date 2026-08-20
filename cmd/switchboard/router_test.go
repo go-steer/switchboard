@@ -374,8 +374,9 @@ func TestRouterProgressStream(t *testing.T) {
 		t.Fatalf("Handle: %v", err)
 	}
 
-	if got := recvReply(t, fake.replies); got.Text != activityText([]string{"lookup"}) {
-		t.Fatalf("first reply = %q, want tool notice %q", got.Text, activityText([]string{"lookup"}))
+	want := activityText([]daemon.ToolCall{{Name: "lookup"}}, nil, true)
+	if got := recvReply(t, fake.replies); got.Text != want {
+		t.Fatalf("first reply = %q, want tool notice %q", got.Text, want)
 	}
 	if got := recvReply(t, fake.replies); got.Text != "the answer" {
 		t.Fatalf("second reply = %q, want the answer", got.Text)
@@ -697,7 +698,7 @@ func TestRouterCommandOverridesTurnMode(t *testing.T) {
 		t.Fatalf("Handle: %v", err)
 	}
 
-	if got := recvReply(t, fake.replies); got.Text != activityText([]string{"lookup"}) {
+	if got := recvReply(t, fake.replies); got.Text != activityText([]daemon.ToolCall{{Name: "lookup"}}, nil, true) {
 		t.Fatalf("first reply = %q, want tool notice under the stream override", got.Text)
 	}
 	if got := recvReply(t, fake.replies); got.Text != "the answer" {

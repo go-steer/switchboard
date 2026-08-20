@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/go-steer/switchboard/pkg/chat"
+	"github.com/go-steer/switchboard/pkg/daemon"
 )
 
 func TestFormatElapsed(t *testing.T) {
@@ -263,7 +264,7 @@ func TestTickerKeepsShowingTheLastTool(t *testing.T) {
 
 	r.startProgress(ctx, e, "C0:1")
 	recvReply(t, fake.replies)
-	r.postActivity(ctx, e, "C0:1", ProgressStatus, []string{"lookup"})
+	r.postActivity(ctx, e, "C0:1", ProgressStatus, []daemon.ToolCall{{Name: "lookup"}})
 
 	waitFor(t, func() bool {
 		n := 0

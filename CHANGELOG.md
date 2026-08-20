@@ -7,6 +7,30 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- `--progress-mode stream` now says what a tool was called with and whether it
+  worked (#36). It rendered "🔧 Running `bash`" and nothing else, so a turn that
+  made fifteen shell calls was fifteen identical notices, and a frame carrying
+  three concurrent ones read `` `bash`, `bash`, `bash` ``. Notices now carry a
+  one-line argument summary, group a parallel frame under a header, collapse
+  calls a reader could not tell apart to `` `bash` ×3 ``, and are edited in
+  place as each result lands — so a turn posts one message per frame rather than
+  two per call. Arguments and results were already on the wire; `agentFrame`
+  modelled neither.
+- Tool results are read off the `agent` event at all (#36). They are authored by
+  the tool, so the daemon labels the event `user`, and the role filter that tool
+  *calls* need is what kept results invisible. A call now finishes as ✅ or
+  ❌ with its exit code, from the two response conventions worth reading
+  (a numeric exit code, an error field); an unrecognised shape is reported as
+  success, because a tool that answered at all usually ran.
+- The disclosure posture for tool arguments is written down, in the README and
+  on the parse helper (#36). Arguments are untrusted, unbounded and exactly
+  where a secret shows up, so `stream` shows one scalar argument per call,
+  clamped to 120 characters, flattened to one line and passed through a
+  redaction pass; `status` and `indicator` show tool names and no arguments;
+  tool output is never shown in any mode. The redaction is a net, not a
+  guarantee — the other four steps are what bound a miss to one clamped field.
+  Until now the seam stopped at names with nothing saying why, which read as an
+  oversight rather than as a choice.
 - Three scrubbed payloads from the live Google Chat run join the replay corpus:
   the two events an @mention-add sends, and a space message carrying the
   `USER_MENTION` annotation that no captured DM could have (#30). The add pair
@@ -16,6 +40,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   @mention-add is answered with silence.
 
 ### Fixed
+- Tool activity and answers now dedupe against separate seq watermarks (#36).
+  They shared one, so a tool frame raised the bar the answer had to clear, and
+  an answer at or below that seq was discarded as a replay — the worst thing
+  this gateway can do. Seqs only go up on a healthy stream, so this was
+  unreachable in practice; the watermark exists for a stream that is not
+  healthy, which is exactly when it must not be holding a tool frame's number.
+- `verdict` no longer renders an implausible exit code into the thread (#36).
+  A tool reporting `{"exit_code": 1e300}` produced a nineteen-digit "exit …"
+  from a Go conversion whose result is undefined for an out-of-range float.
+  Non-zero is still a failure; only the number is dropped.
 - A turn that talks before it answers no longer loses its progress clock (#42).
   "Let me check the logs…" arrives as a completed model turn indistinguishable
   from the answer, and was delivered as one: placeholder deleted, clock stopped,
@@ -36,6 +70,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   advertise turn-complete, where every relayed message ends a turn as before.
 
 ### Changed
+- `stream` mode's notices stay in the thread by decision rather than by accident
+  (#36). `startProgress` is a no-op outside `indicator`/`status`, so nothing was
+  ever retiring them; the question of whether `stream` is an ephemeral view or a
+  durable trace is now answered — durable, since the trail is the reason to
+  choose it over the other two, and README says so.
 - The runbooks no longer say `switchboard version` "confirms the build identity
   you are testing" (#30). It does not, in a linked `git worktree`: Go stamps the
   enclosing checkout's HEAD, and the output gives no sign. Both setup docs now
