@@ -321,6 +321,47 @@ export SWITCHBOARD_DAEMON_TOKEN=…   # the one dev/demo/daemon printed
   --daemon-url http://127.0.0.1:7777
 ```
 
+### Outbound ingress
+
+`--ingress-addr` works on Chat as it does on Slack ([#39]). It needs no extra
+Chat configuration — posting is the same REST call and the same ADC credentials
+egress already uses — but two things differ from Slack and are worth knowing
+before the first `403`:
+
+- **The app must already be a member of the space.** Chat has no "invite by
+  posting": an app posts only into spaces it has been added to, and adding it is
+  a human action in the Chat UI. A post into a space the app is not in comes
+  back as `403` or `404` — Chat does not always admit that a space it cannot see
+  exists — and either reads exactly like a broken service-account grant. Check
+  membership before re-issuing credentials.
+- **The space id is not the thread id.** `conversation` is `spaces/AAA` for a
+  new top-level message, or `spaces/AAA:spaces/AAA/threads/BBB` to post into an
+  existing thread. Thread names come from Chat, so the way to get one is to post
+  and keep the `conversation` in the response — it names the thread the message
+  landed in.
+
+```sh
+export SWITCHBOARD_INGRESS_TOKEN=…
+/tmp/switchboard serve --platform googlechat \
+  --google-project PROJECT_ID \
+  --google-subscription switchboard-chat-sub \
+  --ingress-addr 127.0.0.1:8080 \
+  --ingress-allow spaces/AAA \
+  --daemon-url http://127.0.0.1:7777
+
+curl -sS localhost:8080/v1/messages \
+  -H "Authorization: Bearer $SWITCHBOARD_INGRESS_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"conversation":"spaces/AAA","text":"## disk-pressure\n\nnode-7 is at 91%"}'
+# {"conversation":"spaces/AAA:spaces/AAA/threads/BBB","id":"spaces/AAA/messages/CCC"}
+```
+
+That text has a heading, so under the default `--googlechat-cards rich` it
+arrives as a card — an ingress post renders exactly as an agent answer does.
+Send a line without structure to get plain text.
+
+[#39]: https://github.com/go-steer/switchboard/issues/39
+
 ### Demo script
 
 In the order that shows what is new:

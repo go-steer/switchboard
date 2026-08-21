@@ -61,13 +61,15 @@ func TestRunServeIngressValidation(t *testing.T) {
 		want  string
 	}{
 		{
-			name: "googlechat is refused",
-			args: []string{"--platform", "googlechat", "--ingress-addr", "127.0.0.1:0"},
-			want: "Slack-only",
-		},
-		{
 			name: "no token",
 			args: []string{"--platform", "slack", "--ingress-addr", "127.0.0.1:0"},
+			want: "no ingress token",
+		},
+		{
+			// The same check, on the platform that used to be turned away
+			// before reaching it. Its refusal was the whole of #39.
+			name: "no token on googlechat either",
+			args: []string{"--platform", "googlechat", "--ingress-addr", "127.0.0.1:0"},
 			want: "no ingress token",
 		},
 		{
@@ -88,6 +90,31 @@ func TestRunServeIngressValidation(t *testing.T) {
 				t.Errorf("error = %q, want it to mention %q", err, tc.want)
 			}
 		})
+	}
+}
+
+// TestRunServeIngressIsNotSlackOnly checks a configured ingress on
+// --platform googlechat gets past the ingress gate and on to building the
+// adapter, which is as far as this can go without a Pub/Sub subscription to
+// dial. Until #39 it stopped one step earlier, and every agent-initiated use
+// case — a scheduled digest, a 3am escalation — was impossible on Chat.
+//
+// The assertion is on where it got to, not on success: the adapter refusing an
+// empty --google-project is the run having reached a check that lives beyond
+// the one being tested.
+func TestRunServeIngressIsNotSlackOnly(t *testing.T) {
+	t.Setenv("SWITCHBOARD_DAEMON_TOKEN", "daemon-token")
+	t.Setenv("SWITCHBOARD_INGRESS_TOKEN", "ingress-token")
+
+	err := runServe([]string{"--platform", "googlechat", "--ingress-addr", "127.0.0.1:0"})
+	if err == nil {
+		t.Fatal("runServe returned nil; want the adapter to refuse an empty --google-project")
+	}
+	if strings.Contains(err.Error(), "Slack-only") {
+		t.Fatalf("the ingress still refuses googlechat: %v", err)
+	}
+	if !strings.Contains(err.Error(), "googlechat adapter") {
+		t.Errorf("error = %q, want it to come from building the adapter", err)
 	}
 }
 

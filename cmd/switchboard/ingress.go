@@ -52,10 +52,32 @@ import (
 //
 // There is no platform field: an instance bridges the one platform it was
 // started with, so the target is implied. The conversation is that platform's
-// conversation key — for Slack a channel ID (post a new top-level message) or
-// "channel:thread_ts" (post into an existing thread). The id returned by POST
-// is also the thread the message roots, so a caller that wants to follow up
-// under its own post sends "<conversation>:<id>" next.
+// conversation key — a bare channel/space posts a new top-level message, and a
+// full key posts into an existing thread:
+//
+//	Slack        C0123      or  C0123:1723742400.000100
+//	Google Chat  spaces/AAA or  spaces/AAA:spaces/AAA/threads/BBB
+//
+// Rather than construct the follow-up key, use the one POST answers with: it
+// names the thread the message actually landed in. On Slack that could have
+// been built by hand — a top-level message's id is the thread_ts of the thread
+// it roots — but on Chat the thread is assigned by the platform and there is
+// nothing to build it from. Both adapters therefore return a ref that names the
+// thread, and the ingress trusts the ref rather than knowing either platform's
+// rule (#39).
+//
+// # Rendering
+//
+// A post is rendered exactly as an agent's answer would be, and deliberately
+// so: it goes through the same adapter egress, and a digest that looked
+// different from a reply in the same thread would be saying something about
+// its origin that is not the reader's business. So it is Block Kit under
+// --slack-rich-blocks, and under --googlechat-cards rich a card when the
+// markdown has structure — headings, rules — or text when it does not, which is
+// the same rule an agent's answer is laid out by. The caller sends markdown and
+// does not choose; there is no card field, and adding one would make
+// switchboard responsible for laying out a payload it does not understand
+// (#38 is where that belongs).
 //
 // # Appending
 //
@@ -176,6 +198,23 @@ type opResult struct {
 type bodyEntry struct {
 	mu   sync.Mutex
 	text string
+
+	// conv is the conversation the *adapter* named when it posted this
+	// message: the thread it actually landed in, which on Chat the platform
+	// assigns and nobody could have known in advance. It is not the same as
+	// the conversation on the request that reaches append — bodyKey
+	// deliberately ignores the thread part so a caller need not echo the exact
+	// string it posted with, which means an append can arrive addressed to the
+	// bare space and still find this entry. Rolling that request's key over
+	// would rebuild the thread from the message id, and on Chat an id is not a
+	// thread (#39).
+	//
+	// Set once, by whoever first tracked the message. A later replace does not
+	// overwrite it: an edit is the caller restating the text, not correcting
+	// where the message lives. A message first seen through a PATCH records
+	// the caller's key instead, which may name no thread at all — so append
+	// prefers whichever of the two does, rather than trusting this one.
+	conv string
 }
 
 // newIngress validates the config and builds the ingress.
@@ -331,7 +370,9 @@ func (i *ingress) postMessage(w http.ResponseWriter, r *http.Request) error {
 		if perr != nil {
 			return opResult{}, perr
 		}
-		i.track(req.Conversation, ref.ID, req.Text)
+		// ref, not req: the adapter's key names the thread the message landed
+		// in, and that is what a continuation of it has to be posted to.
+		i.track(ref, req.Text)
 		return opResult{ref: ref}, nil
 	})
 	if err != nil {
@@ -390,7 +431,7 @@ func (i *ingress) replace(ctx context.Context, ref chat.MessageRef, text string)
 	if err := i.update(ctx, ref, text); err != nil {
 		return opResult{}, err
 	}
-	i.track(ref.Conversation, ref.ID, text)
+	i.track(ref, text)
 	return opResult{ref: ref}, nil
 }
 
@@ -418,11 +459,23 @@ func (i *ingress) appendTo(ctx context.Context, ref chat.MessageRef, add string)
 
 	combined := be.text + "\n" + add
 	if !i.fits(combined) {
-		cont, err := i.post(ctx, chat.Reply{Conversation: continuationKey(ref), Text: add})
+		// A continuation belongs in the thread the message is in, so of the two
+		// keys that might name it — the one on this request and the one
+		// recorded when the message was first tracked — take whichever
+		// actually does. They differ whenever a caller appends using the bare
+		// channel or space it posted to, which bodyKey allows on purpose. The
+		// recorded key is not automatically the better one: it comes from the
+		// adapter for a message this ingress posted, but from the caller for
+		// one it first saw through a PATCH.
+		target := ref
+		if !namesThread(target.Conversation) && namesThread(be.conv) {
+			target.Conversation = be.conv
+		}
+		cont, err := i.post(ctx, chat.Reply{Conversation: continuationKey(target), Text: add})
 		if err != nil {
 			return opResult{}, err
 		}
-		i.track(cont.Conversation, cont.ID, add)
+		i.track(cont, add)
 		return opResult{ref: cont, rolled: true}, nil
 	}
 	if err := i.update(ctx, ref, combined); err != nil {
@@ -436,11 +489,36 @@ func (i *ingress) appendTo(ctx context.Context, ref chat.MessageRef, add string)
 // the message is already in, or — for a top-level message — the thread it
 // roots, so the timeline stays in one place instead of scattering across the
 // channel.
+//
+// The second case rests on a Slack identity — a top-level message's id *is* the
+// thread_ts of the thread it roots — which holds nowhere else. Both adapters
+// now name the thread in the ref they return (landedKey, in each of them), so
+// for a message this ingress posted the first case always applies and the
+// second is reached only for one it did not: a caller that PATCHes a message it
+// learned of elsewhere, addressed by a bare channel or space. On Chat that
+// still yields spaces/AAA:spaces/AAA/messages/CCC — a message resource name in
+// a thread field — and the continuation does not join the message it continues:
+// Chat either rejects the post outright or, because a threaded create carries
+// REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD, starts a thread of its own (#39). Which
+// of the two it is has not been established against the live API.
+//
+// The ref passed here should therefore be the best-known address of the
+// message, not merely the one the request carried; see appendTo.
 func continuationKey(ref chat.MessageRef) string {
-	if strings.Contains(ref.Conversation, ":") {
+	if namesThread(ref.Conversation) {
 		return ref.Conversation
 	}
-	return ref.Conversation + ":" + ref.ID
+	channel, _, _ := strings.Cut(ref.Conversation, ":")
+	return channel + ":" + ref.ID
+}
+
+// namesThread reports whether a conversation key identifies a thread rather
+// than a whole channel or space. A trailing colon does not: conversationKey
+// renders a thread-less conversation as "C0123:" on both platforms, and
+// splitConversation reads that back as no thread at all.
+func namesThread(conv string) bool {
+	_, thread, _ := strings.Cut(conv, ":")
+	return thread != ""
 }
 
 // decodeMessage reads and validates the JSON body shared by both verbs. The
@@ -692,11 +770,14 @@ func bodyKey(conv, id string) string {
 	return channel + "\x00" + id
 }
 
-// track remembers a message's current text so a later append can extend it.
-// Text that does not fit in one message was split across several by the
-// adapter, and the ref names only the first — remembering it would make append
-// silently edit a fragment, so that message is forgotten instead.
-func (i *ingress) track(conv, id, text string) {
+// track remembers a message's current text so a later append can extend it,
+// and — the first time a message is seen — the conversation ref names, which is
+// where a continuation of it belongs. Text that does not fit in one message was
+// split across several by the adapter, and the ref names only the first —
+// remembering it would make append silently edit a fragment, so that message is
+// forgotten instead.
+func (i *ingress) track(ref chat.MessageRef, text string) {
+	conv, id := ref.Conversation, ref.ID
 	if id == "" {
 		return
 	}
@@ -722,6 +803,9 @@ func (i *ingress) track(conv, id, text string) {
 	// self-inflicted outage.
 	be.mu.Lock()
 	be.text = text
+	if be.conv == "" {
+		be.conv = conv
+	}
 	be.mu.Unlock()
 }
 

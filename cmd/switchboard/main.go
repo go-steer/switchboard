@@ -159,8 +159,9 @@ func runServe(args []string) (err error) {
 	ingressTokenEnv := fs.String("ingress-token-env", "SWITCHBOARD_INGRESS_TOKEN",
 		"env var holding the bearer token callers must present to the outbound ingress")
 	ingressAllow := fs.String("ingress-allow", envOr("SWITCHBOARD_INGRESS_ALLOW", ""),
-		"comma-separated conversations the outbound ingress may post into (channel IDs, or "+
-			"full channel:thread keys); empty = any conversation the bot can reach")
+		"comma-separated conversations the outbound ingress may post into (Slack channel IDs "+
+			"or channel:thread_ts; Chat spaces/AAA or spaces/AAA:spaces/AAA/threads/BBB); "+
+			"empty = any conversation the bot can reach")
 	logFormat := fs.String("log-format", envOr("SWITCHBOARD_LOG_FORMAT", string(logging.Text)),
 		"log rendering: \"text\" (timestamped lines for a terminal) or \"json\" (one object "+
 			"per line for a collector)")
@@ -219,13 +220,11 @@ func runServe(args []string) (err error) {
 	}
 
 	// Validate the outbound-ingress config up front: a caller that cannot be
-	// authenticated, or a platform it does not support, should fail here rather
-	// than after the adapter has dialed a chat platform.
+	// authenticated should fail here rather than after the adapter has dialed a
+	// chat platform. The ingress itself is platform-agnostic — it speaks
+	// chat.Reply and chat.MessageRef to whichever adapter serve built (#39).
 	ingressToken := ""
 	if *ingressAddr != "" {
-		if *platform != "slack" {
-			return fmt.Errorf("--ingress-addr is Slack-only for now (got --platform %q)", *platform)
-		}
 		if ingressToken = os.Getenv(*ingressTokenEnv); ingressToken == "" {
 			return fmt.Errorf("no ingress token in $%s (set --ingress-token-env to the right var)", *ingressTokenEnv)
 		}

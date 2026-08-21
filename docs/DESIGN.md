@@ -144,8 +144,22 @@ open. Per-caller ownership would need caller identity on the ingress, which is
 the same design as correlating outbound posts with inbound replies (below) and
 is deferred with it.
 
-*Currently Slack only* (`--ingress-addr` with `--platform googlechat` is refused
-at startup) — the seam is platform-neutral, but only the Slack path is tested.
+The ingress works on both platforms (#39). It speaks `chat.Reply` and
+`chat.MessageRef` to whichever adapter `serve` built and knows nothing about
+either one; what was platform-specific was the *key* it constructs when an
+appended message overflows. It named the continuation's thread as
+`"<conversation>:<id>"`, which is right only on Slack, where a top-level
+message's id is the `thread_ts` of the thread it roots. On Chat an id is a
+message resource name, and the key came out malformed.
+
+The invariant that replaces it is symmetric: **a ref names the thread its
+message landed in**, on both platforms. Each adapter knows its own rule — Slack
+can derive the thread from the ts it just got back, Chat has to read the thread
+the platform assigned — and the ingress follows the ref rather than
+reconstructing it. A caller that posted to a bare channel or space is answered
+with the threaded key and follows up with that; the ingress remembers it too, so
+an append addressed by the bare key still continues in the right place.
+
 Correlating an outbound post with a later inbound reply — the async
 human-in-the-loop approval round trip — is a larger design and is not part of
 this.
