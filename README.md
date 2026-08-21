@@ -412,6 +412,70 @@ has to know what is already there:
   *that* ref from then on; the timeline continues under the original message
   instead of silently losing its head.
 
+**Bind an agent session to the thread**, when the caller is an agent that wants
+to be answered. A post with `session` records the thread it lands in as that
+session's conversation, so a human replying there reaches the work already in
+flight instead of opening a fresh session that knows nothing about it:
+
+```sh
+curl -sS localhost:8080/v1/messages \
+  -H "Authorization: Bearer $SWITCHBOARD_INGRESS_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"conversation":"C0123ABCD","text":"Rollout is wedged. Roll back?","session":"core-agent/incident-7"}'
+# 200 {"conversation":"C0123ABCD:1723742401.001900","id":"1723742401.001900"}
+```
+
+The reply in that thread is injected into `core-agent/incident-7` carrying the
+human's identity, and the session's answers come back to the thread — the same
+loop a `@switchboard` mention gets, with the session opened by someone else.
+Points worth knowing before you rely on it:
+
+- **`session` is `<app>/<id>`,** the same pair the agent backend knows the
+  session by. It is only valid on POST: a thread is decided when a message is
+  posted, and a PATCH addressed to a bare channel does not name one.
+- **The thread comes back in the answer.** Bind against a bare channel and the
+  binding is recorded for the thread the post created, which is the
+  `conversation` in the response. Reuse that key for later posts about the same
+  incident; re-posting the same `session` to the same thread is accepted and
+  just moves the resume point forward. Addressing the *bare channel* a second
+  time with the same `session` is a `409` instead — that session already has a
+  thread, and a second one relaying it would answer both — and the refusal
+  names the thread to post to.
+- **Only what happens next is relayed.** Switchboard reads how far the session
+  has got before it posts, and reads it again when someone replies in the
+  thread, starting from the later of the two — neither the hour before the
+  alert nor the hours between the alert and the reply lands in the channel.
+- **The session has to exist, and both ends have to be free.** A session the
+  agent backend does not have is a `404`; a thread that already has a session,
+  or a session already bound to another thread, is a `409`. All three are
+  refused *before* anything is posted, so a rejected bind leaves no message
+  behind to be confused by.
+- **A bind costs a round trip.** Finding where the session has got to means
+  opening its event stream and reading until it goes quiet, which happens
+  before the message is sent: a settled session costs a few hundred
+  milliseconds, and one mid-turn can cost up to five seconds. A post that binds
+  nothing is unaffected.
+- **Any token holder can bind any session.** The token says a trusted caller is
+  on the line, not which one, and nothing checks that the holder is entitled to
+  the session id it names — so the `404`/`200` split above also tells a holder
+  which session ids exist. Authorization for what a session may *do* lives in
+  the agent backend, per caller; switchboard has none of its own. Treat the
+  ingress token accordingly, and keep the endpoint on a network only the agent
+  backend can reach.
+- **Bindings do not survive a restart.** They are held in memory. After a
+  restart the thread is just a thread: the next human message there starts a
+  new session, and switchboard says so in the thread rather than dropping the
+  message silently. Recovery is the agent posting again with `session`, to the
+  thread key — a caller that re-posts on every update does that anyway, and it
+  finds the thread unbound and free to take.
+- **A session that disappears is announced, not retried.** If the agent backend
+  forgets a bound session — restarted, expired — the thread is told, in the
+  thread, and the binding is dropped so the next message plainly starts fresh.
+  That holds whether the loss surfaces on a human's message or on a quiet
+  thread waiting for an answer.
+- **It needs somewhere for the reply to go.** On an `--outbound-only` run there
+  is no inbound path, so `session` is a `400`.
+
 Details worth knowing:
 
 - **No `platform` field.** An instance bridges the one platform it was started
@@ -450,16 +514,16 @@ Details worth knowing:
 
   | Status | Meaning |
   |--------|---------|
-  | `400` | malformed body, or `text`/`append` not exactly one on PATCH |
+  | `400` | malformed body, `text`/`append` not exactly one on PATCH, a malformed `session`, `session` on a PATCH, or `session` on an `--outbound-only` run |
   | `401` | missing or wrong bearer token |
   | `403` | conversation not allowlisted, or the platform refused (bot not in the channel, channel archived) |
-  | `404` | no such conversation or message |
+  | `404` | no such conversation or message, or a `session` the agent backend does not have |
   | `405` | method other than POST/PATCH on `/v1/messages` |
-  | `409` | `Idempotency-Key` reused with a different body, or `append` to a message this process has no remembered text for |
+  | `409` | `Idempotency-Key` reused with a different body, `append` to a message this process has no remembered text for, or a `session` bind where either end is already taken |
   | `413` | body over 1 MiB |
   | `415` | `Content-Type` is not `application/json` |
   | `501` | the platform cannot do this (editing, or `append` where the text limit is unknown) |
-  | `502` | the platform rejected the message for some other reason |
+  | `502` | the platform rejected the message for some other reason, or the agent backend would not confirm a `session` |
   | `504` | timed out waiting on an identical in-flight request with the same `Idempotency-Key` |
 
   Platform errors are logged in full and summarized to the caller; the

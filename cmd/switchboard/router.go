@@ -16,7 +16,9 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"slices"
 	"strconv"
 	"strings"
@@ -381,6 +383,20 @@ type Router struct {
 	mu       sync.Mutex
 	sessions map[string]*sessionEntry
 
+	// The conversations whose session switchboard did not create, recorded by
+	// the outbound ingress and consulted by session() before it creates one
+	// (#38). Guarded by mu, like sessions, because every rule about a binding
+	// is a rule about the session the conversation already has: see binding.go.
+	//
+	// bindings is the map itself; boundTo is its inverse, which is what enforces
+	// one conversation per session; bindOrder is insertion order, for eviction;
+	// reserving holds the sessions a bind is in flight for, which is what makes
+	// that inverse true across the platform call in the middle of one.
+	bindings  map[string]binding
+	boundTo   map[string]string
+	bindOrder []string
+	reserving map[string]string
+
 	// omu guards overrides, the per-channel progress-mode overrides set at
 	// runtime via chat commands (HandleCommand). A channel absent from the map
 	// uses the process default (r.progress); progressFor resolves the two.
@@ -392,9 +408,29 @@ type Router struct {
 // exactly once under concurrent inbound turns. ready is closed when
 // creation finishes (successfully or not); waiters block on it.
 type sessionEntry struct {
-	ready   chan struct{}
-	sess    daemon.Session
-	err     error
+	ready chan struct{}
+	sess  daemon.Session
+	err   error
+
+	// adopted marks a session switchboard did not create but was told about by
+	// the outbound ingress (#38). It changes two things: the entry starts at the
+	// session's head rather than at zero, and a daemon that has never heard of
+	// the session is a broken binding to announce rather than a turn to retry.
+	// Set once, at construction, under Router.mu.
+	adopted bool
+
+	// stop ends this entry's relay goroutine. The relay otherwise runs for the
+	// life of the process, which is right for a session that keeps answering;
+	// an entry that is discarded (a binding the daemon has lost) has to take its
+	// subscription with it, or it reconnects forever against a session that will
+	// never exist again — and a second relay starts alongside it when the
+	// conversation opens its next session.
+	//
+	// Written before close(ready), like sess, and read only by goroutines that
+	// waited on it. That ordering is the whole synchronisation: a concurrent
+	// turn released by ready has to see a stop it can call.
+	stop context.CancelFunc
+
 	channel string       // platform channel, for resolving the channel's progress mode
 	seq     atomic.Int64 // highest agent-event seq seen, fed back as `since` on resume
 	relayed atomic.Int64 // highest seq whose answer was posted, for exactly-once delivery across reconnects
@@ -983,6 +1019,9 @@ func NewRouter(client *daemon.Client, out sender, progress ProgressMode, m *metr
 		tickInterval: progressTickInterval,
 		tickMaxAge:   progressTickMaxAge,
 		sessions:     make(map[string]*sessionEntry),
+		bindings:     make(map[string]binding),
+		boundTo:      make(map[string]string),
+		reserving:    make(map[string]string),
 		overrides:    make(map[string]ProgressMode),
 	}
 }
@@ -1110,10 +1149,37 @@ func (r *Router) Handle(ctx context.Context, msg chat.Message) (err error) {
 		// conclude it, and the progress message would linger; undo both here.
 		entry.endTurn()
 		r.clearProgress(ctx, entry, msg.Conversation)
+		if entry.adopted && isMissingSession(err) {
+			// The thread was bound to a session the daemon no longer has. Say
+			// so, and drop the binding with the entry: the next message here
+			// opens a session of its own, which is the right thing to do and
+			// the wrong thing to do silently.
+			r.logf("handle %s: bound session %s is gone from the daemon: %v",
+				msg.Conversation, sessionRef(entry.sess), err)
+			// Only the turn that actually dropped the entry says so. Several
+			// messages can be in flight in the same thread, and each would
+			// otherwise post its own copy of the same notice.
+			if r.discard(msg.Conversation, entry, true) {
+				if sendErr := r.surfaceNotice(ctx, msg.Conversation, bindLostNotice(entry.sess)); sendErr != nil {
+					r.logf("handle %s: surface lost binding: %v", msg.Conversation, sendErr)
+				}
+			}
+			return err
+		}
 		r.surfaceError(ctx, msg.Conversation, err)
 		return err
 	}
 	return nil
+}
+
+// isMissingSession reports whether the daemon answered "no such session"
+// rather than "that request was wrong" or "I am having trouble". Only these
+// two codes: a 400 or a 403 says something about the request or the caller,
+// and telling a thread its session has vanished on the strength of either
+// would be a guess dressed as a fact.
+func isMissingSession(err error) bool {
+	var se *daemon.StatusError
+	return errors.As(err, &se) && (se.StatusCode == http.StatusNotFound || se.StatusCode == http.StatusGone)
 }
 
 // surfaceError posts a thread-scoped notice when a turn fails before it ever
@@ -1129,9 +1195,17 @@ func (r *Router) surfaceError(ctx context.Context, conv string, err error) {
 	if daemon.IsTransient(err) {
 		text = errNoticeTransient
 	}
-	if _, sendErr := r.out.Send(ctx, chat.Reply{Conversation: conv, Text: text, Kind: chat.KindNotice}); sendErr != nil {
+	if sendErr := r.surfaceNotice(ctx, conv, text); sendErr != nil {
 		r.logf("handle %s: surface error: %v (original: %v)", conv, sendErr, err)
 	}
+}
+
+// surfaceNotice posts a thread-scoped notice. Best effort, like everything
+// that reports a failure by talking to the platform that may itself be the
+// thing failing; the send error is returned for the caller to log.
+func (r *Router) surfaceNotice(ctx context.Context, conv, text string) error {
+	_, err := r.out.Send(ctx, chat.Reply{Conversation: conv, Text: text, Kind: chat.KindNotice})
+	return err
 }
 
 const (
@@ -1605,6 +1679,15 @@ func (r *Router) postToolResults(ctx context.Context, e *sessionEntry, conv stri
 // session returns the conversation's session, creating it (and starting
 // its relay goroutine) on first use. The first caller in a thread owns
 // the created session; the SSE relay is attributed to that owner.
+//
+// Unless the conversation is bound. A thread an unattended agent opened
+// through the outbound ingress already has a session — the one working the
+// incident — and adopting it is the whole point of the binding: it is what
+// puts a human's reply in front of the agent that raised the alarm rather than
+// in front of a stranger (#38). An adopted session is not created, starts from
+// where the binding says the stream had got to, and is relayed under no
+// asserted caller: switchboard did not open it and cannot claim to be whoever
+// did.
 func (r *Router) session(ctx context.Context, conv, channel, caller string) (*sessionEntry, error) {
 	r.mu.Lock()
 	if e, ok := r.sessions[conv]; ok {
@@ -1615,9 +1698,27 @@ func (r *Router) session(ctx context.Context, conv, channel, caller string) (*se
 	// This goroutine owns creation; publish a not-yet-ready entry so
 	// concurrent turns on the same conversation wait rather than
 	// double-create, and release the map lock before the network call.
-	e := &sessionEntry{ready: make(chan struct{}), channel: channel}
+	b, adopted := r.bindings[conv]
+	e := &sessionEntry{ready: make(chan struct{}), channel: channel, adopted: adopted}
 	r.sessions[conv] = e
 	r.mu.Unlock()
+
+	if adopted {
+		e.sess = b.sess
+		since := r.adoptFrom(ctx, conv, b)
+		// Both watermarks, not just the resume point: since asks the daemon not
+		// to replay the backlog, and relayed refuses to post it if it arrives
+		// anyway. The incident's own transcript is the one thing that must not
+		// end up in the thread.
+		e.seq.Store(since)
+		e.relayed.Store(since)
+		e.noticed.Store(since)
+		r.metrics.sessionOpened()
+		r.startRelay(ctx, conv, e, "")
+		close(e.ready)
+		r.logf("session %s: adopted %s from seq %d", conv, sessionRef(b.sess), since)
+		return e, nil
+	}
 
 	start := time.Now()
 	e.sess, e.err = r.client.CreateSession(ctx, caller)
@@ -1631,9 +1732,74 @@ func (r *Router) session(ctx context.Context, conv, channel, caller string) (*se
 		return e, e.err
 	}
 	r.metrics.sessionOpened()
+	r.startRelay(ctx, conv, e, caller)
 	close(e.ready)
-	go r.relay(ctx, conv, e, caller)
 	return e, nil
+}
+
+// adoptFrom is the seq an adopted session's relay starts from.
+//
+// The binding carries one already — measured when the bind was made — but the
+// relay does not start then. It starts here, on the first human turn in the
+// thread, which for an incident feed can be hours later with the agent working
+// the whole time. Resuming from the bind would replay every one of those turns
+// into the thread at once: the wall of transcript the bind measured a head to
+// avoid, moved from "before the bind" to "between the bind and the reply". So
+// the head is measured again, at the moment the thread actually starts
+// listening.
+//
+// A probe that fails leaves the bind's own point. It is the wrong direction to
+// be wrong in, but the alternative — guessing forward — drops answers, starting
+// with the one to the message being handled right now, and this failure at
+// least announces itself when the inject that follows fails too.
+func (r *Router) adoptFrom(ctx context.Context, conv string, b binding) int64 {
+	head, err := r.client.HeadSeq(ctx, b.sess, "")
+	if err != nil {
+		r.logf("session %s: adopting %s: could not read the head (%v); resuming from the bind at seq %d",
+			conv, sessionRef(b.sess), err, b.since)
+		return b.since
+	}
+	return max(head, b.since)
+}
+
+// startRelay runs the entry's subscription on a context of its own, so the
+// entry can be discarded without leaving its stream behind. ctx is the serve
+// context (the relay outlives the turn that started it, by design).
+//
+// Called before close(e.ready), which is what publishes e.stop to everyone
+// else: every other reader of the entry waits on that channel, and a discard
+// that read e.stop as nil would leave the relay running against a session the
+// conversation has already given up on — reconnecting forever, alongside
+// whichever relay the next turn starts.
+func (r *Router) startRelay(ctx context.Context, conv string, e *sessionEntry, owner string) {
+	ctx, cancel := context.WithCancel(ctx)
+	e.stop = cancel
+	go r.relay(ctx, conv, e, owner)
+}
+
+// discard drops a conversation's entry and stops its relay, so the next turn
+// there starts over. It leaves the binding alone unless unbind is set: a
+// discarded *adopted* entry means the binding named a session the daemon does
+// not have, and keeping it would fail the next turn the same way.
+//
+// A no-op if the conversation has since moved on to a different entry.
+func (r *Router) discard(conv string, e *sessionEntry, unbind bool) bool {
+	r.mu.Lock()
+	if r.sessions[conv] != e {
+		r.mu.Unlock()
+		return false
+	}
+	delete(r.sessions, conv)
+	if unbind {
+		r.unbind(conv)
+	}
+	r.mu.Unlock()
+	if e.stop != nil {
+		e.stop()
+	}
+	e.stopTicker()
+	r.metrics.sessionClosed()
+	return true
 }
 
 // relay holds the session's SSE subscription and posts each completed
@@ -1864,6 +2030,24 @@ func (r *Router) relay(ctx context.Context, conv string, e *sessionEntry, owner 
 		})
 		if ctx.Err() != nil {
 			return // shutting down: not a reconnectable failure
+		}
+		// A bound session the daemon no longer has is not a blip either. There
+		// is nothing to reconnect to, ever, and a thread left quietly polling
+		// for it looks exactly like a thread where nothing has happened yet.
+		// Only bound sessions: one switchboard opened itself cannot outlive the
+		// entry that holds it.
+		if e.adopted && isMissingSession(err) {
+			r.logf("relay %s: bound session %s is gone from the daemon: %v", conv, sessionRef(e.sess), err)
+			if r.discard(conv, e, true) {
+				// On a context of its own: discard has just cancelled ctx,
+				// which is this goroutine's, and the notice is the point.
+				notify, cancel := context.WithTimeout(context.WithoutCancel(ctx), platformTimeout)
+				if sendErr := r.surfaceNotice(notify, conv, bindStreamLostNotice(e.sess)); sendErr != nil {
+					r.logf("relay %s: surface lost binding: %v", conv, sendErr)
+				}
+				cancel()
+			}
+			return
 		}
 		// The subscription returned: the stream ended or errored. Reset the
 		// backoff if this connection made progress (a healthy stream that

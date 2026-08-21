@@ -32,6 +32,7 @@ import (
 	"unicode"
 
 	"github.com/go-steer/switchboard/pkg/chat"
+	"github.com/go-steer/switchboard/pkg/daemon"
 )
 
 // The outbound ingress: an authenticated HTTP surface that lets another
@@ -42,7 +43,7 @@ import (
 // raised at 3am. The scheduling stays entirely on the caller's side;
 // switchboard remains a transport.
 //
-//	POST  /v1/messages  {"conversation":"C0123","text":"..."}
+//	POST  /v1/messages  {"conversation":"C0123","text":"...","session":"app/s1"}
 //	                    → 200 {"conversation":"C0123","id":"1723742401.001900"}
 //	PATCH /v1/messages  {"conversation":"C0123","id":"...","text":"..."}
 //	                    → 204   (replace the whole message)
@@ -78,6 +79,16 @@ import (
 // does not choose; there is no card field, and adding one would make
 // switchboard responsible for laying out a payload it does not understand
 // (#38 is where that belongs).
+//
+// # Binding a session to the thread
+//
+// The optional session field on a POST says which core-agent session the
+// message came from, and switchboard records it against the thread the message
+// lands in, so a human replying there reaches that session rather than a fresh
+// one that knows nothing about the incident (#38). It is the only field here
+// that is about the *inbound* direction, and an outbound-only deployment
+// refuses it: there is no reply to route. See binding.go for what a bind
+// checks and what it costs.
 //
 // # Appending
 //
@@ -116,6 +127,11 @@ const (
 	// over.
 	maxIdempotencyKeyLen = 256
 
+	// maxSessionRefLen bounds "<app>/<id>" for the same reason, and so that a
+	// malformed one can be quoted back to the caller without the refusal being
+	// as big as the request.
+	maxSessionRefLen = 256
+
 	// maxTrackedBodies bounds how many message bodies are remembered for
 	// append, evicted oldest-first.
 	maxTrackedBodies = 1024
@@ -140,15 +156,30 @@ type ingressConfig struct {
 	// Out is the platform egress (the chat.Adapter serve built). If it also
 	// implements chat.TextFitter, append is available.
 	Out sender
+	// Bind records which session owns a conversation. Nil on an outbound-only
+	// run, which has no router and no inbound path — the session field is
+	// refused rather than accepted and quietly dropped.
+	Bind binder
 	// Metrics may be nil (recording becomes a no-op).
 	Metrics *metrics
 	// Logf may be nil.
 	Logf func(string, ...any)
 }
 
+// binder is the router's half of a session binding, in the two steps the
+// ingress needs it in: the half that can fail, before anything is posted, and
+// the half that records the conversation the message turned out to land in.
+// Implemented by *Router; see binding.go.
+type binder interface {
+	PrepareBind(ctx context.Context, conv string, sess daemon.Session) (int64, error)
+	CommitBind(conv string, sess daemon.Session, since int64)
+	AbortBind(sess daemon.Session)
+}
+
 // ingress serves the outbound message API over a chat adapter's egress.
 type ingress struct {
 	out     sender
+	bind    binder
 	token   string
 	allow   []string
 	metrics *metrics
@@ -231,6 +262,7 @@ func newIngress(cfg ingressConfig) (*ingress, error) {
 	}
 	i := &ingress{
 		out:     cfg.Out,
+		bind:    cfg.Bind,
 		token:   cfg.Token,
 		allow:   slices.Clone(cfg.Allow),
 		metrics: cfg.Metrics,
@@ -330,12 +362,16 @@ func (i *ingress) authorize(w http.ResponseWriter, r *http.Request) error {
 
 // messageRequest is the body of both verbs. ID is empty on POST (the platform
 // assigns it) and required on PATCH. Text and Append are alternatives on
-// PATCH: replace the message, or add to it.
+// PATCH: replace the message, or add to it. Session is POST-only.
 type messageRequest struct {
 	Conversation string `json:"conversation"`
 	ID           string `json:"id,omitempty"`
 	Text         string `json:"text,omitempty"`
 	Append       string `json:"append,omitempty"`
+	// Session is the "<app>/<id>" of the core-agent session this message came
+	// from, bound to the thread the message lands in so a reply reaches it.
+	// Optional: a post with no session is a message, not a conversation.
+	Session string `json:"session,omitempty"`
 }
 
 // messageResponse is the ref a POST hands back: everything the caller needs to
@@ -366,13 +402,40 @@ func (i *ingress) postMessage(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	res, err := i.do(r.Context(), key, fingerprint("post", req), func(ctx context.Context) (opResult, error) {
-		ref, perr := i.post(ctx, chat.Reply{Conversation: req.Conversation, Text: req.Text})
+		// Inside the op, so a replayed idempotency key does not bind twice —
+		// the second attempt would find the thread the first one bound and
+		// refuse, turning a retry the caller is entitled to into a 409. Still
+		// before the post, because this is the half of a bind that can be
+		// refused, and a refusal after the message is out is one nobody can act
+		// on.
+		pending, perr := i.prepareBind(ctx, req)
 		if perr != nil {
 			return opResult{}, perr
 		}
+		// Deferred rather than written into each exit: the reservation is
+		// exclusive, so a path that leaves without releasing it locks the
+		// session out of every later bind for the life of the process. That
+		// includes a panic in the adapter, which net/http recovers a frame
+		// above this one — see do.
+		committed := false
+		defer func() {
+			if pending != nil && !committed {
+				i.bind.AbortBind(pending.sess)
+			}
+		}()
+		ref, perr := i.post(ctx, chat.Reply{Conversation: req.Conversation, Text: req.Text})
+		if perr != nil {
+			// There is no thread to bind.
+			return opResult{}, perr
+		}
 		// ref, not req: the adapter's key names the thread the message landed
-		// in, and that is what a continuation of it has to be posted to.
+		// in, and that is what a continuation of it has to be posted to — and,
+		// for the same reason, the conversation a reply to it will arrive on.
 		i.track(ref, req.Text)
+		if pending != nil {
+			i.bind.CommitBind(ref.Conversation, pending.sess, pending.since)
+			committed = true
+		}
 		return opResult{ref: ref}, nil
 	})
 	if err != nil {
@@ -380,6 +443,80 @@ func (i *ingress) postMessage(w http.ResponseWriter, r *http.Request) error {
 	}
 	writeJSON(w, http.StatusOK, messageResponse{Conversation: res.ref.Conversation, ID: res.ref.ID})
 	return nil
+}
+
+// pendingBind is a bind that has been checked and not yet recorded, because
+// the conversation to record it under is the one the message lands in.
+type pendingBind struct {
+	sess  daemon.Session
+	since int64
+}
+
+// prepareBind validates the session a POST named, if it named one, and returns
+// what postMessage has to commit once the message is out. Nil, nil when the
+// request carries no session — much the commonest case, and one that costs
+// nothing.
+func (i *ingress) prepareBind(ctx context.Context, req messageRequest) (*pendingBind, error) {
+	if req.Session == "" {
+		return nil, nil
+	}
+	if i.bind == nil {
+		// Accepting it would be worse than refusing it: the caller would go on
+		// believing replies reach the agent, and there is no inbound path here
+		// for a reply to arrive on at all.
+		return nil, errf(http.StatusBadRequest,
+			"this deployment is outbound-only, so no reply can be routed and a session cannot be bound")
+	}
+	// Checked before the value is quoted back: the body limit is a megabyte,
+	// and a malformed session should not cost a megabyte of response and a
+	// megabyte of log line to say so.
+	if len(req.Session) > maxSessionRefLen {
+		return nil, errf(http.StatusBadRequest, "session is too long (%d bytes, limit %d)",
+			len(req.Session), maxSessionRefLen)
+	}
+	sess, err := parseSessionRef(req.Session)
+	if err != nil {
+		return nil, errf(http.StatusBadRequest, "session %q is malformed: %v", req.Session, err)
+	}
+	since, err := i.bind.PrepareBind(ctx, req.Conversation, sess)
+	if err != nil {
+		return nil, bindError(sess, err)
+	}
+	return &pendingBind{sess: sess, since: since}, nil
+}
+
+// bindError maps a refused bind onto a status. The two conflicts are the
+// caller's to resolve and will not resolve themselves, so they are 4xx; a
+// daemon that has never heard of the session is a 404 about the session rather
+// than about the conversation, which the message says so the caller does not
+// go looking at the wrong thing.
+func bindError(sess daemon.Session, err error) *ingressError {
+	switch {
+	case errors.Is(err, errConversationBound):
+		return wrapf(http.StatusConflict, err,
+			"this conversation already has an agent session; it cannot be bound to another")
+	case errors.Is(err, errSessionBound):
+		// Naming the conversation, because that is what the caller does about
+		// it: post the next update to that key instead. It is the caller's own
+		// thread — the one its first post was answered with.
+		var bc *bindConflict
+		if errors.As(err, &bc) {
+			return wrapf(http.StatusConflict, err,
+				"session %q is already bound to conversation %q; post there to continue that thread",
+				sessionRef(sess), bc.conv)
+		}
+		return wrapf(http.StatusConflict, err,
+			"session %q is already bound to another conversation", sessionRef(sess))
+	case errors.Is(err, errBindInFlight):
+		return wrapf(http.StatusConflict, err,
+			"another post is binding session %q right now; retry once it has answered", sessionRef(sess))
+	}
+	if isMissingSession(err) {
+		return wrapf(http.StatusNotFound, err, "the agent backend has no session %q", sessionRef(sess))
+	}
+	// Anything else — unreachable, refused, malformed — is not a statement
+	// about the session, so it does not get to sound like one.
+	return wrapf(http.StatusBadGateway, err, "the agent backend would not confirm session %q", sessionRef(sess))
 }
 
 // patchMessage edits a message posted earlier — the half that matters for slow
@@ -393,6 +530,13 @@ func (i *ingress) patchMessage(w http.ResponseWriter, r *http.Request) error {
 	}
 	if req.ID == "" {
 		return errf(http.StatusBadRequest, "id is required")
+	}
+	if req.Session != "" {
+		// An edit is not where a thread is decided. The binding is keyed on the
+		// conversation a message landed in, which a PATCH addressed to a bare
+		// channel does not name — binding whatever it does name would be a
+		// guess, and the caller has a POST to say this on.
+		return errf(http.StatusBadRequest, "session is only valid on POST; bind the thread when you open it")
 	}
 	hasText, hasAppend := strings.TrimSpace(req.Text) != "", strings.TrimSpace(req.Append) != ""
 	switch {
@@ -551,6 +695,7 @@ func (i *ingress) decodeMessage(w http.ResponseWriter, r *http.Request) (message
 
 	req.Conversation = strings.TrimSpace(req.Conversation)
 	req.ID = strings.TrimSpace(req.ID)
+	req.Session = strings.TrimSpace(req.Session)
 	if req.Conversation == "" {
 		return req, errf(http.StatusBadRequest, "conversation is required")
 	}
@@ -583,7 +728,7 @@ func idempotencyKey(r *http.Request) (string, error) {
 // posted.
 func fingerprint(op string, req messageRequest) string {
 	h := sha256.New()
-	for _, part := range []string{op, req.Conversation, req.ID, req.Text, req.Append} {
+	for _, part := range []string{op, req.Conversation, req.ID, req.Text, req.Append, req.Session} {
 		fmt.Fprintf(h, "%d:%s", len(part), part)
 	}
 	return hex.EncodeToString(h.Sum(nil))

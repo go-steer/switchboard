@@ -43,6 +43,7 @@ type metrics struct {
 	turnsFailed     *prometheus.CounterVec   // ["kind"] turns that ended in a failure surfaced to chat
 	reconnects      prometheus.Counter       // SSE relay reconnects
 	activeSessions  prometheus.Gauge         // conversation→session entries currently held
+	activeBindings  prometheus.Gauge         // conversation→session bindings recorded by the ingress
 	ingressRequests *prometheus.CounterVec   // ["op","outcome"] outbound-ingress HTTP requests
 }
 
@@ -90,6 +91,10 @@ func newMetrics() *metrics {
 			Name: "switchboard_active_sessions",
 			Help: "Conversation→session entries currently held in the in-memory map.",
 		}),
+		activeBindings: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "switchboard_active_bindings",
+			Help: "Conversations bound to a session switchboard did not create. In-memory: a restart takes them all, and this gauge going to zero while threads are live is that restart.",
+		}),
 		ingressRequests: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "switchboard_ingress_requests_total",
 			Help: "Outbound-ingress HTTP requests, by verb (post|patch|other) and outcome (ok|error).",
@@ -105,6 +110,7 @@ func newMetrics() *metrics {
 		m.turnsFailed,
 		m.reconnects,
 		m.activeSessions,
+		m.activeBindings,
 		m.ingressRequests,
 	)
 	return m
@@ -200,6 +206,27 @@ func (m *metrics) sessionOpened() {
 		return
 	}
 	m.activeSessions.Inc()
+}
+
+func (m *metrics) sessionClosed() {
+	if m == nil {
+		return
+	}
+	m.activeSessions.Dec()
+}
+
+func (m *metrics) bindRecorded() {
+	if m == nil {
+		return
+	}
+	m.activeBindings.Inc()
+}
+
+func (m *metrics) bindDropped() {
+	if m == nil {
+		return
+	}
+	m.activeBindings.Dec()
 }
 
 func (m *metrics) recordIngress(op string, err error) {
