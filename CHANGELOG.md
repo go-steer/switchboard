@@ -7,6 +7,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- `--outbound-only`: post without receiving, and without the credentials
+  receiving takes (#23). A digest pipeline that drives the outbound ingress and
+  never listens needs no Slack app-level token and no `--google-project` /
+  `--google-subscription`, so `serve` opens no Socket Mode WebSocket, builds no
+  Pub/Sub client, and on Chat needs no subscribe grant, topic or subscription
+  provisioned. It reads no daemon token either — there is no turn to run. The
+  banner says `outbound-only: posting to <platform>, receiving nothing` so the
+  mode is visible on every start, and an inbound credential still set is ignored
+  with a warning naming it. Three configurations are refused instead of guessed
+  at: being unable to receive without having passed the flag, half of Chat's
+  inbound pair, and `--outbound-only` with no `--ingress-addr`, which could do
+  nothing at all while staying healthy to every probe.
+- `chat.ErrNoInbound`, returned by an adapter's `Run` when it was built with no
+  inbound source (#23). An egress-only adapter is a valid thing to have but not
+  a thing to run, so this is a refusal rather than a block on a source that does
+  not exist.
 - The outbound ingress works on Google Chat (#39). `--ingress-addr` with
   `--platform googlechat` was refused at startup, so every agent-initiated use
   case — a scheduled digest, a monitoring escalation, an approval prompt raised
@@ -30,6 +46,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   read it as "some thread".
 
 ### Changed
+- `slack.New` no longer requires an app-level token (#23): an empty one builds
+  an egress-only adapter, whose `Run` returns `chat.ErrNoInbound` rather than
+  blocking on a socket it never opened. `serve` still refuses to start
+  without one unless `--outbound-only` says the run means it, so a deployment
+  whose app-token secret is emptied by a bad rotation crash-loops instead of
+  quietly answering nobody. An outbound-only Slack run never calls `auth.test`,
+  so a bad bot token surfaces on the first post rather than at startup.
 - A post into a bare Slack channel is answered with the thread the message
   rooted (`C0123:1723742401.000100`) rather than the bare channel (#39). Both
   adapters now hold the same invariant — a ref names the thread its message

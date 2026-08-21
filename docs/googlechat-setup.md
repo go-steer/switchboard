@@ -360,6 +360,41 @@ That text has a heading, so under the default `--googlechat-cards rich` it
 arrives as a card — an ingress post renders exactly as an agent answer does.
 Send a line without structure to get plain text.
 
+### Outbound-only
+
+The *inbound* half of this page is what a deployment that only posts can skip
+([#23]): the topic, the subscription, its `roles/pubsub.subscriber` binding, and
+the app's **Connection settings**. Pass `--outbound-only` and switchboard builds
+no Pub/Sub client at all.
+
+Everything egress needs stays: the service account and ADC, the Chat app
+configuration, and the app's membership of each space it posts into. Switchboard
+still builds the Chat REST client from ADC at startup and exits if it cannot, so
+`chat.bot` is as required here as in a bridged run. What goes instead is the
+*daemon* token — an outbound-only run starts no turn, so `--token-env` is never
+read.
+
+```sh
+export SWITCHBOARD_INGRESS_TOKEN=…
+export GOOGLE_APPLICATION_CREDENTIALS=/path/to/chat-sa-key.json
+/tmp/switchboard serve --platform googlechat --outbound-only \
+  --ingress-addr 127.0.0.1:8080 \
+  --ingress-allow spaces/AAA
+# 2026-08-19T16:00:00.123Z switchboard: outbound-only: posting to googlechat, receiving nothing
+```
+
+The mode is declared, not inferred from the absence of a subscription: a
+deployment whose `--google-subscription` went missing in an edit is a bridge
+that broke, and it fails at startup rather than coming back as a process that
+posts, passes `/healthz` and answers nobody. With `--outbound-only` the two
+Pub/Sub flags are ignored if set — including their `SWITCHBOARD_GOOGLE_PROJECT`
+/ `SWITCHBOARD_GOOGLE_SUBSCRIPTION` fallbacks — with a warning saying so.
+
+Without the flag the two go together: one alone is refused at startup rather
+than read as "receive from somewhere unnamed". Dropping only the subscription
+would otherwise leave a project configured for a client nothing pulls from.
+
+[#23]: https://github.com/go-steer/switchboard/issues/23
 [#39]: https://github.com/go-steer/switchboard/issues/39
 
 ### Demo script

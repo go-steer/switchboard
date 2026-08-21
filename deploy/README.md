@@ -156,3 +156,42 @@ e.g. `newTag: v0.1.0` — once the first release is cut.
   single-replica Deployment in the base that is a non-issue; if you add
   replicas, either front the ingress with a session-affinity Service or have
   callers fall back to full `text` on the `409`.
+
+- **Outbound-only Deployments.** If a workload only posts, add
+  `--outbound-only` to its args — **together with the outbound ingress
+  above**, which is then the only way in. Without `--ingress-addr` the flag
+  is refused at startup and the pod crash-loops, since a Deployment that can
+  neither receive nor be asked to post has nothing to do. With it,
+  switchboard runs egress-only: no Socket Mode WebSocket on Slack, no
+  Pub/Sub client on Chat.
+
+  The inbound credential then goes unused, so drop it too — `app-token` from
+  the `switchboard-slack` Secret and the env var sourcing it, or
+  `--google-project` / `--google-subscription` from the Chat overlay's
+  Deployment patch, in which case the GSA needs no `roles/pubsub.subscriber`
+  and no topic or subscription has to exist. The daemon token goes the same
+  way: an outbound-only pod runs no turn and never reads
+  `SWITCHBOARD_DAEMON_TOKEN`, so remove the `env` entry in
+  `base/51-deployment.yaml` that sources it as well as the
+  `switchboard-daemon-token` Secret — the entry is a required `secretKeyRef`,
+  and leaving it pointed at a Secret you deleted parks the pod in
+  `CreateContainerConfigError` before switchboard ever runs.
+
+  What stays on Chat is everything egress needs: it must still be the GSA
+  configured as the Chat app's identity, and the Workload Identity annotation
+  in `patch-serviceaccount.yaml` stays, because egress authenticates through
+  ADC and switchboard builds the Chat client at startup.
+
+  Only the flag selects the mode — an emptied Secret does not. A bridged pod
+  whose app-token key goes missing crash-loops instead of coming back as a
+  process that posts, passes `/healthz` and answers nobody, which is the one
+  degradation a probe cannot see. Same reason for the other refusal: on Chat
+  without `--outbound-only` the two Pub/Sub flags go together, and one alone
+  is rejected. The pod logs `outbound-only: posting to …, receiving nothing`
+  on start.
+
+  One thing the mode gives up: a Slack bridge calls `auth.test` when it opens
+  the socket, and an outbound-only pod never does, so a bad `xoxb-` token is
+  not caught at startup — every ingress POST answers `502` instead. The
+  caller is a program and sees that immediately, but the pod itself stays
+  `Ready`.

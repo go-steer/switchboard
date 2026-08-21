@@ -93,6 +93,13 @@ type Config struct {
 	// ProjectID is the GCP project hosting the Pub/Sub subscription.
 	ProjectID string
 	// SubscriptionID is the Pub/Sub subscription carrying Google Chat events.
+	//
+	// ProjectID and SubscriptionID are the inbound half, and go together:
+	// both set builds an adapter that receives, neither builds an egress-only
+	// one whose Run refuses with chat.ErrNoInbound, and one without the other
+	// is an error rather than a guess. Egress needs neither — posting is a
+	// Chat REST call authorized by ADC — so an outbound-only deployment needs
+	// no subscription, no Pub/Sub grant and no project to name (#23).
 	SubscriptionID string
 	// Cards selects how much of the output is rendered as cards. The zero
 	// value means CardsRich (gateway messages and a structured answer both as
@@ -139,11 +146,11 @@ type Adapter struct {
 // context because the clients are long-lived and outlive any single serve
 // context.
 func New(cfg Config) (*Adapter, error) {
-	if cfg.ProjectID == "" {
-		return nil, errors.New("googlechat: ProjectID is required")
-	}
-	if cfg.SubscriptionID == "" {
-		return nil, errors.New("googlechat: SubscriptionID is required")
+	switch {
+	case cfg.ProjectID == "" && cfg.SubscriptionID != "":
+		return nil, errors.New("googlechat: ProjectID is required to receive")
+	case cfg.ProjectID != "" && cfg.SubscriptionID == "":
+		return nil, errors.New("googlechat: SubscriptionID is required to receive")
 	}
 	cards, ok := ParseCardMode(string(cfg.Cards))
 	if !ok {
@@ -161,13 +168,20 @@ func New(cfg Config) (*Adapter, error) {
 		logf = func(string, ...any) {}
 	}
 	ctx := context.Background()
-	ps, err := pubsub.NewClient(ctx, cfg.ProjectID)
-	if err != nil {
-		return nil, fmt.Errorf("googlechat: pubsub client: %w", err)
+	// No subscription, no Pub/Sub client: an outbound-only deployment should
+	// not need the grant, and building one it will never read would ask for it.
+	var ps *pubsub.Client
+	if cfg.SubscriptionID != "" {
+		var err error
+		if ps, err = pubsub.NewClient(ctx, cfg.ProjectID); err != nil {
+			return nil, fmt.Errorf("googlechat: pubsub client: %w", err)
+		}
 	}
 	svc, err := chatv1.NewService(ctx, option.WithScopes(chatv1.ChatBotScope))
 	if err != nil {
-		ps.Close()
+		if ps != nil {
+			ps.Close()
+		}
 		return nil, fmt.Errorf("googlechat: chat service: %w", err)
 	}
 	return &Adapter{
@@ -189,7 +203,12 @@ func (a *Adapter) Name() string { return "googlechat" }
 // each user message to h until ctx is cancelled or the subscription fails
 // unrecoverably. Receive fans messages out across goroutines and manages ack
 // deadlines while a handler runs, so the daemon round-trip can happen inline.
+// An adapter built without a subscription has nothing to pull from and returns
+// chat.ErrNoInbound.
 func (a *Adapter) Run(ctx context.Context, h chat.Handler) error {
+	if a.ps == nil {
+		return fmt.Errorf("googlechat: no subscription configured: %w", chat.ErrNoInbound)
+	}
 	a.logf("googlechat: subscribing to %s", a.sub)
 	sub := a.ps.Subscription(a.sub)
 	return sub.Receive(ctx, func(ctx context.Context, m *pubsub.Message) {

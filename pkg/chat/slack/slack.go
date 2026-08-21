@@ -54,7 +54,13 @@ const (
 // Config constructs an Adapter. Tokens are loaded from env by the caller
 // (never bare flags).
 type Config struct {
-	// AppToken is the Socket Mode app-level token (xapp-...).
+	// AppToken is the Socket Mode app-level token (xapp-...). Empty builds an
+	// egress-only adapter: it posts, edits and deletes with the bot token,
+	// and Run refuses with chat.ErrNoInbound because there is no socket to
+	// open. That is what an outbound-only deployment wants — Socket Mode is a
+	// receive capability, and a service that only posts should not hold the
+	// credential for it, nor have its uptime bound to a connection it never
+	// reads (#23).
 	AppToken string
 	// BotToken is the bot user OAuth token (xoxb-...).
 	BotToken string
@@ -90,11 +96,9 @@ type Adapter struct {
 }
 
 // New validates the config and builds an Adapter. It does not open the
-// socket; Run does.
+// socket; Run does — and with no AppToken there is no socket to open, which
+// builds an egress-only adapter rather than failing (see Config.AppToken).
 func New(cfg Config) (*Adapter, error) {
-	if cfg.AppToken == "" {
-		return nil, errors.New("slack: AppToken (xapp-) is required")
-	}
 	if cfg.BotToken == "" {
 		return nil, errors.New("slack: BotToken (xoxb-) is required")
 	}
@@ -106,8 +110,18 @@ func New(cfg Config) (*Adapter, error) {
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
-	api := slack.New(cfg.BotToken, slack.OptionAppLevelToken(cfg.AppToken))
-	sm := socketmode.New(api)
+	// The app-level token is a Socket Mode credential and nothing else, so an
+	// egress-only client is built without it and never opens a socket. Egress
+	// authenticates with the bot token either way.
+	var opts []slack.Option
+	if cfg.AppToken != "" {
+		opts = append(opts, slack.OptionAppLevelToken(cfg.AppToken))
+	}
+	api := slack.New(cfg.BotToken, opts...)
+	var sm *socketmode.Client
+	if cfg.AppToken != "" {
+		sm = socketmode.New(api)
+	}
 	return &Adapter{
 		api:        api,
 		sm:         sm,
@@ -122,8 +136,12 @@ func New(cfg Config) (*Adapter, error) {
 func (a *Adapter) Name() string { return "slack" }
 
 // Run opens the Socket Mode connection and dispatches each app-mention to
-// h until ctx is cancelled or the socket fails unrecoverably.
+// h until ctx is cancelled or the socket fails unrecoverably. An adapter built
+// without an app token has no connection to open and returns chat.ErrNoInbound.
 func (a *Adapter) Run(ctx context.Context, h chat.Handler) error {
+	if a.sm == nil {
+		return fmt.Errorf("slack: no app token, so Socket Mode is not configured: %w", chat.ErrNoInbound)
+	}
 	if auth, err := a.api.AuthTestContext(ctx); err != nil {
 		return fmt.Errorf("slack: auth test: %w", err)
 	} else {

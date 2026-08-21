@@ -81,11 +81,13 @@ Derived from the API calls the adapter actually makes (`pkg/chat/slack/slack.go`
 | `users:read.email` | bot | the email on that user record |
 | `commands` | bot | the optional native slash command |
 
-Two of these are conditional. `--caller-id id` asserts the raw Slack user ID and
-never calls `users.info`, so both `users:read*` scopes drop away — at the cost of
-provisioning `U0123ABC` in the daemon instead of an address a human can guess.
-And `--progress-mode off` or `stream` never edits or deletes, though `chat:write`
-covers posting regardless.
+Only `chat:write` is unconditional. `--caller-id id` asserts the raw Slack user
+ID and never calls `users.info`, so both `users:read*` scopes drop away — at the
+cost of provisioning `U0123ABC` in the daemon instead of an address a human can
+guess. `--progress-mode off` or `stream` never edits or deletes, though
+`chat:write` covers posting regardless. And an `--outbound-only` deployment
+(below) reaches none of the inbound path, which drops `connections:write`,
+`app_mentions:read` and `commands` as well.
 
 ## Tokens
 
@@ -100,15 +102,46 @@ export SWITCHBOARD_DAEMON_TOKEN=…           # the one dev/demo/daemon printed
 Rename the vars with `--slack-app-token-env` / `--slack-bot-token-env` /
 `--token-env` if your secret manager insists on different names.
 
+The app-level token is the *inbound* half and nothing else. A deployment that
+only posts — a digest job driving the outbound ingress — can do without it, by
+passing `--outbound-only` ([#23]). switchboard then opens no WebSocket, and
+steps 1 and 2 of *Create the app* (Socket Mode, `app_mention`) are not needed at
+all. Nor are most of the scopes: `connections:write`, `app_mentions:read`, both
+`users:read*` and `commands` are all reached only from the inbound path, so an
+outbound-only bot token needs `chat:write` and nothing else. It still has to be
+invited to the channels it posts into. The daemon token goes too — there is no
+turn to run, so `$SWITCHBOARD_DAEMON_TOKEN` is not read. Startup says which mode
+it is in:
+
+```
+2026-08-19T16:00:00.123Z switchboard: outbound-only: posting to slack, receiving nothing
+```
+
+It has to be said on purpose. An app token that is merely *missing* is a
+failure, not a mode: a bridge whose secret was emptied by a bad rotation must
+come back refusing to start, not quietly posting and answering nobody. Pass
+`--outbound-only` with an app token still set and it is ignored, with a warning
+naming the var.
+
+There is no `auth.test` at start in this mode — that call is part of opening the
+socket — so a wrong `xoxb-` token is not caught until the first post, which
+fails with `502`.
+
+`--outbound-only` without `--ingress-addr` leaves no direction at all, and
+`serve` exits saying so rather than idling.
+
+[#23]: https://github.com/go-steer/switchboard/issues/23
+
 ## Run it
 
 ```sh
 /tmp/switchboard serve --daemon-url http://127.0.0.1:7777
 ```
 
-`--platform slack` is the default, so it is optional. On start the adapter calls
-`auth.test` and logs `slack: connected as <name> (<id>)` — if that line is
-missing, the tokens are wrong and nothing downstream will work.
+`--platform slack` is the default, so it is optional. On start a bridged run
+calls `auth.test` and logs `slack: connected as <name> (<id>)` — if that line is
+missing, the tokens are wrong and nothing downstream will work. An outbound-only
+run never opens the socket, so it never makes that call either.
 
 ## Demo script
 
@@ -153,7 +186,7 @@ apps get no "added to space" event the gateway acts on.
 
 | Symptom | Cause |
 |---------|-------|
-| No `slack: connected as …` line at start | bad `xoxb-` token, or Socket Mode not enabled |
+| No `slack: connected as …` line at start | bad `xoxb-` token, or Socket Mode not enabled — unless the banner says `outbound-only`, in which case no socket is opened and the line is not expected |
 | Mention does nothing at all | `app_mentions:read` missing, or the event not subscribed |
 | Mention works, reply never appears | bot not invited to the channel (`not_in_channel`) |
 | Turns attributed to `U0123ABC` instead of an address | `users:read.email` missing — the log says `has no email (need users:read.email?)` |

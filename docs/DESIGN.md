@@ -160,6 +160,37 @@ reconstructing it. A caller that posted to a bare channel or space is answered
 with the threaded key and follows up with that; the ingress remembers it too, so
 an append addressed by the bare key still continues in the right place.
 
+Ingress and egress are also separable at deployment (#23). A digest pipeline
+that posts and never listens should not have to hold the credentials receiving
+takes — a Slack app-level token and the event subscriptions that come with one,
+a Pub/Sub subscription and a subscribe grant — nor tie its uptime to a
+connection it never reads. So `--outbound-only` selects the mode: without it,
+`serve` runs the adapter; with it, `serve` builds an egress-only adapter, skips
+the router and the daemon client entirely, and waits on the same context `Run`
+would have. `chat.Adapter`'s method set is unchanged; `Run` gains one documented
+return, `chat.ErrNoInbound`. The decision lives in `serve`, which knows the
+config, and each adapter's `Run` returns `chat.ErrNoInbound` if called anyway —
+a refusal, not a resting state, so a future caller that gets the branch wrong
+hears about it instead of blocking forever on a source that does not exist.
+
+Declared, not inferred, and that is the load-bearing part. Reading a missing
+app token or subscription as "this one only posts" would make the *recommended*
+shape — a bridge that also serves the ingress — degrade silently under an
+emptied or badly rotated secret: it would come back posting, passing `/healthz`,
+answering nobody, with no log line to alert on. A flag makes the two cases
+distinguishable, so the misconfiguration is a startup failure and the deployment
+shape is a deliberate one. Given the flag, contradictory inbound credentials are
+ignored with a warning rather than treated as a conflict, because a run whose
+mode depends on which of two contradictory inputs wins is a run nobody can
+reason about.
+
+Three shapes are refused rather than guessed at. Being unable to receive without
+having said so is the one above. Half of Chat's inbound pair (a project without
+a subscription, or the reverse) is a typo. And `--outbound-only` with no ingress
+means the process can do nothing at all: it would start, log a banner and stay
+healthy to every probe while no work was possible, which is strictly worse than
+exiting.
+
 Correlating an outbound post with a later inbound reply — the async
 human-in-the-loop approval round trip — is a larger design and is not part of
 this.

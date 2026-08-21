@@ -19,12 +19,17 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
+	"github.com/go-steer/switchboard/pkg/chat"
 	"github.com/go-steer/switchboard/pkg/chat/googlechat"
 )
 
@@ -99,22 +104,320 @@ func TestRunServeIngressValidation(t *testing.T) {
 // dial. Until #39 it stopped one step earlier, and every agent-initiated use
 // case — a scheduled digest, a 3am escalation — was impossible on Chat.
 //
-// The assertion is on where it got to, not on success: the adapter refusing an
-// empty --google-project is the run having reached a check that lives beyond
-// the one being tested.
+// The assertion is on where it got to, not on success: the adapter refusing a
+// half-configured subscription is the run having reached a check that lives
+// beyond the one being tested. It is refused for being half a pair rather than
+// for the subscription alone: with neither flag set, a bridged run is refused
+// earlier and by a different check, and an --outbound-only one is not refused
+// at all (#23).
 func TestRunServeIngressIsNotSlackOnly(t *testing.T) {
 	t.Setenv("SWITCHBOARD_DAEMON_TOKEN", "daemon-token")
 	t.Setenv("SWITCHBOARD_INGRESS_TOKEN", "ingress-token")
+	// Both Chat flags default from the environment, so an operator's own
+	// exported values would otherwise decide what this test configures.
+	t.Setenv("SWITCHBOARD_GOOGLE_PROJECT", "")
+	t.Setenv("SWITCHBOARD_GOOGLE_SUBSCRIPTION", "")
 
-	err := runServe([]string{"--platform", "googlechat", "--ingress-addr", "127.0.0.1:0"})
+	err := runServe([]string{
+		"--platform", "googlechat", "--ingress-addr", "127.0.0.1:0",
+		"--google-subscription", "sub-without-a-project",
+	})
 	if err == nil {
-		t.Fatal("runServe returned nil; want the adapter to refuse an empty --google-project")
+		t.Fatal("runServe returned nil; want the adapter to refuse a subscription with no project")
 	}
 	if strings.Contains(err.Error(), "Slack-only") {
 		t.Fatalf("the ingress still refuses googlechat: %v", err)
 	}
 	if !strings.Contains(err.Error(), "googlechat adapter") {
 		t.Errorf("error = %q, want it to come from building the adapter", err)
+	}
+}
+
+// TestRunServeRefusesWhenItCanNeitherReceiveNorPost: an outbound-only run is a
+// real shape (#23), but only with somewhere for the digests to come from. With
+// --outbound-only and no ingress the process would start, log a banner and sit
+// there forever doing nothing — healthy to every probe, useless to everyone —
+// so it refuses instead, naming the knob that is missing.
+//
+// Both platforms, because the check is deliberately ahead of the adapter: it
+// reads only the two flags that decide the shape, so nothing about it is
+// platform-specific and neither platform's credentials are touched to reach it.
+// That is what makes it reachable on Chat at all — googlechat.New builds a REST
+// service from Application Default Credentials, which a hermetic test has none
+// of.
+func TestRunServeRefusesWhenItCanNeitherReceiveNorPost(t *testing.T) {
+	for _, platform := range []string{"slack", "googlechat"} {
+		t.Run(platform, func(t *testing.T) {
+			// The ingress address defaults from the environment, so an exported
+			// value would otherwise give this run the direction it is meant to
+			// be missing.
+			t.Setenv("SWITCHBOARD_INGRESS_ADDR", "")
+
+			err := runServe([]string{"--platform", platform, "--outbound-only"})
+			if err == nil {
+				t.Fatal("runServe started a process that can neither receive nor post")
+			}
+			if !strings.Contains(err.Error(), "nothing to do") {
+				t.Errorf("error = %q, want it to say there is nothing to do", err)
+			}
+			if !strings.Contains(err.Error(), "--ingress-addr") {
+				t.Errorf("error = %q, want it to name the flag that would give it a direction", err)
+			}
+		})
+	}
+}
+
+// TestRunServeRequiresAnInboundSourceUnlessDeclaredOutboundOnly: the mode is
+// declared, never inferred from whether a credential happens to be set.
+//
+// This is the whole reason --outbound-only is a flag. The recommended
+// deployment is bidirectional — a Socket Mode bridge that also serves the
+// ingress — and if an emptied or rotated app-token secret were read as "this
+// one only posts", that deployment would come back up posting, passing
+// /healthz, and answering nobody, with nothing in the logs a pager could match
+// on. It fails loudly instead, and says how to mean it on purpose.
+func TestRunServeRequiresAnInboundSourceUnlessDeclaredOutboundOnly(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		env  map[string]string
+		want []string
+	}{
+		{
+			// The message has to name the var this run was told to read, not
+			// the default: an operator who renamed it is the one most likely to
+			// have emptied it by mistake.
+			name: "slack",
+			args: []string{"--platform", "slack", "--slack-app-token-env", "TEAM_SLACK_APP_TOKEN"},
+			env:  map[string]string{"TEAM_SLACK_APP_TOKEN": ""},
+			want: []string{"$TEAM_SLACK_APP_TOKEN", "--outbound-only"},
+		},
+		{
+			name: "googlechat",
+			args: []string{"--platform", "googlechat"},
+			env: map[string]string{
+				"SWITCHBOARD_GOOGLE_PROJECT":      "a-project",
+				"SWITCHBOARD_GOOGLE_SUBSCRIPTION": "",
+			},
+			want: []string{"--google-subscription", "--outbound-only"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("SWITCHBOARD_DAEMON_TOKEN", "daemon-token")
+			t.Setenv("SWITCHBOARD_SLACK_BOT_TOKEN", "xoxb-x")
+			// An ingress is configured, so this run has a direction: what it is
+			// refused for is being unable to receive without having said so.
+			t.Setenv("SWITCHBOARD_INGRESS_TOKEN", "ingress-token")
+			t.Setenv("SWITCHBOARD_INGRESS_ADDR", "127.0.0.1:0")
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+
+			err := runServe(tc.args)
+			if err == nil {
+				t.Fatal("runServe silently degraded a bridge into an outbound-only run")
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error = %q, want it to mention %q", err, want)
+				}
+			}
+		})
+	}
+}
+
+// TestOutboundOnlyIgnoresTheInboundCredentialsOutLoud: the flag wins over any
+// inbound credential still lying around, because a run whose mode depends on
+// which of two contradictory things it was given is a run nobody can reason
+// about. Ignoring them quietly is the other half of the trap, though — somebody
+// provisioned that token expecting it to be used — so it is ignored in writing.
+//
+// Slack only: proving it on Chat means getting past googlechat.New, which needs
+// Application Default Credentials.
+func TestOutboundOnlyIgnoresTheInboundCredentialsOutLoud(t *testing.T) {
+	t.Setenv("SWITCHBOARD_SLACK_APP_TOKEN", "xapp-left-over")
+	t.Setenv("SWITCHBOARD_INGRESS_TOKEN", "ingress-token")
+	t.Setenv("SWITCHBOARD_INGRESS_ADDR", "127.0.0.1:0")
+
+	// The bot token is left unset, so the run reaches the warning and then dies
+	// one line later in slack.New. Starting a server and shutting it down again
+	// would be a much slower way to read the same log.
+	t.Setenv("SWITCHBOARD_SLACK_BOT_TOKEN", "")
+
+	var err error
+	logs := captureStderr(t, func() { err = runServe([]string{"--platform", "slack", "--outbound-only"}) })
+	if err == nil {
+		t.Fatal("runServe = nil, want it to stop at the missing bot token")
+	}
+	if !strings.Contains(err.Error(), "slack adapter") {
+		t.Fatalf("error = %q, want the run to have reached the adapter switch", err)
+	}
+	if !strings.Contains(logs, "SWITCHBOARD_SLACK_APP_TOKEN") || !strings.Contains(logs, "warning") {
+		t.Errorf("logs did not warn that the app token is ignored:\n%s", logs)
+	}
+}
+
+// TestRunServeOutboundOnlyServesTheIngress: with --outbound-only and an
+// ingress, serve runs. It does not refuse, it does not call Run on an adapter
+// that would answer chat.ErrNoInbound, and it serves the ingress for as long as
+// a bridged run would — it waits on the same context Run would have, and a
+// signal shuts it down cleanly.
+//
+// End to end through runServe rather than in pieces, because the thing that
+// broke before #23 was the wiring: every part of an egress-only run existed and
+// none of them could be reached. The Slack credentials here are nonsense
+// strings and never leave the process: the adapter is built, never run, and the
+// only request made is one the ingress rejects before it would post anything.
+func TestRunServeOutboundOnlyServesTheIngress(t *testing.T) {
+	// Deliberately absent. An outbound-only run has no daemon to present a
+	// bearer token to, so being made to provision one would be asking for a
+	// credential with nowhere to go — and this is the test that would notice.
+	t.Setenv("SWITCHBOARD_DAEMON_TOKEN", "")
+	t.Setenv("SWITCHBOARD_INGRESS_TOKEN", "ingress-token")
+	t.Setenv("SWITCHBOARD_SLACK_BOT_TOKEN", "xoxb-x")
+	t.Setenv("SWITCHBOARD_INGRESS_ADDR", "")
+	// Cleared so the run logs the banner and nothing else about the mode: the
+	// warning about an ignored app token contains "outbound-only" too, and an
+	// exported token on a developer's machine would otherwise satisfy the
+	// assertion below without the banner ever being printed.
+	t.Setenv("SWITCHBOARD_SLACK_APP_TOKEN", "")
+
+	// SIGTERM below goes to the whole test binary, whose default disposition is
+	// to die silently. serve installs a handler, but only while it is running:
+	// if it returned early — a config this test got wrong — the signal would
+	// take the suite down with no output saying why. This one is held for the
+	// test's lifetime so the signal always lands somewhere survivable.
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGTERM)
+	defer signal.Stop(sigs)
+
+	// serve binds the addresses itself, so the ports have to be named up front:
+	// take two from the ephemeral range and hand them straight back.
+	ingressAddr, metricsAddr := freeAddr(t), freeAddr(t)
+
+	var runErr error
+	logs := captureStderr(t, func() {
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			runErr = runServe([]string{
+				"--platform", "slack", "--outbound-only",
+				"--ingress-addr", ingressAddr,
+				"--metrics-addr", metricsAddr,
+			})
+		}()
+
+		// Deferred, so that however the assertions below end, serve is stopped
+		// and its goroutine joined: leaving it running would hold stderr, the
+		// two ports, and the signal handler for the rest of the binary.
+		defer func() {
+			if err := syscall.Kill(syscall.Getpid(), syscall.SIGTERM); err != nil {
+				t.Errorf("SIGTERM: %v", err)
+			}
+			<-done
+		}()
+
+		// Wait on the ingress itself, not on /healthz: the two listeners start
+		// concurrently, so a healthy metrics endpoint says nothing about
+		// whether the port under test is bound yet. Any answer will do — this
+		// is a liveness poll, and the status is asserted below.
+		waitReady(t, "http://"+ingressAddr+ingressPath)
+
+		// The pod is healthy, which is the claim an outbound-only Deployment's
+		// probes rest on.
+		if _, code := httpGet(t, "http://"+metricsAddr+"/healthz"); code != http.StatusOK {
+			t.Errorf("/healthz = %d, want 200 on an outbound-only run", code)
+		}
+
+		// The ingress is listening and authenticating — an unauthorized POST is
+		// refused by the ingress itself, without a platform call.
+		req, err := http.NewRequest(http.MethodPost, "http://"+ingressAddr+ingressPath,
+			strings.NewReader(`{"conversation":"C0123ABCD","text":"digest"}`))
+		if err != nil {
+			t.Errorf("new request: %v", err)
+			return
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer not-the-ingress-token")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Errorf("POST to the outbound-only ingress: %v", err)
+			return
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Errorf("POST with a bad token = %d, want 401", resp.StatusCode)
+		}
+	})
+
+	// A signal is a clean stop, not a failure — including on a run that never
+	// had an adapter to stop.
+	if runErr != nil {
+		if errors.Is(runErr, chat.ErrNoInbound) {
+			t.Fatalf("serve ran an adapter with no event source: %v", runErr)
+		}
+		t.Fatalf("runServe = %v, want a clean shutdown on SIGTERM", runErr)
+	}
+	// Said out loud, because a gateway nobody can talk to looks exactly like a
+	// broken one in the logs otherwise. The whole line, since this is what an
+	// operator greps for and the docs quote it verbatim.
+	if !strings.Contains(logs, "outbound-only: posting to slack, receiving nothing") {
+		t.Errorf("logs did not announce the outbound-only run:\n%s", logs)
+	}
+	if strings.Contains(logs, "bridging") {
+		t.Errorf("logs claim a bridge this process does not have:\n%s", logs)
+	}
+}
+
+// TestStopListenersCancelsBeforeItDrains: the shutdown has to cancel the run's
+// context before waiting on the listeners, because a listener returns when that
+// context is done. Wait first and the wait never ends — the only other thing
+// that cancels is serve's deferred stop, which cannot run until serve returns,
+// which is what the wait is blocking.
+//
+// The failure that reaches this is an adapter.Run error that did not itself
+// cancel the context: a dropped Socket Mode connection giving up, say. The
+// process would then sit on this line forever with /healthz answering 200 —
+// alive to every probe, doing nothing, and never restarted. That is the one
+// state this binary must not be able to reach, so it is pinned here rather than
+// left to a live failure to demonstrate.
+func TestStopListenersCancelsBeforeItDrains(t *testing.T) {
+	stopped := make(chan struct{})
+	srvErrs := make(chan error, 1)
+	// A listener behaving exactly as serveMetrics and serveIngress do: it
+	// returns when, and only when, the context is cancelled.
+	go func() {
+		<-stopped
+		srvErrs <- nil
+	}()
+
+	done := make(chan error, 1)
+	go func() { done <- stopListeners(func() { close(stopped) }, 1, srvErrs) }()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("stopListeners = %v, want nil from a listener that stopped cleanly", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("stopListeners never returned: it drained the listeners without cancelling them first")
+	}
+}
+
+// TestStopListenersReportsTheFirstFailure: every listener is drained, and the
+// one reported is the first that failed — a second listener returning nil after
+// a bind failure must not be what decides the exit code.
+func TestStopListenersReportsTheFirstFailure(t *testing.T) {
+	want := errors.New("metrics: bind failed")
+	srvErrs := make(chan error, 2)
+	srvErrs <- want
+	srvErrs <- errors.New("ingress: stopped cleanly after the cancel")
+
+	if got := stopListeners(func() {}, 2, srvErrs); !errors.Is(got, want) {
+		t.Errorf("stopListeners = %v, want %v", got, want)
+	}
+	if len(srvErrs) != 0 {
+		t.Errorf("%d listener results left undrained", len(srvErrs))
 	}
 }
 
@@ -347,7 +650,7 @@ func TestMainReportsAStartupFailureOnce(t *testing.T) {
 // captureStderr runs fn with os.Stderr redirected and returns what it wrote.
 // The flag package prints its defaults there, and that output is the only place
 // a registered default is observable from outside runServe.
-func captureStderr(t *testing.T, fn func()) string {
+func captureStderr(t *testing.T, fn func()) (out string) {
 	t.Helper()
 	r, w, err := os.Pipe()
 	if err != nil {
@@ -355,18 +658,23 @@ func captureStderr(t *testing.T, fn func()) string {
 	}
 	saved := os.Stderr
 	os.Stderr = w
-	done := make(chan string, 1)
+	copied := make(chan string, 1)
 	go func() {
 		var b strings.Builder
 		_, _ = io.Copy(&b, r)
-		done <- b.String()
+		copied <- b.String()
+	}()
+	// Deferred, because a t.Fatal inside fn unwinds through here: without this
+	// os.Stderr would stay pointed at a closed pipe and every later test in the
+	// binary — including the failure report — would write into nothing.
+	defer func() {
+		os.Stderr = saved
+		_ = w.Close()
+		out = <-copied
+		_ = r.Close()
 	}()
 	fn()
-	os.Stderr = saved
-	_ = w.Close()
-	out := <-done
-	_ = r.Close()
-	return out
+	return
 }
 
 // TestParseCallerMode and TestParseProgressMode pin the flag vocabulary: a
