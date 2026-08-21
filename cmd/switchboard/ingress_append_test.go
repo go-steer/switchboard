@@ -215,6 +215,210 @@ func TestIngressAppendRollsOverInsideThread(t *testing.T) {
 	}
 }
 
+// threadingSender is a Google Chat-shaped egress: a post into a bare space is
+// assigned a thread by the platform, and the ref names it (the adapter's
+// landedKey). Its ids are message resource names, which is what makes the
+// distinction matter — unlike a Slack thread_ts, an id here is not a thread and
+// must never be used as one.
+type threadingSender struct {
+	fittingSender
+	space string
+}
+
+func (s *threadingSender) Send(ctx context.Context, r chat.Reply) (chat.MessageRef, error) {
+	ref, err := s.fittingSender.Send(ctx, r)
+	if err != nil || ref.ID == "" {
+		return ref, err
+	}
+	ref.ID = s.space + "/messages/" + ref.ID
+	if !strings.Contains(strings.TrimSuffix(r.Conversation, ":"), ":") {
+		ref.Conversation = s.space + ":" + s.space + "/threads/assigned"
+	}
+	return ref, nil
+}
+
+// TestIngressAppendRollsOverOnGoogleChat walks the whole Chat-shaped round trip
+// an alert makes: post to a bare space, append until it overflows, keep
+// appending to the continuation. It is a shape test, not the regression test
+// for #39 — a caller that follows the ref it was handed never reaches the
+// branch that was broken, and this would have passed before the fix too. The
+// two tests below are the ones that fail on pre-fix code.
+func TestIngressAppendRollsOverOnGoogleChat(t *testing.T) {
+	const space = "spaces/AAA"
+	out := &threadingSender{fittingSender: fittingSender{limit: 20}, space: space}
+	i := newTestIngress(t, out)
+
+	ref := postFor(t, i, space, "0123456789") // 10 of 20 used
+	wantThread := space + ":" + space + "/threads/assigned"
+	if ref.Conversation != wantThread {
+		t.Fatalf("POST answered %q, want the thread it landed in (%q)", ref.Conversation, wantThread)
+	}
+
+	// 10 + "\n" + 10 = 21, one past the limit.
+	w := appendReq(t, i, ref, "abcdefghij")
+	if w.Code != http.StatusOK {
+		t.Fatalf("overflowing append = %d %s, want 200", w.Code, w.Body)
+	}
+	var cont messageResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &cont); err != nil {
+		t.Fatalf("decode rollover response: %v (%s)", err, w.Body)
+	}
+
+	sent := out.sentReplies()
+	if len(sent) != 2 {
+		t.Fatalf("posted %d messages, want 2 (original + continuation)", len(sent))
+	}
+	if sent[1].Conversation != wantThread {
+		t.Errorf("continuation went to %q, want the thread the original landed in (%q)",
+			sent[1].Conversation, wantThread)
+	}
+	if strings.Contains(sent[1].Conversation, "/messages/") {
+		t.Errorf("continuation key %q names a message where a thread belongs", sent[1].Conversation)
+	}
+	// And the caller can keep appending to what it was handed back.
+	if w := appendReq(t, i, cont, "next"); w.Code != http.StatusNoContent {
+		t.Fatalf("append to the continuation = %d %s, want 204", w.Code, w.Body)
+	}
+}
+
+// TestIngressAppendRollsOverFromTheKeyItWasPostedTo checks the rollover uses
+// where the adapter said the message went, not what the request addressed it
+// by. The two differ on purpose: bodyKey drops the thread part so "a caller
+// need not echo the exact conversation string it posted with", so an append can
+// arrive naming the bare space. Rebuilding the thread from that request put a
+// message resource name in a thread field on Chat — the same malformed key #39
+// is about, reached the long way round.
+func TestIngressAppendRollsOverFromTheKeyItWasPostedTo(t *testing.T) {
+	const space = "spaces/AAA"
+	out := &threadingSender{fittingSender: fittingSender{limit: 20}, space: space}
+	i := newTestIngress(t, out)
+
+	ref := postFor(t, i, space, "0123456789")
+	// The caller appends with the space it posted to, not the thread key it was
+	// handed back. Both address the same message, and the ingress says so.
+	bare := messageResponse{Conversation: space, ID: ref.ID}
+
+	w := appendReq(t, i, bare, "abcdefghij") // 10 + "\n" + 10 = 21, one over
+	if w.Code != http.StatusOK {
+		t.Fatalf("overflowing append = %d %s, want 200", w.Code, w.Body)
+	}
+	sent := out.sentReplies()
+	if len(sent) != 2 {
+		t.Fatalf("posted %d messages, want 2 (original + continuation)", len(sent))
+	}
+	wantThread := space + ":" + space + "/threads/assigned"
+	if sent[1].Conversation != wantThread {
+		t.Errorf("continuation went to %q, want the thread the original landed in (%q)",
+			sent[1].Conversation, wantThread)
+	}
+	if strings.Contains(sent[1].Conversation, "/messages/") {
+		t.Errorf("continuation key %q names a message where a thread belongs", sent[1].Conversation)
+	}
+}
+
+// TestIngressAppendRollsOverAfterAReplace checks a replace does not overwrite
+// where the ingress knows the message lives. A PATCH names the message by
+// whatever key the caller has, and an edit is the caller restating the text,
+// not correcting its address.
+func TestIngressAppendRollsOverAfterAReplace(t *testing.T) {
+	const space = "spaces/AAA"
+	out := &threadingSender{fittingSender: fittingSender{limit: 20}, space: space}
+	i := newTestIngress(t, out)
+
+	ref := postFor(t, i, space, "seed")
+	bare := messageResponse{Conversation: space, ID: ref.ID}
+
+	body, err := json.Marshal(messageRequest{Conversation: space, ID: ref.ID, Text: "0123456789"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if w := do(t, i, http.MethodPatch, string(body)); w.Code != http.StatusNoContent {
+		t.Fatalf("replace = %d %s, want 204", w.Code, w.Body)
+	}
+	if w := appendReq(t, i, bare, "abcdefghij"); w.Code != http.StatusOK {
+		t.Fatalf("overflowing append = %d %s, want 200", w.Code, w.Body)
+	}
+
+	sent := out.sentReplies()
+	wantThread := space + ":" + space + "/threads/assigned"
+	if len(sent) != 2 || sent[1].Conversation != wantThread {
+		t.Errorf("continuation went to %+v, want the thread the original landed in (%q)",
+			sent, wantThread)
+	}
+}
+
+// TestIngressAppendRollsOverIntoTheThreadTheRequestNames checks the remembered
+// conversation does not shout down a better one on the request. For a message
+// this ingress posted, what it remembers came from the adapter and names the
+// thread. For one it first saw through a PATCH — a message posted by another
+// replica, or before a restart — what it remembers is only what that caller
+// typed, which may be a bare channel. Preferring it unconditionally would throw
+// away a thread the current request states outright, and send the continuation
+// somewhere the original message is not.
+func TestIngressAppendRollsOverIntoTheThreadTheRequestNames(t *testing.T) {
+	out := &fittingSender{limit: 20}
+	i := newTestIngress(t, out)
+
+	// First seen through a PATCH addressed by the bare channel: nothing here
+	// came from the adapter, so nothing here knows about the thread.
+	const id = "ts-1"
+	body, err := json.Marshal(messageRequest{Conversation: "C0123", ID: id, Text: "0123456789"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if w := do(t, i, http.MethodPatch, string(body)); w.Code != http.StatusNoContent {
+		t.Fatalf("replace = %d %s, want 204", w.Code, w.Body)
+	}
+
+	// Now the caller appends and does say which thread the message is in.
+	threaded := messageResponse{Conversation: "C0123:ts-root", ID: id}
+	if w := appendReq(t, i, threaded, "abcdefghij"); w.Code != http.StatusOK {
+		t.Fatalf("overflowing append = %d %s, want 200", w.Code, w.Body)
+	}
+
+	sent := out.sentReplies()
+	if len(sent) != 1 {
+		t.Fatalf("posted %d continuations, want 1", len(sent))
+	}
+	if sent[0].Conversation != "C0123:ts-root" {
+		t.Errorf("continuation went to %q, want the thread the request named (C0123:ts-root)",
+			sent[0].Conversation)
+	}
+}
+
+// TestIngressAppendRollsOverFromATrailingColon checks a key that ends in a
+// colon is read as naming no thread, which is what both adapters' egress does
+// with it. Testing "contains a colon" instead would take the key at face value
+// and post the continuation at the top level of the channel, scattering the
+// timeline away from the message it continues.
+func TestIngressAppendRollsOverFromATrailingColon(t *testing.T) {
+	out := &fittingSender{limit: 20}
+	i := newTestIngress(t, out)
+
+	// Addressed by PATCH, since no adapter hands back a key shaped like this;
+	// a caller holding one does.
+	const id = "ts-1"
+	body, err := json.Marshal(messageRequest{Conversation: "C0123:", ID: id, Text: "0123456789"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if w := do(t, i, http.MethodPatch, string(body)); w.Code != http.StatusNoContent {
+		t.Fatalf("replace = %d %s, want 204", w.Code, w.Body)
+	}
+	if w := appendReq(t, i, messageResponse{Conversation: "C0123:", ID: id}, "abcdefghij"); w.Code != http.StatusOK {
+		t.Fatalf("overflowing append = %d %s, want 200", w.Code, w.Body)
+	}
+
+	sent := out.sentReplies()
+	if len(sent) != 1 {
+		t.Fatalf("posted %d continuations, want 1", len(sent))
+	}
+	if sent[0].Conversation != "C0123:"+id {
+		t.Errorf("continuation went to %q, want the thread the message roots (C0123:%s)",
+			sent[0].Conversation, id)
+	}
+}
+
 // TestIngressAppendConcurrent checks concurrent appends to one message do not
 // lose a line — the read-modify-write is serialized per message, so every
 // caller's text survives even when they race.

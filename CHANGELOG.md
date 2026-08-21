@@ -6,7 +6,37 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- The outbound ingress works on Google Chat (#39). `--ingress-addr` with
+  `--platform googlechat` was refused at startup, so every agent-initiated use
+  case — a scheduled digest, a monitoring escalation, an approval prompt raised
+  at 3am — worked on Slack and was impossible on Chat. The ingress itself was
+  already platform-neutral; what was missing was the guard's removal and the
+  ref fix below.
+
+### Fixed
+- A Google Chat message that overflowed an `append` continued into a malformed
+  conversation key (#39). The ingress builds a continuation from
+  `ref.Conversation`, and a ref for a post into a bare space did not name the
+  thread Chat assigned it — so the ingress fell back on Slack's rule that a
+  top-level message's id is the thread it roots, and handed a *message*
+  resource name (`spaces/AAA:spaces/AAA/messages/CCC`) to a thread field. The
+  Chat adapter now returns a ref naming where the message actually landed. Only
+  the bare-space case was affected, which is precisely what an alert posts to.
+- An `append` that overflowed a message addressed by a key ending in a colon
+  (`C0123:`, which names a channel and no thread) posted its continuation at the
+  top level of the channel instead of under the message it continues (#39). Both
+  adapters' egress already read a trailing colon as "no thread"; the ingress
+  read it as "some thread".
+
 ### Changed
+- A post into a bare Slack channel is answered with the thread the message
+  rooted (`C0123:1723742401.000100`) rather than the bare channel (#39). Both
+  adapters now hold the same invariant — a ref names the thread its message
+  landed in — so the ingress follows the ref instead of knowing each platform's
+  threading rule. Following up with the key the POST returned already worked and
+  still does; a caller that stored the bare channel is also unaffected, since
+  the thread part plays no role in addressing a message.
 - `internal/version.Version` is `v0.3.0-dev`, so a build off main no longer
   claims to be the release that just shipped (#43). Same window
   `verify-version-fallback` keeps short after every tag.

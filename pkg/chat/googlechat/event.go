@@ -560,6 +560,32 @@ func splitConversation(key string) (space, thread string, ok bool) {
 	return space, thread, true
 }
 
+// landedKey names the conversation a just-created message actually went into,
+// for the ref post hands back. conv is the key it was asked to post to, and
+// thread is what splitConversation read from it.
+//
+// A post into a bare space names no thread, so Chat assigns one — and the ref
+// has to say which, because a ref is an address to come back to. The outbound
+// ingress builds the continuation of an overflowing message from
+// ref.Conversation, and a key with no thread in it sends the ingress down the
+// "append the id" path meant for Slack, where a top-level message's id *is*
+// its thread. Here the id is a message resource name, and the result was the
+// malformed key spaces/AAA:spaces/AAA/messages/CCC (#39).
+//
+// When the caller already named a thread the key is returned unchanged: it is
+// the more specific of the two and Chat cannot have moved the message. Chat
+// reporting no thread at all is not expected on a created message, and the
+// original key is the honest answer to it rather than one invented here.
+func landedKey(conv, space, thread string, created *chatv1.Message) string {
+	if thread != "" {
+		return conv
+	}
+	if t := threadOf(created); t != "" {
+		return conversationKey(space, t)
+	}
+	return conv
+}
+
 // chunk splits s into pieces no longer than limit bytes for posting as several
 // ordered in-thread messages. Shared with the other adapters (pkg/chat), which
 // is what closes #31: Chat text uses the same ``` syntax as markdown and

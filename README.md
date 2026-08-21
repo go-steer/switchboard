@@ -397,31 +397,50 @@ curl -sS -X PATCH localhost:8080/v1/messages \
 ```
 
 `text` and `append` are alternatives; a PATCH must carry exactly one. Two things
-to know about `append`, both consequences of Slack having no "append" call of
-its own — an edit replaces the whole message, so switchboard has to know what is
-already there:
+to know about `append`, both consequences of neither platform having an
+"append" call of its own — an edit replaces the whole message, so switchboard
+has to know what is already there:
 
 - **It only works on messages this process posted.** The current text of the
   last 1024 posted messages is held in memory; append to anything else — a
   message from before a restart, or one posted by another replica — answers
   `409`, and the caller should send the full `text`. Nothing is ever read back
-  from the platform, so an append cannot clobber an edit made in the Slack UI.
+  from the platform, so an append cannot clobber an edit made in the chat UI.
 - **It rolls over rather than truncating.** When the combined text would pass
-  Slack's single-message limit, switchboard posts the new line as a reply in the
-  same thread and answers `200` with the continuation's ref. Keep appending to
+  the platform's single-message limit, switchboard posts the new line as a reply
+  in the same thread and answers `200` with the continuation's ref. Keep appending to
   *that* ref from then on; the timeline continues under the original message
   instead of silently losing its head.
 
 Details worth knowing:
 
 - **No `platform` field.** An instance bridges the one platform it was started
-  with, so the target is implied. Slack only for now (`--ingress-addr` with
-  `--platform googlechat` is refused at startup).
-- **`conversation` is the platform's conversation key.** For Slack that is a
-  channel ID (`C0123ABCD`) to post a new top-level message, or
-  `C0123ABCD:1723742401.001900` to post into an existing thread. The `id` a POST
-  returns is also the thread it rooted, so `"<channel>:<id>"` threads follow-ups
-  under it.
+  with, so the target is implied. Both platforms are supported.
+- **`conversation` is the platform's conversation key.** A bare channel or space
+  posts a new top-level message; a full key posts into an existing thread.
+
+  | Platform | Top-level | In a thread |
+  |----------|-----------|-------------|
+  | Slack | `C0123ABCD` | `C0123ABCD:1723742401.001900` |
+  | Google Chat | `spaces/AAA` | `spaces/AAA:spaces/AAA/threads/BBB` |
+
+  Follow up using the `conversation` a POST **answers with**, not the one you
+  sent: it names the thread the message actually landed in. Post to `C0123ABCD`
+  and the answer is `C0123ABCD:1723742401.001900`; post to `spaces/AAA` and it is
+  `spaces/AAA:spaces/AAA/threads/BBB`. On Slack you could have built that
+  yourself — a top-level message's `id` is the `thread_ts` of the thread it
+  roots — but on Chat the thread is assigned by the platform and there is
+  nothing to build it from.
+- **The bot has to be in the conversation.** A Slack bot must be invited to the
+  channel; a Chat app must be a member of the space. Neither platform lets an
+  app post its way in, and the refusal reads like a credentials problem —
+  `403` from Slack, and from Chat a `403` or a `404`, depending on whether it
+  will admit the space exists. Check membership before re-issuing credentials.
+- **A post renders like an answer.** It goes through the same egress the router
+  replies with, so a digest looks like a reply rather than announcing where it
+  came from — Block Kit under `--slack-rich-blocks`, and under
+  `--googlechat-cards rich` a card if the markdown has structure (headings,
+  rules) or plain text if it does not. There is no `card` field.
 - **`Idempotency-Key` is optional.** A POST carrying one that has been seen
   posts nothing and returns the original ref, so a scheduler retrying a request
   it never saw the answer to does not double-post. The map is in-memory and

@@ -99,10 +99,11 @@ func TestSendThreadlessPostsTopLevel(t *testing.T) {
 	if sawThreadTS {
 		t.Error("a thread-less post sent thread_ts, want it omitted")
 	}
-	// The ref round-trips back through Update, and its ID is also the thread
-	// the message rooted — a caller can follow up under it with "C0:111.111".
-	if ref.Conversation != "C0" || ref.ID != "111.111" {
-		t.Errorf("ref = %+v, want {C0 111.111}", ref)
+	// The ref names the thread this post rooted, so a caller following up with
+	// what it was handed lands under the message rather than beside it. Update
+	// and Delete take the channel back out of the key, so it still round-trips.
+	if ref.Conversation != "C0:111.111" || ref.ID != "111.111" {
+		t.Errorf("ref = %+v, want {C0:111.111 111.111}", ref)
 	}
 }
 
@@ -137,6 +138,81 @@ func TestSendThreadlessChunksStayTogether(t *testing.T) {
 		if ts != "1.000" {
 			t.Errorf("chunk %d thread_ts = %q, want 1.000 (the first message's ts)", i+1, ts)
 		}
+	}
+}
+
+// TestSendRefNamesTheThreadItRooted pins the ref contract the outbound ingress
+// depends on: whenever the platform put the message in a thread, the ref says
+// which. The ingress builds the continuation of an overflowing message from
+// ref.Conversation, and it cannot know Slack's rule that a top-level message's
+// id doubles as its thread_ts — that identity holds on no other platform (#39).
+//
+// The round-trip matters as much as the shape: Update and Delete take the
+// channel back out of the key, so a longer key still addresses one message.
+func TestSendRefNamesTheThreadItRooted(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		conv string
+		rich bool
+		want string
+	}{
+		{"a bare channel adopts the thread it roots", "C0", false, "C0:111.111"},
+		{"a trailing colon is not a thread", "C0:", false, "C0:111.111"},
+		{"an explicit thread is kept", "C0:99.999", false, "C0:99.999"},
+		// The Block Kit path returns its own ref rather than falling through to
+		// the text loop, so it has to name the thread for itself.
+		{"the Block Kit path names it too", "C0", true, "C0:111.111"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var updChannel, delChannel string
+			var sawBlocks bool
+			mux := http.NewServeMux()
+			mux.HandleFunc("/chat.postMessage", func(w http.ResponseWriter, r *http.Request) {
+				_ = r.ParseForm()
+				sawBlocks = r.FormValue("blocks") != ""
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"ok":true,"channel":"C0","ts":"111.111"}`))
+			})
+			mux.HandleFunc("/chat.update", func(w http.ResponseWriter, r *http.Request) {
+				_ = r.ParseForm()
+				updChannel = r.FormValue("channel")
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"ok":true,"channel":"C0","ts":"111.111"}`))
+			})
+			mux.HandleFunc("/chat.delete", func(w http.ResponseWriter, r *http.Request) {
+				_ = r.ParseForm()
+				delChannel = r.FormValue("channel")
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"ok":true}`))
+			})
+			srv := httptest.NewServer(mux)
+			defer srv.Close()
+
+			a := newTestAdapter(srv.URL)
+			a.richBlocks = tc.rich
+			ref, err := a.Send(context.Background(), chat.Reply{Conversation: tc.conv, Text: "## digest\n\nthe overnight rollup"})
+			if err != nil {
+				t.Fatalf("Send: %v", err)
+			}
+			if ref.Conversation != tc.want {
+				t.Errorf("ref.Conversation = %q, want %q", ref.Conversation, tc.want)
+			}
+			// Which path ran decides which return statement is under test, so
+			// pin it: a Block Kit case that quietly fell through to the text
+			// loop would be testing the same line twice.
+			if sawBlocks != tc.rich {
+				t.Fatalf("posted with blocks = %v, want %v", sawBlocks, tc.rich)
+			}
+			if err := a.Update(context.Background(), ref, chat.Reply{Text: "revised"}); err != nil {
+				t.Fatalf("Update: %v", err)
+			}
+			if err := a.Delete(context.Background(), ref); err != nil {
+				t.Fatalf("Delete: %v", err)
+			}
+			if updChannel != "C0" || delChannel != "C0" {
+				t.Errorf("edited channel %q and deleted channel %q, want C0 for both", updChannel, delChannel)
+			}
+		})
 	}
 }
 

@@ -210,6 +210,89 @@ func TestSendFlatSpaceAdoptsThread(t *testing.T) {
 	}
 }
 
+// TestSendRefNamesTheThreadItLandedIn is the ref half of #39: a post into a
+// bare space is assigned a thread by Chat, and the returned ref has to name it.
+// The outbound ingress builds the continuation of an overflowing message from
+// ref.Conversation, so a ref that still says only "spaces/AAA" sent it down
+// Slack's "the id is the thread" path and produced
+// spaces/AAA:spaces/AAA/messages/CCC — a message resource name in a thread
+// field.
+func TestSendRefNamesTheThreadItLandedIn(t *testing.T) {
+	const assigned = "spaces/AAA/threads/assigned"
+	for _, tc := range []struct {
+		name         string
+		conv         string
+		assignThread string
+		cards        CardMode
+		kind         chat.ReplyKind
+		want         string
+	}{
+		{
+			name:         "a bare space adopts the assigned thread",
+			conv:         "spaces/AAA",
+			assignThread: assigned,
+			want:         "spaces/AAA:" + assigned,
+		},
+		{
+			// The same conversation written the way conversationKey renders an
+			// unthreaded space. The colon is not a thread, so this must adopt
+			// too — reading the key for a separator rather than for a thread is
+			// how the bug looked from the ingress side.
+			name:         "a trailing colon is not a thread",
+			conv:         "spaces/AAA:",
+			assignThread: assigned,
+			want:         "spaces/AAA:" + assigned,
+		},
+		{
+			// The caller's thread is the more specific of the two, and Chat
+			// cannot have moved the message out of it.
+			name:         "an explicit thread is kept",
+			conv:         "spaces/AAA:spaces/AAA/threads/T1",
+			assignThread: assigned,
+			want:         "spaces/AAA:spaces/AAA/threads/T1",
+		},
+		{
+			// Not expected from Chat, but the key is not invented from nothing.
+			name: "no thread reported leaves the key alone",
+			conv: "spaces/AAA",
+			want: "spaces/AAA",
+		},
+		{
+			// The card path returns its own ref, so it needs the same treatment
+			// — and a gateway card is what an ingress-posted notice renders as.
+			name:         "the card path names it too",
+			conv:         "spaces/AAA",
+			assignThread: assigned,
+			cards:        CardsStatus,
+			kind:         chat.KindNotice,
+			want:         "spaces/AAA:" + assigned,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeMessenger{assignThread: tc.assignThread}
+			a := newTestAdapter(f)
+			if tc.cards != "" {
+				a.cards = tc.cards
+			}
+			ref, err := a.Send(context.Background(), chat.Reply{
+				Conversation: tc.conv, Kind: tc.kind, Text: "hello",
+			})
+			if err != nil {
+				t.Fatalf("Send: %v", err)
+			}
+			if tc.cards != "" && (len(f.creates) != 1 || f.creates[0].card == nil) {
+				t.Fatalf("wanted the card path, got %+v", f.creates)
+			}
+			if ref.Conversation != tc.want {
+				t.Errorf("ref.Conversation = %q, want %q", ref.Conversation, tc.want)
+			}
+			if ref.ID != "spaces/AAA/messages/M1" {
+				t.Errorf("ref.ID = %q, want the created message", ref.ID)
+			}
+		})
+	}
+}
+
 func TestSendTopLevelWhenNoThread(t *testing.T) {
 	f := &fakeMessenger{}
 	a := newTestAdapter(f)

@@ -288,7 +288,7 @@ func (a *Adapter) Send(ctx context.Context, r chat.Reply) (chat.MessageRef, erro
 			)
 			_, ts, err := a.api.PostMessageContext(ctx, channel, opts...)
 			if err == nil {
-				return chat.MessageRef{Conversation: r.Conversation, ID: ts}, nil
+				return chat.MessageRef{Conversation: landedKey(channel, thread, ts), ID: ts}, nil
 			}
 			if !isBlockRejection(err) {
 				return chat.MessageRef{}, fmt.Errorf("slack: post blocks to %s: %w", r.Conversation, platformErr(err))
@@ -308,7 +308,9 @@ func (a *Adapter) Send(ctx context.Context, r chat.Reply) (chat.MessageRef, erro
 			return ref, fmt.Errorf("slack: post to %s: %w", r.Conversation, platformErr(err))
 		}
 		if ref.ID == "" {
-			ref = chat.MessageRef{Conversation: r.Conversation, ID: ts}
+			// landedKey reads the thread this message was posted to, so it must
+			// run before the adoption below overwrites it.
+			ref = chat.MessageRef{Conversation: landedKey(channel, thread, ts), ID: ts}
 		}
 		// A thread-less post roots its own thread: adopt it so the rest of a
 		// chunked message replies under the first part instead of scattering
@@ -558,6 +560,25 @@ func threadRoot(threadTS, msgTS string) string {
 // separator round-trips via splitConversation.
 func conversationKey(channel, thread string) string {
 	return channel + ":" + thread
+}
+
+// landedKey names the conversation a just-posted message went into, for the
+// ref Send hands back. channel and thread are what splitConversation read from
+// the key it was asked to post to, and ts is the timestamp Slack assigned.
+//
+// A post with no thread roots one of its own, and the ref has to say so: a ref
+// is an address to come back to, and the outbound ingress builds the
+// continuation of an overflowing message out of ref.Conversation. Slack is the
+// platform where rebuilding it from the id would have worked anyway — a
+// top-level message's id *is* the thread_ts of the thread it roots — but that
+// identity holds on no other platform, so the ingress must be able to trust
+// the ref instead of knowing the rule (#39). Update and Delete are unaffected:
+// both take the channel back out with splitConversation.
+func landedKey(channel, thread, ts string) string {
+	if thread != "" {
+		return conversationKey(channel, thread)
+	}
+	return conversationKey(channel, ts)
 }
 
 // splitConversation is the inverse of conversationKey. The thread may be

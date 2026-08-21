@@ -413,7 +413,7 @@ func (a *Adapter) post(ctx context.Context, conv string, card *chatv1.GoogleApps
 		}
 		created, err := a.msg.create(ctx, space, msg)
 		if err == nil {
-			return chat.MessageRef{Conversation: conv, ID: created.Name}, nil
+			return chat.MessageRef{Conversation: landedKey(conv, space, thread, created), ID: created.Name}, nil
 		}
 		if !isCardRejection(err) {
 			return chat.MessageRef{}, fmt.Errorf("googlechat: post card to %s: %w", conv, platformErr(err))
@@ -435,7 +435,9 @@ func (a *Adapter) post(ctx context.Context, conv string, card *chatv1.GoogleApps
 			return first, fmt.Errorf("googlechat: post to %s: %w", conv, platformErr(err))
 		}
 		if first.ID == "" {
-			first = chat.MessageRef{Conversation: conv, ID: created.Name}
+			// landedKey reads the thread this message was assigned, so it must
+			// run before the adoption below overwrites the thread we asked for.
+			first = chat.MessageRef{Conversation: landedKey(conv, space, thread, created), ID: created.Name}
 		}
 		// If we started without a thread (a flat space), adopt the thread the
 		// first message landed in so the rest of a chunked reply stays together
