@@ -266,8 +266,8 @@ func TestOutboundOnlyIgnoresTheInboundCredentialsOutLoud(t *testing.T) {
 // End to end through runServe rather than in pieces, because the thing that
 // broke before #23 was the wiring: every part of an egress-only run existed and
 // none of them could be reached. The Slack credentials here are nonsense
-// strings and never leave the process: the adapter is built, never run, and the
-// only request made is one the ingress rejects before it would post anything.
+// strings and never leave the process: the adapter is built, never run, and
+// every request made is one the ingress rejects before it would post anything.
 func TestRunServeOutboundOnlyServesTheIngress(t *testing.T) {
 	// Deliberately absent. An outbound-only run has no daemon to present a
 	// bearer token to, so being made to provision one would be asking for a
@@ -347,6 +347,34 @@ func TestRunServeOutboundOnlyServesTheIngress(t *testing.T) {
 		resp.Body.Close()
 		if resp.StatusCode != http.StatusUnauthorized {
 			t.Errorf("POST with a bad token = %d, want 401", resp.StatusCode)
+		}
+
+		// A run with no router cannot bind a session to a thread, and says so
+		// rather than posting a message the agent will never hear a reply to
+		// (#38). Through runServe because the failure mode this guards is a
+		// wiring one: a nil *Router stored in the binder interface field is not
+		// a nil interface, and would have taken this request all the way to a
+		// method call on nothing.
+		req, err = http.NewRequest(http.MethodPost, "http://"+ingressAddr+ingressPath,
+			strings.NewReader(`{"conversation":"C0123ABCD","text":"digest","session":"core-agent/s1"}`))
+		if err != nil {
+			t.Errorf("new request: %v", err)
+			return
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer ingress-token")
+		resp, err = http.DefaultClient.Do(req)
+		if err != nil {
+			t.Errorf("POST a bound session to the outbound-only ingress: %v", err)
+			return
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("POST with a session = %d %s, want 400", resp.StatusCode, body)
+		}
+		if !strings.Contains(string(body), "outbound-only") {
+			t.Errorf("refusal did not say why: %s", body)
 		}
 	})
 

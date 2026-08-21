@@ -7,6 +7,42 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- Agent-initiated sessions: a POST to the outbound ingress may carry
+  `"session":"<app>/<id>"`, and the thread the message lands in becomes that
+  session's conversation (#38). A human replying there is injected into the work
+  already in flight — carrying their own identity — and its answers come back to
+  the thread, instead of the reply opening a fresh session that knows nothing
+  about the incident. Switchboard subscribes to nothing on its own: the caller
+  opens the session and names the thread. Only what happens *after* the bind is
+  relayed, so adopting an hour-old session does not post its transcript into the
+  channel — and the resume point is read again when the thread is adopted, so
+  neither does the work the agent did between the alert and someone answering
+  it. Three refusals, all of them before anything is posted, so a rejected
+  bind leaves no unanswerable message behind: a session the agent backend does
+  not have (`404`), a conversation that already has one (`409`), and a session
+  already bound elsewhere (`409`, naming the thread to post to instead). A bind
+  costs one round trip to the agent backend before the message goes out.
+  `session` is POST-only (`400` on PATCH) and
+  needs an inbound path (`400` on `--outbound-only`). Bindings are in memory,
+  bounded at 1024, and lost on restart; a bound session the backend has lost is
+  announced in the thread rather than swallowed — whether that surfaces on a
+  human's message or on a quiet thread whose relay finds the session gone — and
+  the caller's next post rebinds. Binding is a whole-instance capability: the
+  ingress token says a trusted caller is on the line, not which one, so any
+  holder can bind any session the backend has, and the `404`/`200` split tells
+  it which ids exist. Authorization for what a session may do stays in the agent
+  backend, per caller.
+- `daemon.Client.HeadSeq`: a bounded probe that reports how far a session's
+  stream has already got (#38), so a subscription can resume at the end of the
+  backlog instead of replaying it. It ends on 300ms of quiet or 5s overall —
+  neither is an error once the stream is open, while a cap that runs out before
+  it opens is, because a head nobody measured is how a whole transcript ends up
+  in a chat thread. A session the daemon does not have answers `404`, which is
+  what makes it the existence check a bind needs.
+- `switchboard_active_bindings`: how many conversations are tied to a session
+  the gateway did not open (#38). It dropping to zero while those threads are
+  still live is a restart, and is the shape of the one failure mode bindings
+  have.
 - `--outbound-only`: post without receiving, and without the credentials
   receiving takes (#23). A digest pipeline that drives the outbound ingress and
   never listens needs no Slack app-level token and no `--google-project` /

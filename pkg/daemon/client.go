@@ -43,6 +43,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 )
@@ -1061,6 +1062,15 @@ const protocolVersion = "1.4.0"
 // it (0 = from the start of the daemon's replay window); track the last
 // seq from AgentText to resume without re-delivering old turns.
 func (c *Client) Subscribe(ctx context.Context, sess Session, assertedCaller string, since int64, fn func(Event) error) error {
+	return c.subscribe(ctx, sess, assertedCaller, since, nil, fn)
+}
+
+// subscribe is Subscribe with a hook that fires once the daemon has accepted
+// the stream — after the status line, so a rejection is still an error and
+// never a connection. HeadSeq is the only caller that needs it: what it
+// measures is silence on an *open* stream, and a clock started before the dial
+// would time the connection as if it were the daemon having nothing to say.
+func (c *Client) subscribe(ctx context.Context, sess Session, assertedCaller string, since int64, onConnect func(), fn func(Event) error) error {
 	q := url.Values{}
 	q.Set("since", strconv.FormatInt(since, 10))
 	q.Set("protocol", protocolVersion)
@@ -1077,6 +1087,9 @@ func (c *Client) Subscribe(ctx context.Context, sess Session, assertedCaller str
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		return c.statusErr(resp)
+	}
+	if onConnect != nil {
+		onConnect()
 	}
 
 	sc := bufio.NewScanner(resp.Body)
@@ -1104,6 +1117,127 @@ func (c *Client) Subscribe(ctx context.Context, sess Session, assertedCaller str
 		}
 	}
 	return sc.Err()
+}
+
+const (
+	// headProbeQuiet is how long a probe stream must carry nothing before
+	// HeadSeq concludes the daemon has finished replaying what it holds. The
+	// replay is written as fast as the connection takes it, so a gap this long
+	// mid-backlog would mean the daemon is stalled — in which case a probe that
+	// waited longer would only be more wrong about the same thing.
+	headProbeQuiet = 300 * time.Millisecond
+)
+
+// headProbeCap bounds the whole probe, for a daemon that never goes quiet
+// because the session is mid-turn. What comes back then is a head from partway
+// through that turn, which is the conservative direction: the frames after it
+// are new work, and relaying new work is the point.
+//
+// A var only so a test can shorten it — the branch it guards is reached by
+// waiting, and five seconds of waiting is not worth testing at full price.
+// Nothing outside a test assigns it.
+var headProbeCap = 5 * time.Second
+
+// HeadSeq reports the highest event seq the daemon currently holds for a
+// session, so a reader that wants only what happens *next* can subscribe from
+// there. It is how switchboard adopts a session it did not create (#38): the
+// alternative, subscribing from 0, replays the daemon's whole window — for an
+// incident session that has been running for an hour, straight into the chat
+// thread.
+//
+// The protocol offers no way to ask, so this is a measurement: open the
+// stream, read the backlog, and take the last seq on it. The stream is closed
+// once it has been quiet for headProbeQuiet, or at headProbeCap, whichever
+// comes first — so a call normally costs a fraction of a second, and at worst
+// headProbeCap, which is what a session mid-turn costs because it never goes
+// quiet. Neither deadline is an error once the stream is open — the quiet one
+// is how this ends, and the cap yields a head from partway through a live turn,
+// which is the conservative direction. Running out of time *before* the daemon
+// accepts the stream is a different thing entirely, and is reported as an
+// error: nothing was measured and nothing was refused.
+//
+// The other half of this call matters just as much. A session with nothing to
+// replay reports 0 — exactly what a session that does not exist would report —
+// so the existence check is the subscribe itself: a session the daemon has
+// never heard of answers with a 404, which comes back here as a *StatusError.
+// Binding a thread to a session that is not there is the failure this exists to
+// make loud.
+func (c *Client) HeadSeq(ctx context.Context, sess Session, assertedCaller string) (int64, error) {
+	probe, cancel := context.WithTimeout(ctx, headProbeCap)
+	defer cancel()
+
+	// The last moment the open stream was known to be carrying something —
+	// written by the connect hook and the event callback (both of which run on
+	// this goroutine) and read by the watchdog below, so it is atomic rather
+	// than plain.
+	//
+	// Held as nanoseconds since the call began, plus one, rather than as a wall
+	// clock: elapsed time here is read from the monotonic clock, which a
+	// mid-probe NTP step cannot move. On the wall clock a step backwards would
+	// keep the quiet window from ever closing (a settled session then costs the
+	// whole cap, and the caller's post waits for it) and a step forwards would
+	// close it mid-backlog, resuming the thread partway through a turn. The
+	// plus-one keeps zero meaning "the stream is not open yet", and the watchdog
+	// waits for that: a quiet clock started at call time would be measuring the
+	// dial, and a daemon that took longer than headProbeQuiet to answer would
+	// have its request cancelled underneath it. That failure is invisible in the
+	// result — 0, and no error — which is a head of "replay everything" and an
+	// existence check that says yes about a session that is not there.
+	start := time.Now()
+	var lastFrame atomic.Int64
+	alive := func() { lastFrame.Store(int64(time.Since(start)) + 1) }
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		t := time.NewTicker(headProbeQuiet / 2)
+		defer t.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-probe.Done():
+				return
+			case <-t.C:
+				at := lastFrame.Load()
+				if at != 0 && time.Since(start)-time.Duration(at-1) >= headProbeQuiet {
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+
+	var head int64
+	err := c.subscribe(probe, sess, assertedCaller, 0, alive, func(ev Event) error {
+		alive()
+		if ev.Type != EventAgent {
+			return nil
+		}
+		// Seq, not text: a tool call is as much a position in the stream as an
+		// answer is, and AgentText fills in the seq of every frame it can parse
+		// whether or not it found anything worth relaying.
+		if r, _ := AgentText(ev.Data); r.Seq > head {
+			head = r.Seq
+		}
+		return nil
+	})
+	// Our own deadline firing is the expected way this ends. The caller's
+	// context going away is not: that is a real failure, and reporting a head
+	// read from half a backlog would have the thread resume mid-turn.
+	if err != nil && ctx.Err() == nil && probe.Err() == nil {
+		return 0, err
+	}
+	if ctx.Err() != nil {
+		return 0, ctx.Err()
+	}
+	if lastFrame.Load() == 0 {
+		// The cap ran out with the stream never open. Nothing was measured and
+		// nothing was refused, so there is no answer to give: saying 0 here
+		// would be the two silent failures above wearing a return value.
+		return 0, fmt.Errorf("daemon: session %s/%s: the event stream did not open within %s",
+			sess.App, sess.ID, headProbeCap)
+	}
+	return head, nil
 }
 
 // do performs a JSON request/response round-trip. out may be nil when

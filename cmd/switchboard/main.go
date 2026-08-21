@@ -355,13 +355,21 @@ func runServe(args []string) (err error) {
 	var ing *ingress
 	if *ingressAddr != "" {
 		allow := splitList(*ingressAllow)
-		ing, err = newIngress(ingressConfig{
+		cfg := ingressConfig{
 			Token:   ingressToken,
 			Allow:   allow,
 			Out:     adapter,
 			Metrics: m,
 			Logf:    logf,
-		})
+		}
+		// Only when there is a router to bind against. Assigned inside the
+		// branch and not from the variable directly: a nil *Router in an
+		// interface field is not a nil interface, and the ingress reads that
+		// field to decide whether a caller may name a session at all.
+		if router != nil {
+			cfg.Bind = router
+		}
+		ing, err = newIngress(cfg)
 		if err != nil {
 			return err
 		}

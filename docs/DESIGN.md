@@ -191,9 +191,140 @@ means the process can do nothing at all: it would start, log a banner and stay
 healthy to every probe while no work was possible, which is strictly worse than
 exiting.
 
-Correlating an outbound post with a later inbound reply — the async
-human-in-the-loop approval round trip — is a larger design and is not part of
-this.
+**Agent-initiated sessions** close the loop the ingress opened (#38). An agent
+that posts "rollout is wedged, roll back?" and gets a reply in that thread would,
+without this, have the reply open a *fresh* session that knows nothing about the
+incident: the thread has no session, so the router creates one, and the agent
+that asked the question never hears the answer. So a POST may name the session
+it is speaking for, and switchboard records the thread the message landed in as
+that session's conversation:
+
+```
+POST /v1/messages {"conversation":"C0123","text":"…","session":"core-agent/incident-7"}
+```
+
+Switchboard still subscribes to nothing on its own: the caller opened the
+session, the caller decides which thread it belongs in, and the ingress is the
+only place a binding is created. The alternative — switchboard watching the
+daemon for sessions that want a human — would make it a scheduler, which §5
+rules out.
+
+**The bind is two-phase, because the conversation is not known until the post.**
+A post to a bare channel or space creates the thread it lands in; on Chat the
+thread id is assigned by the platform, so there is nothing to bind against
+beforehand. `PrepareBind` runs before the post and is the half that can be
+refused; `CommitBind` runs after, keyed on the ref that came back. Every
+refusal is therefore pre-post, which is the property that matters: a caller
+whose bind was rejected has not also left a question in a channel that nobody's
+answer can reach.
+
+Three things are refused. The session must exist — otherwise the thread would
+take a human's reply and inject it into nothing. The conversation must not
+already have a session, and the session must not already own another
+conversation; the first would record a binding that is never consulted, and the
+second would have two relays double-posting every answer.
+
+Checking those is not enough, because a platform call sits between the check and
+the record. Two posts naming one session would both pass and both bind, so
+`PrepareBind` *reserves* the session and the commit (or an abort, if the post
+failed) releases it; a bind racing one already in flight is refused with the
+same 409. The reservation is taken inside the idempotent operation, so a retry
+of a post that never answered replays its original outcome rather than
+colliding with itself.
+
+What cannot be refused is the far side of that call. If the message lands in a
+thread that acquired a session in the meantime, the bind is dropped and logged —
+the post has already gone out, and taking the thread would strand whoever is
+using it. The caller sees a successful post and an unbound session, which is
+visible in the logs and in `switchboard_active_bindings`, and not to the caller
+itself; reporting it would mean a status code that contradicts the message the
+caller can see in the channel.
+
+**Adoption must not replay the transcript.** A subscription is resumed from a
+sequence number, and `since=0` means the start of the daemon's replay window —
+adopting an hour-old incident session that way would dump the agent's whole
+transcript into the channel. `SessionStatus` carries no sequence number, so the
+head can only be measured: `daemon.HeadSeq` opens a bounded probe subscription,
+takes the last agent frame's seq, and ends after 300ms of silence or 5s
+overall. Once the stream is open neither deadline is an error — a session
+mid-turn simply yields a head slightly behind the truth, which replays a few
+frames rather than an hour. A cap that expires *before* it opens is: nothing was
+measured, and a head of zero would be the backlog this paragraph exists to
+avoid, wearing a return value. The quiet window is likewise armed when the
+daemon accepts the stream, not when the call is made, or a daemon slower to
+answer than the window would have its own probe cancelled. The probe doubles as
+the existence check, which is why the bind can be strict about a session the
+daemon does not have: the 404 arrives on the same request. The cost of all this
+is one SSE round trip on the request that binds, paid before the message is
+posted.
+
+The head is then measured *again* when the thread is adopted, and the later of
+the two is used. Nothing relays a bound thread until a human replies in it,
+which for an incident feed is hours after the alert, with the agent working the
+whole time. Resuming from the bind would replay every one of those turns into
+the thread at once — the same wall of transcript this section exists to avoid,
+moved from before the bind to between the bind and the reply. The re-probe
+costs a second round trip, on a request that is already opening a subscription
+and injecting a turn; if it fails the bind's number is used, since a resume
+point measured too early is still better than none.
+
+Alternatives considered and rejected: inferring "live" from a status update (the
+daemon need not emit one at turn start, and a silent thread is the worst
+outcome), suppressing output until switchboard's own inject returns (racy —
+replay can still be arriving), `since=MaxInt64` (drops live frames too), making
+the caller supply the resume point (it does not know it, and the caller is
+`curl`-shaped by design), and holding a subscription open from bind time (one
+SSE connection per bound thread, for a thread that may never be answered).
+
+The adopted relay **asserts no caller**. Switchboard did not open the session
+and cannot claim to be whoever did; the human's identity still reaches the
+agent, on the injected turn, which is where it belongs.
+
+**Bindings are in-process and bounded** (last 1024, oldest evicted, every
+eviction logged), and they do not survive a restart. Switchboard cannot detect
+an orphaned thread on its own — an inbound chat event carries no trace of who
+started the conversation — so the honest behaviour is the one it has: after a
+restart the thread is just a thread, and the next human message there opens a
+new session. What it will not do is fail silently. A bound session the daemon
+no longer has is announced *in the thread* and the binding and its entry are
+dropped, so the next message plainly starts fresh. That arrives two ways, and
+both are announced: an inject that 404s, where a human's message went nowhere
+("that message was not delivered anywhere"), and the relay's own subscription
+404ing while nobody is typing, where nothing was lost but the thread is waiting
+on an answer that is never coming. The second is not a reconnect: retrying it
+would poll forever, and a thread silently waiting on a session that no longer
+exists reads exactly like one waiting on a session that is thinking.
+Recovery costs the caller nothing it was not already
+doing: its next post carries `session` again and rebinds the thread — provided
+it addresses the thread, which is the conversation its earlier post was answered
+with. Durable
+bindings would need the same store as durable sessions, and are deferred with
+them.
+
+**Binding is a whole-instance capability, on purpose.** The ingress token says
+*a* trusted caller is on the line, not *which* one, and nothing checks that the
+holder is entitled to the session id it names: any token holder can bind any
+session the daemon has, and a human replying in that thread then has their
+identity asserted into it. The strictness of the pre-post refusals is a
+consequence — a bind naming a session the daemon does not have is a `404`, one
+it does have is a `200`, so a token holder can also use the endpoint to
+enumerate which session ids exist. Both follow from where authorization lives:
+per-caller credential resolution is the daemon's (W0's), inside the MCP
+outbound path, and the daemon offers switchboard no hook to ask "may this
+caller drive that session?". Adding a switchboard-side answer would mean
+inventing a second identity model beside the one that already exists, in the
+component explicitly held to have none. So the token is trusted the way it is
+everywhere else in this document: hold it and you can post as the app to any
+allowed conversation. What binding adds is that you can also point a thread at
+an existing session. Deployments where that matters run the ingress on a
+network only the agent backend can reach, which is what the `--outbound-only`
+and allowlist controls above are for.
+
+What remains open on this seam: an agent's `alert`-shaped tool call
+(`{level, summary, details}`) still has to be rendered into the ingress's
+`{conversation, text}` by its caller — switchboard does not define that
+vocabulary — and the ingress remains unauthenticated as to *which* caller holds
+the token, so the allowlist above is still the whole authorization model.
 
 ### 3.2 Reply kinds and adapter capabilities
 
