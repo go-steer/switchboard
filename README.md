@@ -469,6 +469,55 @@ The listener is off unless `--ingress-addr` is set, and it is a *separate* port
 from `--metrics-addr`: metrics are unauthenticated and usually reachable by the
 whole scrape network, this is not.
 
+#### Outbound-only deployments
+
+A digest pipeline that posts and never listens does not need the credentials
+receiving takes, and `--outbound-only` says so ([#23]). The process then runs
+egress-only: it posts through the ingress and answers nobody, because no chat
+user can reach it — the only way in is the ingress, and the ingress does not
+carry replies.
+
+| Platform | What is then never created | And so never needed |
+|----------|----------------------------|---------------------|
+| Slack | the Socket Mode WebSocket | an app-level token, or any event subscription |
+| Google Chat | the Pub/Sub client | a topic, a subscription, or `roles/pubsub.subscriber` |
+
+It is a flag rather than an inference from a missing credential, and that is the
+whole design: the recommended shape is *bidirectional* — a bridge that also
+serves the ingress — and if an emptied or badly rotated app-token secret were
+read as "this one only posts", that deployment would come back up posting,
+passing `/healthz` and answering nobody, with nothing in the logs to page on. So
+a run that cannot receive and did not say so fails at startup instead. In the
+other direction the flag wins: an inbound credential still lying around is
+ignored, with a warning naming it.
+
+The daemon is not involved either. An outbound-only run holds no session and
+starts no turn, so `--token-env` is not read at all and no core-agent bearer
+token has to be provisioned for it.
+
+Egress credentials are untouched: the Slack bot token, or ADC and the Chat bot
+scope, are still required and are still what a post authenticates with.
+
+```sh
+export SWITCHBOARD_INGRESS_TOKEN=…
+export SWITCHBOARD_SLACK_BOT_TOKEN=xoxb-…   # posting only; no xapp- token
+switchboard serve --outbound-only --ingress-addr :8080 --ingress-allow C0123ABCD
+# 2026-08-19T16:00:00.123Z switchboard: outbound-only: posting to slack, receiving nothing
+```
+
+The banner says so on every start, because a gateway nobody can talk to and a
+broken one look identical otherwise. Three configurations are refused:
+
+- **Neither direction.** `--outbound-only` with no `--ingress-addr` is a process
+  that could neither receive nor be asked to post, so it exits rather than
+  idling while every probe reports it healthy.
+- **Unable to receive, without saying so.** No app token on Slack, or no
+  `--google-subscription` on Chat, without `--outbound-only`.
+- **Half an inbound pair on Chat.** `--google-project` without
+  `--google-subscription`, or the reverse, is a typo, not a deployment shape.
+
+[#23]: https://github.com/go-steer/switchboard/issues/23
+
 ### Health & metrics
 
 `--metrics-addr=host:port` (empty by default, disabled) starts a small HTTP

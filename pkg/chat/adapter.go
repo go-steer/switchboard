@@ -243,6 +243,17 @@ var (
 	ErrDenied   = errors.New("chat: the platform refused the operation")
 )
 
+// ErrNoInbound is returned by Run on an adapter built without an inbound
+// source — no Slack app token, no Google Chat subscription. Such an adapter
+// posts and never receives, which is the shape an outbound-only deployment
+// wants: a monitoring loop that sends digests needs none of the credentials,
+// connections or event subscriptions that receiving does (#23).
+//
+// It is a refusal, not a resting state. Whoever built the adapter knows it has
+// nothing to run and should not call Run at all; this says so out loud rather
+// than blocking forever on a source that does not exist.
+var ErrNoInbound = errors.New("chat: this adapter has no inbound source")
+
 // TextFitter is an optional Adapter capability: reporting whether a text fits
 // in a single platform message once the adapter has rendered it. Send already
 // splits anything longer across several messages, so this matters only to a
@@ -327,7 +338,10 @@ type Adapter interface {
 
 	// Run consumes the platform's event source (Slack Socket Mode,
 	// Google Chat Pub/Sub) and dispatches each inbound turn to h. It
-	// returns when ctx is cancelled or the source fails unrecoverably.
+	// returns when ctx is cancelled or the source fails unrecoverably, and
+	// ErrNoInbound immediately when the adapter was built without a source
+	// at all — an egress-only adapter is a valid thing to have, but not a
+	// thing to run.
 	Run(ctx context.Context, h Handler) error
 
 	// Send posts a reply into its originating conversation and returns a

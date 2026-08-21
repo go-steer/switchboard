@@ -901,6 +901,93 @@ func TestNewDefaultsAndValidatesCallerMode(t *testing.T) {
 	}
 }
 
+// TestNewRequiresTheInboundPairTogether: receiving needs a project and a
+// subscription, and half of that pair is a typo, not a configuration. Neither
+// is legal too — that is the outbound-only shape (#23) — but it cannot be
+// asserted through New, which then builds a Chat REST service from ADC that a
+// hermetic test has no business having; TestRunWithoutASubscriptionIsEgressOnly
+// covers what such an adapter does instead.
+func TestNewRequiresTheInboundPairTogether(t *testing.T) {
+	// Both halves are checked before New reaches any credential, so these
+	// return without ADC on the machine running them.
+	for _, tc := range []struct {
+		name string
+		cfg  Config
+		want string
+	}{
+		{"project without a subscription", Config{ProjectID: "p"}, "SubscriptionID"},
+		{"subscription without a project", Config{SubscriptionID: "s"}, "ProjectID"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := New(tc.cfg)
+			if err == nil {
+				t.Fatalf("New(%+v) succeeded, want a complaint about the missing half", tc.cfg)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v, want it to name %s", err, tc.want)
+			}
+		})
+	}
+}
+
+// TestNewWithoutASubscriptionBuildsNoPubSubClient: the point of #23 on Chat is
+// that an outbound-only deployment needs no topic, no subscription and no
+// roles/pubsub.subscriber. That only holds if New skips pubsub.NewClient
+// entirely — build one it will never read and the grant is required again, for
+// nothing.
+//
+// New also constructs the Chat REST service from Application Default
+// Credentials, which is what makes this awkward to assert hermetically: with no
+// ADC there is no success to inspect. So it is asserted from both sides. Where
+// ADC exists, on the client that should not be there; where it does not, on
+// which of the two constructors failed — a Pub/Sub error here is the regression
+// itself, and says so rather than being skipped past.
+func TestNewWithoutASubscriptionBuildsNoPubSubClient(t *testing.T) {
+	// An emulator makes pubsub.NewClient succeed without credentials, which
+	// would turn the no-ADC half of this below into a false pass.
+	t.Setenv("PUBSUB_EMULATOR_HOST", "")
+
+	a, err := New(Config{})
+	switch {
+	case err == nil:
+		if a.ps != nil {
+			t.Error("New built a Pub/Sub client for an adapter with no subscription to read")
+		}
+	case strings.Contains(err.Error(), "pubsub"):
+		t.Fatalf("New reached pubsub.NewClient with no subscription configured: %v", err)
+	default:
+		t.Skipf("no Application Default Credentials for the Chat REST service, "+
+			"so New cannot get as far as the client this test is about: %v", err)
+	}
+}
+
+// TestRunWithoutASubscriptionIsEgressOnly: an adapter built with no
+// subscription has nothing to pull from, so Run says so instead of blocking on
+// a source that does not exist — while egress, which is a Chat REST call and
+// never touches Pub/Sub, keeps working (#23).
+func TestRunWithoutASubscriptionIsEgressOnly(t *testing.T) {
+	f := &fakeMessenger{}
+	a := newTestAdapter(f) // no ps, the shape New leaves when SubscriptionID is empty
+	if a.ps != nil {
+		t.Fatal("test adapter has a Pub/Sub client; this test asserts the case without one")
+	}
+
+	err := a.Run(context.Background(), nil)
+	if !errors.Is(err, chat.ErrNoInbound) {
+		t.Errorf("Run = %v, want chat.ErrNoInbound", err)
+	}
+
+	if _, err := a.Send(context.Background(), chat.Reply{
+		Conversation: "spaces/AAA",
+		Text:         "digest",
+	}); err != nil {
+		t.Fatalf("Send on an egress-only adapter: %v", err)
+	}
+	if len(f.creates) != 1 || f.creates[0].text != "digest" {
+		t.Fatalf("want the digest posted, got %+v", f.creates)
+	}
+}
+
 // TestDispatchAckCarriesNoButtons: a handler that reports choices used to turn
 // them into a button row on the ack. A click never reaches this app (#28), so
 // the row was a control that could only fail, and the ack is now exactly what

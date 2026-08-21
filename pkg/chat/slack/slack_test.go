@@ -15,10 +15,17 @@
 package slack
 
 import (
+	"context"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/slack-go/slack"
+
+	"github.com/go-steer/switchboard/pkg/chat"
 )
 
 func TestStripMentions(t *testing.T) {
@@ -87,9 +94,6 @@ func TestSplitConversationThreadless(t *testing.T) {
 }
 
 func TestNewValidation(t *testing.T) {
-	if _, err := New(Config{BotToken: "xoxb-x"}); err == nil {
-		t.Error("expected error without AppToken")
-	}
 	if _, err := New(Config{AppToken: "xapp-x"}); err == nil {
 		t.Error("expected error without BotToken")
 	}
@@ -102,6 +106,73 @@ func TestNewValidation(t *testing.T) {
 	}
 	if a.Name() != "slack" {
 		t.Errorf("Name = %q", a.Name())
+	}
+}
+
+// TestNewWithoutAnAppTokenIsEgressOnly checks the Socket Mode credential is
+// required only to receive (#23). An outbound-only deployment posts with the
+// bot token and has no use for an app-level token, a WebSocket, or the event
+// subscriptions that come with one — and until now could not start without
+// them, so its uptime was bound to an inbound path it never read.
+func TestNewWithoutAnAppTokenIsEgressOnly(t *testing.T) {
+	a, err := New(Config{BotToken: "xoxb-x"})
+	if err != nil {
+		t.Fatalf("New without an app token: %v", err)
+	}
+	if a.sm != nil {
+		t.Error("built a Socket Mode client with no app token to authenticate it")
+	}
+
+	// Run refuses rather than blocking on a source that does not exist, and
+	// says so in a way a caller can branch on.
+	err = a.Run(context.Background(), nil)
+	if !errors.Is(err, chat.ErrNoInbound) {
+		t.Errorf("Run = %v, want chat.ErrNoInbound", err)
+	}
+
+	// Egress is unaffected: it authenticates with the bot token throughout.
+	mux := http.NewServeMux()
+	mux.HandleFunc("/chat.postMessage", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"channel":"C0","ts":"111.111"}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	a.api = slack.New("xoxb-x", slack.OptionAPIURL(srv.URL+"/"))
+
+	ref, err := a.Send(context.Background(), chat.Reply{Conversation: "C0", Text: "digest"})
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if ref.ID != "111.111" {
+		t.Errorf("Send returned %+v, want the posted message's ts", ref)
+	}
+}
+
+// TestRunWithAnAppTokenDoesNotRefuse checks the guard above keys off the
+// missing socket and nothing else — an adapter that does have one gets past it
+// and stops at the auth check instead, which is as far as this can go without
+// a workspace.
+func TestRunWithAnAppTokenDoesNotRefuse(t *testing.T) {
+	a, err := New(Config{AppToken: "xapp-x", BotToken: "xoxb-x"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	// Pointed at a local server, so the test is hermetic by construction rather
+	// than by the cancelled context below happening to short-circuit the
+	// transport before it dials slack.com.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"ok":false,"error":"invalid_auth"}`)
+	}))
+	defer srv.Close()
+	a.api = slack.New("xoxb-x", slack.OptionAppLevelToken("xapp-x"), slack.OptionAPIURL(srv.URL+"/"))
+
+	// Cancelled up front so nothing is dialed for long.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := a.Run(ctx, nil); errors.Is(err, chat.ErrNoInbound) {
+		t.Errorf("Run = %v, want anything but ErrNoInbound on a configured adapter", err)
 	}
 }
 

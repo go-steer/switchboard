@@ -123,8 +123,14 @@ func runServe(args []string) (err error) {
 		"env var holding the daemon bearer token (never pass the token as a bare flag)")
 	platform := fs.String("platform", "slack",
 		"chat platform to bridge: \"slack\" (Socket Mode) or \"googlechat\" (Pub/Sub)")
+	outboundOnly := fs.Bool("outbound-only", false,
+		"post but never receive: open no Slack Socket Mode connection and build no Google "+
+			"Chat Pub/Sub client, and require none of the credentials, grants or "+
+			"subscriptions receiving takes. Needs --ingress-addr, which is then the only "+
+			"way in; the daemon token is not read at all")
 	appTokenEnv := fs.String("slack-app-token-env", "SWITCHBOARD_SLACK_APP_TOKEN",
-		"env var holding the Slack Socket Mode app-level token (xapp-...)")
+		"env var holding the Slack Socket Mode app-level token (xapp-...); required unless "+
+			"--outbound-only")
 	botTokenEnv := fs.String("slack-bot-token-env", "SWITCHBOARD_SLACK_BOT_TOKEN",
 		"env var holding the Slack bot user OAuth token (xoxb-...)")
 	callerID := fs.String("caller-id", "email",
@@ -141,7 +147,8 @@ func runServe(args []string) (err error) {
 	googleProject := fs.String("google-project", envOr("SWITCHBOARD_GOOGLE_PROJECT", ""),
 		"GCP project hosting the Google Chat Pub/Sub subscription (--platform googlechat)")
 	googleSub := fs.String("google-subscription", envOr("SWITCHBOARD_GOOGLE_SUBSCRIPTION", ""),
-		"Pub/Sub subscription carrying Google Chat events (--platform googlechat)")
+		"Pub/Sub subscription carrying Google Chat events (--platform googlechat); required "+
+			"with --google-project unless --outbound-only")
 	googleCards := fs.String("googlechat-cards", envOr("SWITCHBOARD_GOOGLECHAT_CARDS", defaultCardMode),
 		"Google Chat card rendering: \"rich\" (gateway cards, and a structured agent reply "+
 			"laid out as a card), \"status\" (gateway progress/notice/ack cards only), or "+
@@ -193,9 +200,25 @@ func runServe(args []string) (err error) {
 	// flags are rejected still learns which build rejected them.
 	logf("%s", version.String(prog))
 
-	token := os.Getenv(*tokenEnv)
-	if token == "" {
-		return fmt.Errorf("no daemon token in $%s (set --token-env to the right var)", *tokenEnv)
+	// inbound records whether this run has an event source to consume. It is
+	// declared, not inferred from whether a credential happens to be set: a
+	// bridge whose app token is emptied by a bad rotation must keep failing
+	// loudly rather than quietly becoming a process that posts and answers
+	// nobody (#23).
+	inbound := !*outboundOnly
+
+	// Only a bridged run talks to the daemon: the ingress posts straight through
+	// the adapter. So an outbound-only deployment is not asked for a bearer
+	// token it would never present.
+	var dc *daemon.Client
+	if inbound {
+		token := os.Getenv(*tokenEnv)
+		if token == "" {
+			return fmt.Errorf("no daemon token in $%s (set --token-env to the right var)", *tokenEnv)
+		}
+		if dc, err = daemon.New(daemon.Config{BaseURL: *daemonURL, BearerToken: token}); err != nil {
+			return err
+		}
 	}
 
 	callerMode, err := parseCallerMode(*callerID)
@@ -219,6 +242,22 @@ func runServe(args []string) (err error) {
 		return err
 	}
 
+	// An outbound-only run is a real deployment shape — a monitoring loop that
+	// posts digests receives nothing — but only with the ingress. With neither
+	// there is no work to do at all, and a container that starts and sits there
+	// is worse than one that refuses: nothing is wrong, nothing is happening,
+	// and no probe distinguishes the two.
+	//
+	// Last of the checks that need no credentials, and still ahead of the
+	// adapter: after the flag values above, so a typo in one of them is
+	// reported as a typo rather than hidden behind this; before anything is
+	// built, so it is the same refusal on both platforms and reaching it costs
+	// nothing.
+	if !inbound && *ingressAddr == "" {
+		return errors.New("nothing to do: --outbound-only and --ingress-addr is unset, " +
+			"so this process could neither receive nor be asked to post")
+	}
+
 	// Validate the outbound-ingress config up front: a caller that cannot be
 	// authenticated should fail here rather than after the adapter has dialed a
 	// chat platform. The ingress itself is platform-agnostic — it speaks
@@ -230,28 +269,52 @@ func runServe(args []string) (err error) {
 		}
 	}
 
-	dc, err := daemon.New(daemon.Config{BaseURL: *daemonURL, BearerToken: token})
-	if err != nil {
-		return err
-	}
-
 	var adapter chat.Adapter
 	switch *platform {
 	case "slack":
+		appToken := os.Getenv(*appTokenEnv)
+		switch {
+		case *outboundOnly && appToken != "":
+			// Not an error — the run is unambiguous — but worth saying, because
+			// the token is doing nothing and somebody provisioned it expecting
+			// otherwise.
+			logf("warning: --outbound-only, so $%s is ignored and no Socket Mode connection is opened", *appTokenEnv)
+			appToken = ""
+		case !*outboundOnly && appToken == "":
+			return fmt.Errorf("no Slack app token in $%s (set it, or pass --outbound-only "+
+				"if this deployment only posts)", *appTokenEnv)
+		}
 		adapter, err = slack.New(slack.Config{
-			AppToken:   os.Getenv(*appTokenEnv),
+			AppToken:   appToken,
 			BotToken:   os.Getenv(*botTokenEnv),
 			CallerMode: callerMode,
 			RichBlocks: *richBlocks,
 			Logf:       logf,
 		})
 		if err != nil {
-			return fmt.Errorf("slack adapter: %w (set $%s and $%s)", err, *appTokenEnv, *botTokenEnv)
+			// The bot token is the only credential slack.New still insists on;
+			// naming the app-token var here would send an outbound-only
+			// operator after a token they deliberately left out (#23).
+			return fmt.Errorf("slack adapter: %w (set $%s)", err, *botTokenEnv)
 		}
 	case "googlechat":
+		project, sub := *googleProject, *googleSub
+		switch {
+		case *outboundOnly && (project != "" || sub != ""):
+			// The env vars are named alongside the flags because they are where
+			// a Deployment usually sets these, and an operator told only about
+			// flags they never passed would go looking in the wrong place.
+			logf("warning: --outbound-only, so --google-project/--google-subscription " +
+				"($SWITCHBOARD_GOOGLE_PROJECT/$SWITCHBOARD_GOOGLE_SUBSCRIPTION) are " +
+				"ignored and no Pub/Sub client is built")
+			project, sub = "", ""
+		case !*outboundOnly && sub == "":
+			return errors.New("no --google-subscription (set it together with --google-project, " +
+				"or pass --outbound-only if this deployment only posts)")
+		}
 		adapter, err = googlechat.New(googlechat.Config{
-			ProjectID:      *googleProject,
-			SubscriptionID: *googleSub,
+			ProjectID:      project,
+			SubscriptionID: sub,
 			Cards:          cardMode,
 			CallerMode:     callerMode,
 			Commands:       appCommands,
@@ -259,16 +322,25 @@ func runServe(args []string) (err error) {
 			Logf:           logf,
 		})
 		if err != nil {
-			return fmt.Errorf("googlechat adapter: %w (set --google-project and --google-subscription)", err)
+			// No flag hint: this also carries ADC failures, which naming the
+			// subscription flags would misattribute.
+			return fmt.Errorf("googlechat adapter: %w", err)
 		}
 	default:
 		return fmt.Errorf("invalid --platform %q (want \"slack\" or \"googlechat\")", *platform)
 	}
 	m := newMetrics()
-	router := NewRouter(dc, adapter, progress, m, logf)
-	router.setShowUsage(*showUsage)
+	// The router is what an inbound turn is bridged through, so an outbound-only
+	// run has none — and needs no daemon to point it at.
+	var router *Router
+	if inbound {
+		router = NewRouter(dc, adapter, progress, m, logf)
+		router.setShowUsage(*showUsage)
+	}
 	if *showUsage {
 		switch {
+		case !inbound:
+			logf("warning: --show-usage describes an agent turn, and an outbound-only run has none")
 		case *platform == "slack" && !*richBlocks:
 			logf("warning: --show-usage needs --slack-rich-blocks; the footer will not be shown")
 		case *platform == "googlechat" && cardMode != googlechat.CardsRich:
@@ -330,23 +402,30 @@ func runServe(args []string) (err error) {
 	// Through logf, not straight to stderr: these are the first lines of the
 	// run, and a JSON stream that opens with three unparseable ones is worse
 	// than no banner at all.
-	logf("bridging %s -> %s", adapter.Name(), *daemonURL)
+	if inbound {
+		logf("bridging %s -> %s", adapter.Name(), *daemonURL)
+	} else {
+		// Said plainly, because it is the difference between a quiet gateway
+		// and a broken one: nobody can talk to the agent through this process.
+		logf("outbound-only: posting to %s, receiving nothing", adapter.Name())
+	}
 	if ing != nil {
 		logf("outbound ingress on %s%s", *ingressAddr, ingressPath)
 	}
-	runErr := adapter.Run(ctx, router)
 
-	// A listener's bind failure cancels ctx, so adapter.Run returns
-	// context.Canceled; surface the underlying error as the real cause. Drain
-	// every listener so none is reported as the exit code before the one that
-	// actually failed.
-	var srvErr error
-	for range listeners {
-		if err := <-srvErrs; err != nil && srvErr == nil {
-			srvErr = err
-		}
+	// With no event source there is nothing to run, so wait on the same ctx
+	// adapter.Run would have: a signal, or a listener failure that called stop.
+	var runErr error
+	if inbound {
+		runErr = adapter.Run(ctx, router)
+	} else {
+		<-ctx.Done()
+		runErr = ctx.Err()
 	}
-	if srvErr != nil {
+
+	// The run is over: bring the listeners down with it and collect what they
+	// have to say.
+	if srvErr := stopListeners(stop, listeners, srvErrs); srvErr != nil {
 		// serveOptional already logged this one, with the name of the listener
 		// that failed attached.
 		return loggedError{srvErr}
@@ -356,6 +435,28 @@ func runServe(args []string) (err error) {
 	}
 	logf("shutting down")
 	return nil
+}
+
+// stopListeners ends the run's listeners and reports the first failure any of
+// them had, having drained them all so a later one is not reported as the exit
+// code ahead of the one that actually failed. A bind failure has usually
+// already cancelled ctx and been logged where it happened.
+//
+// It cancels *before* it drains, and that order is the whole point: the servers
+// return when ctx is done, and ctx is only cancelled here or by serve's
+// deferred stop — which cannot run until serve returns, which is what this is
+// waiting to do. Draining first parks the process forever on an adapter.Run
+// failure that did not itself cancel ctx, with /healthz still answering 200:
+// alive to every probe, doing nothing, and never restarted.
+func stopListeners(stop func(), listeners int, srvErrs <-chan error) error {
+	stop()
+	var srvErr error
+	for range listeners {
+		if err := <-srvErrs; err != nil && srvErr == nil {
+			srvErr = err
+		}
+	}
+	return srvErr
 }
 
 // splitList parses a comma-separated flag value into its non-empty, trimmed
