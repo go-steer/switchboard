@@ -278,8 +278,11 @@ func normalizeAddon(ev *wireEvent) inbound {
 		in.thread = threadOf(m)
 		in.caller = orSender(in.caller, m)
 		in.text = bodyText(m)
-		if in.space == "" || in.text == "" {
+		if in.space == "" {
 			return inbound{}
+		}
+		if in.text == "" {
+			return welcomeOrIgnore(in, m)
 		}
 		in.kind = kindMessage
 		return in
@@ -334,7 +337,10 @@ func normalizeAddon(ev *wireEvent) inbound {
 			in.space = spaceNameOf(p.Space)
 		}
 		// The mention or command that added the app arrives as its own event;
-		// answering both would double-post into a brand new space.
+		// answering both would double-post into a brand new space. That second
+		// event does now always answer: a bare @mention decodes to the welcome
+		// rather than to nothing (#55). Deferring to an event that then dropped
+		// the add on the floor is what made this suppression a silence.
 		if in.space == "" || p.InteractionAdd {
 			return inbound{}
 		}
@@ -431,10 +437,47 @@ func legacyTurn(in inbound, m *chatv1.Message) inbound {
 		return in
 	}
 	if in.text = bodyText(m); in.text == "" {
-		return inbound{}
+		return welcomeOrIgnore(in, m)
 	}
 	in.kind = kindMessage
 	return in
+}
+
+// welcomeOrIgnore resolves a message the agent has no turn to run from. A bare
+// @mention of the app is not nothing — it is someone addressing the app without
+// asking it anything, which is exactly what the welcome answers (#55) — while a
+// message carrying no body at all, an attachment on its own, really is nothing
+// to reply to.
+//
+// This is what makes an @mention-add reach a new space. The add-on dialect
+// splits that one user action across two events and the added-to-space half
+// suppresses itself in favour of the message half, so the message half has to
+// have an answer or the whole add is silent. The legacy dialect inlines the
+// triggering message into the add instead, and arrives at the same welcome by
+// the same route.
+//
+// Answering a bare mention anywhere, rather than only in a space the app was
+// just added to, is deliberate: the gateway then needs to remember nothing, and
+// "@Switchboard" on its own is a reasonable way to ask what the app is called
+// and what it accepts long after the add.
+func welcomeOrIgnore(in inbound, m *chatv1.Message) inbound {
+	if !isBareMention(m) {
+		return inbound{}
+	}
+	in.kind = kindWelcome
+	return in
+}
+
+// isBareMention reports whether the whole message was an @mention of the app.
+// Chat strips the mention out of argumentText, so a message that is nothing but
+// the mention leaves it empty while the annotation stays behind.
+//
+// The annotation check does not say *who* was mentioned, and does not need to:
+// Chat strips only the app's own mentions from argumentText, so "@Alice" leaves
+// it non-empty and never reaches here. An empty argumentText next to a mention
+// means the app's mention was the whole message.
+func isBareMention(m *chatv1.Message) bool {
+	return m != nil && strings.TrimSpace(m.ArgumentText) == "" && hasMention(m)
 }
 
 // isBotMessage reports whether a message was authored by an app.
@@ -455,8 +498,11 @@ func bodyText(m *chatv1.Message) string {
 	}
 	// An empty argumentText on a message that mentions the app means the whole
 	// message *was* the mention. Falling back to text there would prompt the
-	// agent with the literal "@switchboard", so treat it as nothing to run.
-	// Without a mention (a DM) there is no argumentText to begin with.
+	// agent with the literal "@switchboard", so there is no turn to run here —
+	// which is not the same as there being nothing to say, see welcomeOrIgnore.
+	// A DM reaches neither branch: addon-live-message.json shows Chat setting
+	// argumentText there too, equal to the text, since there is no app mention
+	// in it to strip.
 	if hasMention(m) {
 		return ""
 	}

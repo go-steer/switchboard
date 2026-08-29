@@ -45,10 +45,12 @@ import (
 //
 // Two of them are a pair, and are only legible together: addon-live-mention-add
 // and addon-live-mention-add-message are the two events Chat sends for one
-// @mention-add into a space. Both replay to "ignored", which is the bug in #55 —
-// the added-to-space event defers to the message event, and the message is a
-// bare mention the decoder drops, so the add gets no reply at all. They are here
-// as its reproduction; when it is fixed, exactly these two goldens change.
+// @mention-add into a space. They were both "ignored", which was #55 — the
+// added-to-space event defers to the message event, and the message is a bare
+// mention the decoder dropped, so the add got no reply at all. They stay here as
+// its regression: the add half must remain "ignored" and the message half must
+// post the welcome. Both changing to a post is a double-reply into a brand new
+// space, which is the failure the deferral exists to prevent.
 //
 // Fixtures named *-live-* are captured traffic rather than hand-written, kept
 // under their own prefix so the provenance stays visible. Scrub before

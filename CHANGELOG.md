@@ -67,6 +67,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   ref fix below.
 
 ### Fixed
+- Adding the app to a Google Chat space by @mentioning it was answered with
+  silence (#55) — the first thing anyone installing it does, and indistinguishable
+  from the missing Pub/Sub grant the setup doc warns about. Chat splits that one
+  action across two events: the added-to-space half suppresses its welcome
+  because a second event is coming, and the second event is a bare
+  `@Switchboard` whose `argumentText` Chat strips to nothing, which the decoder
+  read as no turn to run and dropped. Each half was right about its own case and
+  the composition was a silence. A bare mention now decodes to the welcome —
+  in any space, not only a just-added one, so the gateway remembers nothing and
+  `@Switchboard` on its own is also how you ask what it accepts. The add still
+  answers exactly once: the suppression stays, and only the message half posts.
+  A message with no body and no mention, an attachment on its own, is still
+  ignored.
 - A Google Chat message that overflowed an `append` continued into a malformed
   conversation key (#39). The ingress builds a continuation from
   `ref.Conversation`, and a ref for a post into a bare space did not name the

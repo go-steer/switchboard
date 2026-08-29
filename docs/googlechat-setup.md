@@ -123,12 +123,15 @@ confirmed against captured traffic:
   does arrive with `"interactionAdd": true`, spelled exactly that way, so the
   suppression fires rather than decoding to `false`. That was the risk this
   bullet was written about, and it is retired. What the pair then showed is a
-  different bug: `addon-live-mention-add-message.json` is the second event Chat
-  sends for the same action, and it is a bare `@Switchboard` with no
-  `argumentText`, which the decoder ignores too. The suppression defers to a
-  follow-up that never gets answered, so an @mention-add gets no reply at all —
-  see #55. Both fixtures replay to `ignored`, which is what makes them its
-  reproduction.
+  different bug, since fixed: `addon-live-mention-add-message.json` is the second
+  event Chat sends for the same action, and it is a bare `@Switchboard` with no
+  `argumentText`, which the decoder ignored too. The suppression deferred to a
+  follow-up that never got answered, so an @mention-add got no reply at all
+  (#55). A bare mention now decodes to the welcome, in any space rather than only
+  a just-added one, so the follow-up always answers. The pair stays in the corpus
+  as the regression: the add half must replay to `ignored` and the message half
+  to the welcome post, because both posting is the double-reply the suppression
+  exists to prevent.
 - `chat.user`. **Confirmed** by `addon-live-message.json`, along with two things
   the corpus had wrong: the actor object carries an `email`, which the generated
   `chat/v1` `User` type has no field for and therefore silently dropped (hence
@@ -427,12 +430,18 @@ In the order that shows what is new:
    piece renders its code as code: no stray backticks at the seam, which is what
    used to happen when the split landed inside a fenced block.
 7. Restart with `--googlechat-cards=off` → everything degrades to text.
-8. **@-mention the app into a new room** → **nothing, today.** A mention-add
-   sends two events, the second is a bare `@Switchboard` with no argument text,
-   and the gateway ignores both — #55. Expect silence and do not read it as a
-   broken Pub/Sub grant. An add that is *not* an interaction — from the app
-   directory rather than by mention — should still get the welcome, since only
-   `interactionAdd` suppresses it, but no capture of that path exists yet.
+8. **@-mention the app into a new room** → the welcome, once, in the thread the
+   mention started. A mention-add sends two events and only the second answers:
+   the added-to-space half suppresses itself (`interactionAdd`) and the bare
+   `@Switchboard` that follows earns the welcome (#55). Two welcomes for one add
+   is a regression, and so is silence — the latter used to be the symptom here
+   and is easy to misread as a broken Pub/Sub grant. An add that is *not* an
+   interaction — from the app directory rather than by mention — gets the welcome
+   from the added-to-space event instead, at the top level of the space rather
+   than in a thread, but no capture of that path exists yet.
+9. **`@Switchboard` on its own in a room it is already in** → the welcome again.
+   A bare mention is answered anywhere, not just on an add, so there is a way to
+   ask what the app accepts without knowing a command.
 
 ### Testing both dialects
 
