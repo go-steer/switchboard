@@ -163,3 +163,55 @@ func TestStreamOpened(t *testing.T) {
 		}
 	}
 }
+
+// The optional routes a daemon serves arrive on the frame that opens every
+// stream, so a caller can know whether a session will answer /perms before it
+// asks. Dropping the map means probing for a 501 to learn something that was
+// already on the wire.
+func TestStreamOpenedReadsWhichOptionalRoutesTheDaemonServes(t *testing.T) {
+	c, ok := StreamOpened(`{"protocol_version":"1.5.0","server":"core-agent/0.9.2",` +
+		`"event_types":["turn-complete"],"features":{"mcp":true,"perms_stream":true,"retired":false}}`)
+	if !ok {
+		t.Fatal("a frame carrying features did not parse")
+	}
+	if !c.Offers(FeaturePermsStream) {
+		t.Errorf("Offers(%q) = false on %v", FeaturePermsStream, c.Features)
+	}
+	// Present-and-false is the same answer as absent: not offered.
+	if c.Offers("retired") || c.Offers("telepathy") {
+		t.Errorf("Offers said yes to something the daemon did not serve: %v", c.Features)
+	}
+	// Features and EventTypes answer different questions, and neither may be
+	// read off the other's list.
+	if c.Advertises(FeaturePermsStream) || c.Offers("turn-complete") {
+		t.Error("the two capability lists were conflated")
+	}
+}
+
+// A daemon predating the features map — or one whose agent registered no
+// optional routes at all — reads as offering nothing, rather than panicking
+// on a nil map.
+func TestOffersIsFalseWhenTheDaemonSentNoFeatures(t *testing.T) {
+	c, ok := StreamOpened(`{"protocol_version":"1.1.0","event_types":["turn-complete"]}`)
+	if !ok {
+		t.Fatal("a frame with no features did not parse")
+	}
+	if c.Offers(FeaturePermsStream) {
+		t.Error("Offers said yes against a daemon that listed no features")
+	}
+	if (Capabilities{}).Offers(FeaturePermsStream) {
+		t.Error("the zero Capabilities offers something")
+	}
+}
+
+// A frame carrying only features is still a frame worth reading: the
+// capability list is the reason to parse it at all.
+func TestStreamOpenedAcceptsAFrameThatIsOnlyFeatures(t *testing.T) {
+	c, ok := StreamOpened(`{"features":{"perms_stream":true}}`)
+	if !ok {
+		t.Fatal("a features-only frame was discarded")
+	}
+	if !c.Offers(FeaturePermsStream) {
+		t.Errorf("Offers = false on %v", c.Features)
+	}
+}

@@ -105,6 +105,66 @@ func TestDecodeAddonEvents(t *testing.T) {
 			want: inbound{},
 		},
 		{
+			// The message half of an @mention-add, and the shape of a plain
+			// "@Switchboard" in any space: Chat strips the mention out of
+			// argumentText and leaves nothing, so there is no turn to run —
+			// but the welcome is the answer, not silence (#55). The thread
+			// rides along so the greeting lands where they asked.
+			name: "bare mention earns the welcome",
+			payload: `{
+				"chat": {
+					"user": {"name": "users/123", "type": "HUMAN"},
+					"space": {"name": "spaces/AAA"},
+					"messagePayload": {
+						"message": {
+							"name": "spaces/AAA/messages/M1",
+							"text": "@Switchboard",
+							"annotations": [{"type": "USER_MENTION"}],
+							"thread": {"name": "spaces/AAA/threads/T1"},
+							"sender": {"name": "users/123", "type": "HUMAN"}
+						}
+					}
+				}
+			}`,
+			want: inbound{
+				kind:   kindWelcome,
+				space:  "spaces/AAA",
+				thread: "spaces/AAA/threads/T1",
+				caller: "users/123",
+			},
+		},
+		{
+			// The discriminator against the case above: no mention annotation
+			// means nobody addressed the app, so an empty body stays nothing.
+			name: "attachment-only message stays ignored",
+			payload: `{
+				"chat": {
+					"space": {"name": "spaces/AAA"},
+					"messagePayload": {"message": {
+						"text": "",
+						"sender": {"name": "users/123", "type": "HUMAN"},
+						"attachment": [{"name": "spaces/AAA/messages/M1/attachments/A1"}]
+					}}
+				}
+			}`,
+			want: inbound{},
+		},
+		{
+			// A bot's bare mention must not bounce a welcome back at it.
+			name: "bare mention from a bot ignored",
+			payload: `{
+				"chat": {
+					"space": {"name": "spaces/AAA"},
+					"messagePayload": {"message": {
+						"text": "@Switchboard",
+						"annotations": [{"type": "USER_MENTION"}],
+						"sender": {"type": "BOT"}
+					}}
+				}
+			}`,
+			want: inbound{},
+		},
+		{
 			name: "slash command with quoted command id",
 			payload: `{
 				"chat": {
@@ -184,6 +244,9 @@ func TestDecodeAddonEvents(t *testing.T) {
 			want:    inbound{kind: kindWelcome, space: "spaces/AAA"},
 		},
 		{
+			// Still suppressed, and now safely: the message event it defers to
+			// answers a bare mention with the welcome rather than dropping it
+			// (#55), so exactly one reply reaches the space.
 			name: "added by mention defers to the message event",
 			payload: `{"chat": {"addedToSpacePayload": {
 				"space": {"name": "spaces/AAA"}, "interactionAdd": true}}}`,
@@ -295,6 +358,31 @@ func TestDecodeLegacyEvents(t *testing.T) {
 			payload: `{"type": "ADDED_TO_SPACE", "space": {"name": "spaces/AAA"},
 				"message": {"argumentText": "hi", "sender": {"type": "HUMAN"}}}`,
 			want: inbound{kind: kindMessage, space: "spaces/AAA", text: "hi"},
+		},
+		{
+			// The legacy route to #55's bug. It never had it — a bare mention
+			// fell through legacyTurn to the branch's own welcome — and it
+			// still reaches the welcome now that legacyTurn returns one
+			// itself, so the two dialects stay on one answer.
+			name: "added to space by a bare mention still welcomes",
+			payload: `{"type": "ADDED_TO_SPACE", "space": {"name": "spaces/AAA"},
+				"message": {"text": "@Switchboard", "annotations": [{"type": "USER_MENTION"}],
+					"sender": {"name": "users/123", "type": "HUMAN"}}}`,
+			want: inbound{kind: kindWelcome, space: "spaces/AAA", caller: "users/123"},
+		},
+		{
+			name: "bare mention earns the welcome",
+			payload: `{"type": "MESSAGE", "space": {"name": "spaces/AAA"},
+				"user": {"name": "users/123", "type": "HUMAN"},
+				"message": {"text": "@Switchboard", "annotations": [{"type": "USER_MENTION"}],
+					"thread": {"name": "spaces/AAA/threads/T1"},
+					"sender": {"name": "users/123", "type": "HUMAN"}}}`,
+			want: inbound{
+				kind:   kindWelcome,
+				space:  "spaces/AAA",
+				thread: "spaces/AAA/threads/T1",
+				caller: "users/123",
+			},
 		},
 		{
 			name: "added to space by a command runs the command",
