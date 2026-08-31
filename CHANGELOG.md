@@ -7,6 +7,62 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- `pkg/approval`: a client for the agent backend's permission broker, the first
+  half of turning a blocked tool call into a question someone in a chat thread
+  can answer (#40). It streams pending prompts from
+  `/sessions/<app>/<id>/perms/stream` and answers them at `perms/respond`, and
+  it is a package of its own rather than a fifth verb on `pkg/daemon` because
+  these two routes are optional — they exist only for a session whose agent
+  registered a broker, and answer `501` for one that did not. Nothing posts
+  buttons yet; this is the seam they will sit on.
+  - Who approved is asserted in the header and never in the body. The wire
+    format has a field for it, but the backend fills the audit line from the
+    caller it verified and uses that field only to *check* a client's claim
+    against the verdict — so sending it can never widen what gets recorded, only
+    earn a `400`. `Respond` reads back what was recorded, so an approval nobody
+    could be named on is distinguishable from one that was attributed, rather
+    than both arriving as silence.
+  - All six decisions the backend accepts are offered, narrowest first, except
+    where a decision grants something other than what its label claims. A button
+    that means less than it says is worse than an absent one; one that means more
+    is worse than both. `allow-session-verb` goes when the gate could not extract
+    a verb, since there is nothing to scope it to. Everything wider than
+    `allow-once` goes on a control-plane write, because that gate records any
+    non-deny answer as `allow-once` and deliberately remembers nothing, so
+    "Always allow (saved)" there would report a standing grant on the file
+    governing the agent's own permissions when nothing had been saved. On a
+    path-scope prompt, `allow-session` and `allow-session-tool` go: the gate
+    raising those reads neither on the way back in, so the same out-of-scope path
+    keeps prompting — and the tool grant is not merely inert, since the file-write
+    gate *does* read it, so approving an out-of-scope write that way would
+    silently stop the prompting for every in-scope write by that tool. A prompt of
+    an unknown kind gets the full set: withholding is a set of facts about
+    specific gates, and guessing at an unfamiliar one risks leaving a blocked
+    agent nothing but deny.
+  - Labels name what a press actually does. `allow-always` on a path-scope prompt
+    reads "Always allow this directory", because the backend widens the path to
+    its enclosing directory tree and promotes a write to read-write before
+    storing it — one press on a prompt reading `write ~/.ssh/authorized_keys`
+    persists read and write over all of `~/.ssh`. `allow-session-tool` on a
+    generic prompt does not name the tool at all, because a namespaced toolset
+    reports its *namespace* there while the grant covers one underlying tool, so
+    interpolating the field would offer "Allow every mcp this session" for a far
+    narrower press.
+  - `allow-always` is marked as outliving the request, because it persists across
+    restarts and its blast radius is the whole backend rather than the thread it
+    was pressed in. So is `allow-session-verb`, which scopes to a bash command's
+    leading word — approving one `git push --force` also approves every
+    `git reset --hard` for the session.
+  - Prompt kinds are carried as opaque strings. The backend has already grown a
+    fifth (`control_plane_write`), and a prompt of a kind this build has never
+    heard of is still answerable — the alternative is an agent blocked forever on
+    a question switchboard declined to ask.
+- `daemon.Capabilities.Offers`: which optional routes the backend serves, read
+  off the capabilities frame that already opens every stream (#40). Whether a
+  session will answer `/perms` is therefore known before anything asks, on a
+  frame switchboard was reading anyway — the alternative is spending a round trip
+  to be told `501`. Distinct from `Advertises`, which is about which events
+  arrive on the stream rather than which routes exist.
 - Agent-initiated sessions: a POST to the outbound ingress may carry
   `"session":"<app>/<id>"`, and the thread the message lands in becomes that
   session's conversation (#38). A human replying there is injected into the work
@@ -112,6 +168,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `internal/version.Version` is `v0.3.0-dev`, so a build off main no longer
   claims to be the release that just shipped (#43). Same window
   `verify-version-fallback` keeps short after every tag.
+- A `501` from the agent backend is no longer treated as worth retrying (#40).
+  It is a `5xx`, but it does not mean the backend is struggling — it means the
+  route was never built for this session, and the same request gets the same
+  answer for as long as that process lives. Retrying it is a loop, and telling
+  an operator to try again is a lie. Every other code keeps the split it had.
 
 ## [v0.2.0] — 2026-08-20
 

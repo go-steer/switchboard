@@ -30,7 +30,6 @@
 package daemon
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -46,6 +45,8 @@ import (
 	"sync/atomic"
 	"time"
 	"unicode/utf8"
+
+	"github.com/go-steer/switchboard/internal/sse"
 )
 
 // Config captures the daemon-side surface switchboard posts against.
@@ -71,16 +72,28 @@ type Client struct {
 	http *http.Client
 }
 
+// Validate reports whether the config addresses a daemon at all. It is
+// exported because the same three facts — where the daemon is, what
+// authenticates to it, and which HTTP client to use — are what any client of
+// that daemon needs, and a second copy of these rules elsewhere in the tree
+// would be a second place for them to drift.
+func (c Config) Validate() error {
+	if c.BaseURL == "" {
+		return errors.New("daemon: BaseURL is required")
+	}
+	if strings.HasSuffix(c.BaseURL, "/") {
+		return fmt.Errorf("daemon: BaseURL must not end with '/' (got %q)", c.BaseURL)
+	}
+	if c.BearerToken == "" {
+		return errors.New("daemon: BearerToken is required")
+	}
+	return nil
+}
+
 // New validates the config and returns a Client.
 func New(cfg Config) (*Client, error) {
-	if cfg.BaseURL == "" {
-		return nil, errors.New("daemon: BaseURL is required")
-	}
-	if strings.HasSuffix(cfg.BaseURL, "/") {
-		return nil, fmt.Errorf("daemon: BaseURL must not end with '/' (got %q)", cfg.BaseURL)
-	}
-	if cfg.BearerToken == "" {
-		return nil, errors.New("daemon: BearerToken is required")
+	if err := cfg.Validate(); err != nil {
+		return nil, err
 	}
 	hc := cfg.HTTPClient
 	if hc == nil {
@@ -502,11 +515,35 @@ type Capabilities struct {
 	// and "tool-result" separately even though all three ride on EventAgent,
 	// and does not list EventAgent itself. Nothing may test for "agent" here.
 	EventTypes []string
+
+	// Features is the set of optional *routes* the daemon serves, which is a
+	// different question from EventTypes: that one is about what arrives on
+	// this stream, this one is about what else can be called. A daemon whose
+	// agent registered no permission broker answers 501 at /perms/stream, and
+	// says so here in advance by omitting FeaturePermsStream — so a caller can
+	// know before it asks, on a frame it was already going to read.
+	//
+	// A key present and false means the same as absent: not offered. Use
+	// Offers rather than indexing, so an older daemon that sends no features
+	// map at all reads as "offers nothing" instead of panicking on a nil map.
+	Features map[string]bool
 }
+
+// FeaturePermsStream is the Features key for core-agent's permission-prompt
+// broker: the /perms/stream and /perms/respond routes that turn a blocked
+// tool call into a question someone can answer. Registered per agent, so two
+// sessions on one daemon can disagree about it.
+const FeaturePermsStream = "perms_stream"
 
 // Advertises reports whether the daemon said it sends this event type.
 func (c Capabilities) Advertises(t string) bool {
 	return slices.Contains(c.EventTypes, t)
+}
+
+// Offers reports whether the daemon said it serves this optional route.
+// Distinct from Advertises, which is about events on this stream.
+func (c Capabilities) Offers(feature string) bool {
+	return c.Features[feature]
 }
 
 // Missing returns the given event types the daemon did not advertise, in the
@@ -528,26 +565,28 @@ func (c Capabilities) Missing(want ...string) []string {
 
 // capabilitiesFrame is the JSON payload of an EventCapabilities event.
 type capabilitiesFrame struct {
-	ProtocolVersion string   `json:"protocol_version"`
-	Server          string   `json:"server"`
-	EventTypes      []string `json:"event_types"`
+	ProtocolVersion string          `json:"protocol_version"`
+	Server          string          `json:"server"`
+	EventTypes      []string        `json:"event_types"`
+	Features        map[string]bool `json:"features"`
 }
 
 // StreamOpened parses an EventCapabilities payload. ok is false on a parse
-// failure or a frame carrying none of the three fields, which says nothing
+// failure or a frame carrying none of the four fields, which says nothing
 // worth logging.
 func StreamOpened(data string) (c Capabilities, ok bool) {
 	var f capabilitiesFrame
 	if err := json.Unmarshal([]byte(data), &f); err != nil {
 		return Capabilities{}, false
 	}
-	if f.ProtocolVersion == "" && f.Server == "" && len(f.EventTypes) == 0 {
+	if f.ProtocolVersion == "" && f.Server == "" && len(f.EventTypes) == 0 && len(f.Features) == 0 {
 		return Capabilities{}, false
 	}
 	return Capabilities{
 		ProtocolVersion: f.ProtocolVersion,
 		Server:          f.Server,
 		EventTypes:      f.EventTypes,
+		Features:        f.Features,
 	}, true
 }
 
@@ -1092,31 +1131,9 @@ func (c *Client) subscribe(ctx context.Context, sess Session, assertedCaller str
 		onConnect()
 	}
 
-	sc := bufio.NewScanner(resp.Body)
-	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	var ev Event
-	for sc.Scan() {
-		line := sc.Text()
-		switch {
-		case line == "": // dispatch on blank-line boundary
-			if ev.Type != "" || ev.Data != "" {
-				if err := fn(ev); err != nil {
-					return err
-				}
-			}
-			ev = Event{}
-		case strings.HasPrefix(line, "event:"):
-			ev.Type = strings.TrimSpace(line[len("event:"):])
-		case strings.HasPrefix(line, "data:"):
-			d := strings.TrimSpace(line[len("data:"):])
-			if ev.Data != "" {
-				ev.Data += "\n" + d
-			} else {
-				ev.Data = d
-			}
-		}
-	}
-	return sc.Err()
+	return sse.Scan(resp.Body, func(e sse.Event) error {
+		return fn(Event{Type: e.Type, Data: e.Data})
+	})
 }
 
 const (
@@ -1322,8 +1339,14 @@ func (e *StatusError) Error() string {
 // Transient reports whether the failure is the daemon's fault rather than the
 // request's: a 5xx means the same request could succeed on retry, a 4xx means
 // it won't.
+//
+// 501 is the exception on both counts. It is a 5xx, but it does not mean the
+// daemon is struggling — it means the route is not implemented for this
+// session, which is a fact about what was built rather than about this moment,
+// and the same request will get the same answer for as long as the process
+// lives. Retrying it is a loop, and telling an operator to try again is a lie.
 func (e *StatusError) Transient() bool {
-	return e.StatusCode >= 500
+	return e.StatusCode >= 500 && e.StatusCode != http.StatusNotImplemented
 }
 
 // IsTransient reports whether err is worth a chat-facing "try again" rather

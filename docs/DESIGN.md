@@ -56,6 +56,47 @@ per-caller MCP credentials from it (W0). Switchboard must be listed in the
 daemon's `attach.multi_session.proxy_identities` for the assertion to be
 honored.
 
+### 2.1 Optional routes, and knowing before you ask
+
+Two more endpoints exist for *some* sessions — the permission broker that turns
+a blocked tool call into a question (`pkg/approval`, #40):
+
+| Route | Purpose |
+|-------|---------|
+| `GET /sessions/<app>/<sid>/perms/stream` (SSE) | prompts the agent is blocked on |
+| `POST /sessions/<app>/<sid>/perms/respond` | the answer, releasing the call |
+
+They are not a fifth and sixth verb, and they are deliberately not in
+`pkg/daemon`. Every session has the four; these two exist only when the agent
+behind a session registered a prompt broker, and answer `501` when it did not.
+Keeping them in a separate package makes that optionality structural rather than
+something a caller discovers from a status code.
+
+Which sessions have them is already on the wire. The capabilities frame that
+opens every `/events` stream carries a feature map, and `perms_stream` is a key
+in it — so `daemon.Capabilities.Offers` answers the question from a frame
+switchboard was reading anyway, and nothing has to spend a request to be told
+`501`. That is also why a `501` is classified as terminal rather than transient:
+it is the one `5xx` that describes what was built rather than how the daemon is
+feeling, and a retry loop against it never ends.
+
+**Who approved is a header, not a field.** `/perms/respond` fills its audit line
+from the caller the daemon verified — the same `X-Asserted-Caller` seam the four
+verbs use — and the body's `approver` field exists only so a client's claim can
+be *checked* against that verdict. It can never widen what is recorded; it can
+only disagree and earn a `400`. Switchboard therefore asserts the pressing human
+in the header and omits the field entirely. The response echoes what was
+recorded, which is the part that matters for a shared channel: an approval the
+daemon could attribute to nobody has to be distinguishable from one it could,
+and both arriving as silence is precisely the failure an audit line exists to
+prevent.
+
+The prompt stream has no cursor — no seq, no `since`, no replay window — and
+needs none, because the daemon seeds each new subscriber with the prompts still
+pending. A prompt nobody is waiting on is not worth redelivering. So
+reconnecting is just resubscribing, and switchboard can attach lazily, when a
+session reports it is blocked, without racing a prompt that arrived first.
+
 ## 3. Architecture
 
 ```

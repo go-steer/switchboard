@@ -155,6 +155,10 @@ func TestStatusErrorTransient(t *testing.T) {
 		{http.StatusConflict, false},
 		{http.StatusInternalServerError, true},
 		{http.StatusServiceUnavailable, true},
+		// The one 5xx that is permanent: the route is not implemented for
+		// this session, and will not be until the process is replaced.
+		// Retrying it is a loop; telling an operator to try again is a lie.
+		{http.StatusNotImplemented, false},
 	}
 	for _, tc := range cases {
 		c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
