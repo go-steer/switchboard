@@ -109,6 +109,9 @@ const (
 	KindNotice ReplyKind = "notice"
 	// KindAck is a gateway command's acknowledgment (see Handler.HandleCommand).
 	KindAck ReplyKind = "ack"
+	// KindDecision is a question the thread has to answer before the agent can
+	// go on — the one reply kind that expects something back. See Decision.
+	KindDecision ReplyKind = "decision"
 )
 
 // Reply is one outbound turn switchboard relays back into a conversation.
@@ -129,6 +132,15 @@ type Reply struct {
 	// the reply. Nil — the usual case — means show nothing: the router only
 	// populates it for an answer, and only when the operator opted in.
 	Usage *Usage
+
+	// Decision, when set, makes this reply a question with answers attached,
+	// for an adapter to render as buttons. Nil on every other kind of reply.
+	//
+	// Text still says the whole thing, options included, because an adapter
+	// that cannot offer buttons must still be able to post the question. An
+	// adapter that can should render from here and let Text be the fallback
+	// its platform shows in notifications.
+	Decision *Decision
 }
 
 // Usage is the token and cost accounting for the turn a Reply carries. It is
@@ -301,6 +313,19 @@ type Handler interface {
 	// subcommand). An error is returned only for an internal failure; an
 	// unknown or malformed command yields a helpful ack, not an error.
 	HandleCommand(ctx context.Context, cmd Command) (string, error)
+
+	// HandlePress processes one answer to a Decision this handler posted.
+	//
+	// On the interface rather than in an optional capability, so that an
+	// adapter which renders buttons cannot be paired with a handler that has
+	// nowhere to send the presses — the failure would be a person clicking a
+	// button and watching nothing happen, which is worse than the button
+	// never appearing. An adapter with no interactive surface simply never
+	// calls it.
+	//
+	// It must be safe to call more than once for the same press: platforms
+	// redeliver, and people click twice.
+	HandlePress(ctx context.Context, p Press) error
 }
 
 // CommandChoices is an optional Handler capability: reporting the values a

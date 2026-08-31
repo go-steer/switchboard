@@ -196,7 +196,46 @@ func (a *Adapter) dispatch(ctx context.Context, h chat.Handler, evt socketmode.E
 			return
 		}
 		a.handleSlashCommand(ctx, h, evt.Request, sc)
+	case socketmode.EventTypeInteractive:
+		cb, ok := evt.Data.(slack.InteractionCallback)
+		if !ok {
+			return
+		}
+		a.handleInteractive(ctx, h, evt.Request, cb)
 	}
+}
+
+// handleInteractive routes a button press back to the gateway.
+//
+// The ack is the first thing this does, before the press is read as one of
+// ours. Slack gives three seconds and then tells the person their request
+// failed, and answering a permission prompt is exactly the moment not to say
+// that: the decision is about to be applied whatever the dialog claims, so a
+// late ack turns a working approval into one somebody re-presses. Handing the
+// press on happens off this goroutine for the same reason — the router's side
+// of it is a daemon round trip.
+//
+// The only interaction that reaches Slack without an ack is one the socket loop
+// could not read as a callback at all, which it drops before calling this.
+func (a *Adapter) handleInteractive(ctx context.Context, h chat.Handler, req *socketmode.Request, cb slack.InteractionCallback) {
+	if req != nil {
+		if err := a.sm.Ack(*req); err != nil {
+			a.logf("slack: ack interaction: %v", err)
+		}
+	}
+	press, ok := pressFrom(cb)
+	if !ok {
+		return
+	}
+	go func() {
+		// Resolved from the callback's own user, never from the message the
+		// buttons are attached to: switchboard posted that message, and the
+		// whole point of the press is that a *person* answered.
+		press.Caller = a.resolveCaller(ctx, cb.User.ID)
+		if err := h.HandlePress(ctx, press); err != nil {
+			a.logf("slack: press %s on %s: %v", press.Option, press.Conversation, err)
+		}
+	}()
 }
 
 // handleSlashCommand routes a native Slack slash command (e.g.
@@ -292,6 +331,26 @@ func (a *Adapter) Send(ctx context.Context, r chat.Reply) (chat.MessageRef, erro
 	rendered := toMrkdwn(r.Text)
 	if strings.TrimSpace(rendered) == "" {
 		return chat.MessageRef{}, nil // nothing worth posting
+	}
+
+	// A question with answers is posted as buttons whatever RichBlocks says.
+	// That flag is an opinion about how prose should look; this is the
+	// difference between a question somebody can answer and one they can only
+	// read. On rejection it falls through to the same text path as everything
+	// else, which still carries the options in prose.
+	if blocks := sanitizeBlocks(decisionBlocks(r.Text, r.Decision, toMrkdwn)); blocks != nil {
+		opts := append(threadOpt(thread),
+			slack.MsgOptionBlocks(toSlackBlocks(blocks)...),
+			slack.MsgOptionText(clamp(rendered, maxSectionText), false),
+		)
+		_, ts, err := a.api.PostMessageContext(ctx, channel, opts...)
+		if err == nil {
+			return chat.MessageRef{Conversation: landedKey(channel, thread, ts), ID: ts}, nil
+		}
+		if !isBlockRejection(err) {
+			return chat.MessageRef{}, fmt.Errorf("slack: post decision to %s: %w", r.Conversation, platformErr(err))
+		}
+		a.logf("slack: decision blocks rejected for %s (%v); retrying as text", r.Conversation, err)
 	}
 
 	if a.richBlocks {

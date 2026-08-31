@@ -94,8 +94,67 @@ prevent.
 The prompt stream has no cursor — no seq, no `since`, no replay window — and
 needs none, because the daemon seeds each new subscriber with the prompts still
 pending. A prompt nobody is waiting on is not worth redelivering. So
-reconnecting is just resubscribing, and switchboard can attach lazily, when a
-session reports it is blocked, without racing a prompt that arrived first.
+reconnecting is just resubscribing, and a watcher that attaches after the gate
+has already stopped a call still receives it.
+
+That seeding has a cost the daemon cannot pay for switchboard: *every*
+resubscription redelivers everything still pending, and a question nobody has
+got round to answering is exactly the kind that is still pending. An idle SSE
+stream is cut routinely, so without a record of what has already been posted the
+same question accumulates one copy per reconnect, each with its own live
+buttons. The router keeps that record per session and claims a prompt id before
+posting it, giving the claim back if the post fails — the next reconnect's
+seeding is the only retry there is, and holding a claim for a question that
+never reached the thread would turn a transient posting failure into an agent
+blocked on a question nobody was shown. The set is bounded; overflowing it
+clears it rather than refusing to ask, because a duplicate question is
+recoverable and a silently dropped one is not.
+
+### 2.2 Why the capability, and not the turn state
+
+The obvious trigger for subscribing is the moment a session says it is blocked:
+hold one stream instead of two, and open it only for the sessions that ever ask.
+The daemon's turn-state vocabulary even has the word for it,
+`awaiting_permission`.
+
+It emits it nowhere. The constant that names it is its only occurrence in the
+whole tree. A gateway that waits for it relays no prompt, ever, on any build
+shipping today — the feature would be dead code that passes its own tests.
+
+So the question switchboard asks is "*can* this session ask?", which the
+capabilities frame answers on every connection, rather than "is it asking?".
+The cost is a second SSE connection per session whose agent registered a broker,
+and it is bounded by the sessions that could have raised a prompt at all.
+Nothing is lost by attaching before there is anything to see, because of the
+seeding above — and nothing is doubled either, because of the record of what has
+been asked that goes with it. The watch is claimed once per session no matter
+how often the event stream reconnects; without that, a flapping relay leaves a
+watcher behind on every pass, each holding a stream nobody closes.
+
+### 2.3 The press seam
+
+A decision is platform-neutral: a `Reply` may carry one, an adapter renders it
+however its platform can, and presses come back through `Handler.HandlePress`.
+That method is on the interface rather than in an optional capability, so an
+adapter that renders buttons cannot be paired with a handler with nowhere to
+send them — a person clicking and watching nothing happen is a worse failure
+than the button never appearing. The answers are also written into the message
+text, so a platform that renders no interactive surface still says what the
+choices are and somebody can act on it another way.
+
+Two things about a press are load-bearing. It is attributed to whoever made it,
+resolved from the platform's own callback and never from the message being
+answered — switchboard posted that message, and the whole point is that a
+*person* replied to it. And it resolves to a session the conversation already
+has, never a new one: a press can only ever answer a question posted into a live
+conversation, so a miss means the session went away in between, and a fresh
+session holds none of the pending prompts the old one did.
+
+Relaying is off unless `--approvals` is set, and that default is not caution
+about a young feature. Turning it on means anyone who can post in a conversation
+can answer its permission prompts, and some of those answers — `allow-always`
+above all — outlive the request that raised them. That is a grant an operator
+makes deliberately, per deployment, with the channel's membership in mind.
 
 ## 3. Architecture
 
@@ -371,10 +430,16 @@ the token, so the allowlist above is still the whole authorization model.
 
 The router classifies each thing it sends with a `Reply.Kind` — an agent turn,
 a progress placeholder, a tool-activity notice, an error notice, a command
-acknowledgment. The kind is advisory: an adapter that ignores it posts the same
-text it always did, which is exactly what the Slack adapter does. An adapter that
-honors it can render the gateway's own chatter in the platform's idiom without
-switchboard growing per-platform branches in the router.
+acknowledgment, and a permission question (`KindDecision`, §2.3). The kind is
+advisory: an adapter that ignores it posts the same text it always did, which is
+exactly what the Slack adapter does. An adapter that honors it can render the
+gateway's own chatter in the platform's idiom without switchboard growing
+per-platform branches in the router.
+
+`KindDecision` is the one kind that carries structure with it — `Reply.Decision`
+— and it is still advisory in the same sense. An adapter that renders nothing
+special posts the question as text, with the answers listed in the body, and the
+reader can at least see that the agent is blocked and on what.
 
 Two optional capabilities work the same way — an adapter type-asserts for them
 and degrades if they are absent:
