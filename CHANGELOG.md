@@ -44,6 +44,58 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     inbound action with no reply of its own: the button flashes, the platform
     considers it delivered, and without a notice the person who pressed it
     watches an agent stay blocked with every appearance of having unblocked it.
+  - An answered question is edited to record how it ended and who ended it, and
+    the buttons come down with the edit. A question that stays pressable after
+    it has been settled is worse than one that never rendered: it invites a
+    second press that answers nothing, and it leaves a thread nobody can read
+    the outcome off afterwards. The record keeps the question above it — an
+    audit line reading "Allowed once by ana@example.com" with the command it
+    allowed gone is not one — and it is phrased from the decision switchboard
+    validated rather than from the label the platform round-tripped back, so
+    nothing arriving from outside is rendered as a claim about what a person
+    authorized. The approver named is the one the backend says it recorded; an
+    approval it could attribute to nobody says that rather than reading as
+    fine. A press that finds nothing left to answer marks the question settled
+    without naming a decision, because switchboard does not know which one was
+    made. Records are ranked rather than first-come: the one naming an approver
+    outranks the one that names no decision and replaces it, whichever of two
+    simultaneous presses returns first, and claiming the record and writing it
+    are one step so the thread ends up in the order they were claimed.
+  - Where the record cannot go onto the question it goes beside it. That covers
+    a press naming a question this process never asked — a session adopted
+    across a restart, or one the bounded record dropped — a platform that did
+    not say which message was pressed, an adapter that cannot edit at all, and
+    an edit that simply failed. A press is the one inbound action with no reply
+    of its own, so every one of them has to end in something to read. Said on
+    every such press rather than only the first, because those buttons stay
+    live.
+  - An edit that failed keeps its claim instead of giving it back. Handing it to
+    a later press sounds generous, but the prompt is spent by then, so the only
+    record that press could write is "no longer pending" — over an approval that
+    was applied and named an approver. Nor is it reported as a failed press: the
+    decision took effect whatever the thread ends up showing.
+  - A press arriving where no session is bound at all is told so, rather than
+    only logged. Nothing repopulates the session map at startup, so a restart
+    leaves live buttons over a thread that cannot answer them until somebody
+    posts in it again — the case with the most stale buttons on screen was the
+    one saying nothing.
+  - Every field interpolated into a question or its record is clamped, not just
+    the detail: the tool, the asking agent, and the approver the daemon reports.
+    All are unbounded on the wire, and the approver lands on an audit line, so
+    it is flattened onto one line too — a name spanning a blank line would
+    render as a second verdict under the real one.
+  - A question is dropped from the record set the moment a decision is written
+    onto it. Nothing outranks that, so nothing needs it again, and it is by far
+    the largest thing the set holds.
+  - An answer the daemon took and then failed to confirm is no longer reported
+    as one that never arrived. `pkg/approval` grew `ErrMaybeApplied` for the two
+    ways that happens — an unreadable 2xx body, and a 2xx that declines to
+    acknowledge — and the thread is told to check the agent rather than to press
+    again. Pressing again would find nothing pending, and the thread would
+    settle on "expired" over a decision that took effect.
+  - `pkg/approval` exports `Decisions`, the whole vocabulary, so a caller that
+    has to be exhaustive over it can iterate the set instead of keeping a copy
+    in step by hand. `Decision.Valid` reads from the same place.
   - `pkg/chat` grew the press seam: a `Reply` may carry a `Decision`, and a
     `Handler` takes the presses back. `HandlePress` is on the interface rather
     than an optional capability, so an adapter that renders buttons cannot be

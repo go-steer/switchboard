@@ -533,3 +533,78 @@ func TestAnOrdinaryReplyStillPostsAsText(t *testing.T) {
 		t.Errorf("text = %q, want hello", gotText)
 	}
 }
+
+// A question that has been answered must stop being answerable. chat.update
+// leaves a message's existing blocks alone when the field is absent, so an edit
+// that only sets text repaints the words above a set of buttons that still
+// work — and a second press on a settled question is exactly the confusion the
+// edit exists to prevent.
+func TestAnEditTakesTheButtonsDown(t *testing.T) {
+	var gotBlocks, gotText string
+	var sawBlocksField bool
+	mux := http.NewServeMux()
+	mux.HandleFunc("/chat.update", func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		_, sawBlocksField = r.Form["blocks"]
+		gotBlocks, gotText = r.FormValue("blocks"), r.FormValue("text")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"channel":"C0","ts":"111.111"}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	a := newTestAdapter(srv.URL)
+	ref := chat.MessageRef{Conversation: "C0:100.5", ID: "111.111"}
+	err := a.Update(context.Background(), ref, chat.Reply{
+		Conversation: "C0:100.5",
+		Text:         "Allowed, this once — ana@example.com",
+		Kind:         chat.KindDecision,
+	})
+	if err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if !sawBlocksField {
+		t.Fatal("the edit sent no blocks field at all, so Slack keeps the buttons the question was posted with")
+	}
+	if gotBlocks != "[]" {
+		t.Errorf("blocks = %q, want [] — anything else leaves something rendered", gotBlocks)
+	}
+	if !strings.Contains(gotText, "ana@example.com") {
+		t.Errorf("text = %q, want the record of who answered", gotText)
+	}
+}
+
+// Update has two paths and only one of them is above. With --slack-rich-blocks
+// the edit sends its own block set, which replaces the posted one wholesale —
+// so the buttons come down for a different reason, and it is worth pinning that
+// they do rather than reasoning that they must.
+func TestAnEditTakesTheButtonsDownWithRichBlocksToo(t *testing.T) {
+	var gotBlocks string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/chat.update", func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		gotBlocks = r.FormValue("blocks")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"channel":"C0","ts":"111.111"}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	a := newTestAdapter(srv.URL)
+	a.richBlocks = true
+	ref := chat.MessageRef{Conversation: "C0:100.5", ID: "111.111"}
+	err := a.Update(context.Background(), ref, chat.Reply{
+		Conversation: "C0:100.5",
+		Text:         "**Permission needed** — `bash`\n\n✅ **Allowed**, this once — ana@example.com",
+		Kind:         chat.KindDecision,
+	})
+	if err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if strings.Contains(gotBlocks, "actions") || strings.Contains(gotBlocks, "button") {
+		t.Errorf("the edit still renders something pressable: %s", gotBlocks)
+	}
+	if !strings.Contains(gotBlocks, "ana@example.com") {
+		t.Errorf("blocks = %s, want the record of who answered", gotBlocks)
+	}
+}

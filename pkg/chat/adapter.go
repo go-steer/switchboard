@@ -111,6 +111,14 @@ const (
 	KindAck ReplyKind = "ack"
 	// KindDecision is a question the thread has to answer before the agent can
 	// go on — the one reply kind that expects something back. See Decision.
+	//
+	// It is also the kind of the *edit* that settles that question, which
+	// carries no Decision: the answers are gone because there is nothing left
+	// to answer, and the body says what was decided and by whom. An adapter
+	// therefore renders a decision-less one as an ordinary message, and — this
+	// is the part worth getting right — must take down whatever interactive
+	// surface it built for the original. A button that survives the decision it
+	// was for is worse than one that never rendered.
 	KindDecision ReplyKind = "decision"
 )
 

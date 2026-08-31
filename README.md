@@ -364,6 +364,30 @@ Pressing an answer releases the blocked call, and the daemon records the press
 against the person who made it — resolved from the platform's own callback, so
 an approval cannot be attributed to anyone but the presser.
 
+The question is then edited in place to say how it ended, and the buttons come
+down with it:
+
+```
+**Permission needed** — `bash`
+
+    rm -rf /tmp/build
+
+_asked by the `builder` subagent_
+
+✅ **Allowed**, this once — ana@example.com
+```
+
+The question stays above the answer on purpose: a line naming an approver, with
+the command it approved gone, is not something anyone can audit. The approver is
+whoever the backend says it recorded, and an approval it could attribute to
+nobody says so rather than reading as fine. A press against a question that is
+no longer pending — it timed out, or it was answered at the daemon's console —
+marks it settled without claiming a decision, since switchboard has no way to
+know which one was made. Where the record cannot be written onto the question at
+all — the process was restarted and no longer knows what it asked, the platform
+did not say which message was pressed, or the edit failed — it is posted beside
+it instead. A press always ends in something to read.
+
 **It is off by default, and turning it on is a real grant.** Anyone who can post
 in the conversation can answer its prompts, and some of those answers outlive
 the request: `allow-always` persists across restarts and applies to the whole

@@ -236,12 +236,27 @@ const (
 	AllowAlways Decision = "allow-always"
 )
 
+// Decisions is the whole vocabulary, in the order declared above — increasing
+// in what it grants.
+//
+// Exported so that a caller which has to be exhaustive over the set can be
+// exhaustive over *this* set rather than over a list it keeps in step by hand.
+// A gateway rendering a decision needs a phrase for every one of them; the
+// difference between iterating this and copying the six out is whether adding a
+// seventh is caught by a test or discovered in a thread.
+//
+// Returns a fresh slice, so a caller cannot quietly edit the vocabulary.
+func Decisions() []Decision {
+	return []Decision{Deny, AllowOnce, AllowSession, AllowSessionVerb, AllowSessionTool, AllowAlways}
+}
+
 // Valid reports whether d is one of the six. Checked before sending so a
 // typo is a local error rather than a 400 discovered a round trip later.
 func (d Decision) Valid() bool {
-	switch d {
-	case Deny, AllowOnce, AllowSession, AllowSessionVerb, AllowSessionTool, AllowAlways:
-		return true
+	for _, v := range Decisions() {
+		if d == v {
+			return true
+		}
 	}
 	return false
 }
@@ -397,6 +412,18 @@ var ErrNotSupported = errors.New("approval: session does not offer permission pr
 //     and it wants the same handling: stop, and say so.
 var ErrNotFound = errors.New("approval: the prompt or session addressed is gone")
 
+// ErrMaybeApplied reports a failure of Respond that must not be read as
+// "nothing happened". The daemon accepted the request and then said something
+// unusable, so the decision has very likely taken effect; what did not survive
+// is the confirmation of it, which is the part naming who it was recorded on.
+//
+// A distinct sentinel because the honest thing to tell a person differs. The
+// ordinary failure is "that did not reach the agent, press again" — advice that
+// is actively wrong here, since the prompt is spent and the retry will come
+// back ErrNotFound, leaving nothing to say afterwards but that the question
+// expired.
+var ErrMaybeApplied = errors.New("approval: the decision may have been applied")
+
 // Stream delivers pending permission prompts for a session until ctx is
 // cancelled, the daemon closes the stream, or fn returns an error — which is
 // returned unwrapped, so a caller can stop on its own sentinel.
@@ -515,7 +542,7 @@ func (c *Client) Respond(ctx context.Context, sess daemon.Session, approver, id 
 		// the daemon telling us it recorded nobody, which is the distinction
 		// this whole path exists to preserve. So it is an error, and the
 		// caller is warned not to read the failure as "nothing happened".
-		return Ack{}, fmt.Errorf("approval: decision may have been applied, but the daemon's reply was unreadable: %w", err)
+		return Ack{}, fmt.Errorf("%w: the daemon's reply was unreadable: %w", ErrMaybeApplied, err)
 	}
 	if !out.Acknowledged {
 		// A 2xx that declines to acknowledge contradicts itself. No daemon
@@ -523,7 +550,7 @@ func (c *Client) Respond(ctx context.Context, sess daemon.Session, approver, id 
 		// is reporting it as a successful anonymous approval — telling a
 		// thread the call was released when the only thing that said so was
 		// the status line.
-		return Ack{}, errors.New("approval: the daemon returned success but did not acknowledge the decision")
+		return Ack{}, fmt.Errorf("%w: the daemon returned success but did not acknowledge it", ErrMaybeApplied)
 	}
 	return Ack{Approver: out.Approver}, nil
 }

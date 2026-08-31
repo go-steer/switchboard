@@ -45,6 +45,10 @@ type permsDaemon struct {
 	// respondStatus and respondBody answer POST /perms/respond.
 	respondStatus int
 	respondBody   string
+	// respondOnce makes the broker behave the way a real one does under
+	// simultaneous presses: the first answer reaches a pending prompt, and
+	// every one after it finds nothing there and 404s.
+	respondOnce bool
 	// cutAfterPrompts drops the connection once the pending prompts have been
 	// written, the way an idle stream through a proxy is cut: the subscriber
 	// sees an unexpected EOF, and the next subscription is seeded afresh.
@@ -130,6 +134,9 @@ func newPermsDaemon(t *testing.T, prompts ...string) *permsDaemon {
 			raw:    string(raw),
 		})
 		status, out := d.respondStatus, d.respondBody
+		if d.respondOnce && len(d.responded) > 1 {
+			status = http.StatusNotFound
+		}
 		d.mu.Unlock()
 		if status != 0 && status != http.StatusOK {
 			w.WriteHeader(status)
@@ -476,6 +483,23 @@ func TestAnUnboundedDetailIsCut(t *testing.T) {
 	}
 }
 
+// Detail is not the only unbounded field. The tool and the asking agent are
+// names on the wire and nothing enforces that, and the question is retained
+// until it is answered so that whatever they contain is held for as long as the
+// prompt is pending — which is what askRecord's bound is stated in terms of.
+func TestEveryAgentSuppliedFieldInAQuestionIsBounded(t *testing.T) {
+	got := promptText(approval.Prompt{
+		ID:     "p",
+		Kind:   "generic",
+		Tool:   strings.Repeat("t", 40000),
+		Detail: strings.Repeat("d", 40000),
+		Source: strings.Repeat("s", 40000),
+	})
+	if n := len([]rune(got)); n > promptDetailLimit+2*promptNameLimit+200 {
+		t.Errorf("question is %d runes; something in it is not bounded", n)
+	}
+}
+
 // A prompt with no detail is still a question worth posting: the alternative
 // is a turn parked with nothing in the thread to say why.
 func TestAPromptWithNoDetailIsStillAsked(t *testing.T) {
@@ -593,7 +617,7 @@ func TestAPressIsAnsweredAsWhoeverPressedIt(t *testing.T) {
 func TestTheRecordOfAskedQuestionsIsBounded(t *testing.T) {
 	e := &sessionEntry{}
 	for i := range maxAskedPrompts + 1 {
-		if !e.claimAsk(fmt.Sprintf("pr%d", i)) {
+		if !e.claimAsk(fmt.Sprintf("pr%d", i), "a question") {
 			t.Fatalf("pr%d was refused, and it has not been asked", i)
 		}
 	}
@@ -725,19 +749,26 @@ func TestAPressCarryingSomethingOtherThanADecisionIsRefused(t *testing.T) {
 // answer a question that no longer exists.
 func TestAPressWithNoLiveSessionOpensNone(t *testing.T) {
 	d := newPermsDaemon(t)
-	r, _, _ := permsRouter(t, d)
+	r, fake, _ := permsRouter(t, d)
 
-	err := r.HandlePress(context.Background(), chat.Press{
+	if err := r.HandlePress(context.Background(), chat.Press{
 		Conversation: "C1:gone", Caller: "u", DecisionID: ref("pr1"), Option: "deny",
-	})
-	if err == nil {
-		t.Fatal("a press against no session was accepted")
+	}); err != nil {
+		t.Fatalf("HandlePress: %v", err)
 	}
 	r.mu.Lock()
 	n := len(r.sessions)
 	r.mu.Unlock()
 	if n != 0 {
 		t.Errorf("the press created %d sessions", n)
+	}
+	if len(d.posts()) != 0 {
+		t.Error("a press with no session to answer was sent to the daemon anyway")
+	}
+	// The buttons are on screen and still pressable, and there is no message to
+	// write the outcome onto, so the press has to be answered beside them.
+	if got := drainNotice(t, fake); got != noticeStalePress {
+		t.Errorf("the thread was told %q, want %q", got, noticeStalePress)
 	}
 }
 
@@ -825,4 +856,648 @@ func hasLine(lines []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// ------------------------------------------------- the record left behind
+
+// askedPress builds a press against a question the entry has actually posted,
+// which is what a real one always is — the record of what was asked is what the
+// edit writes underneath.
+func askedPress(e *sessionEntry, promptID, option, body string) chat.Press {
+	e.claimAsk(promptID, body)
+	return chat.Press{
+		Conversation: "C1:1",
+		Caller:       "presser@example.com",
+		DecisionID:   ref(promptID),
+		Option:       option,
+		Message:      chat.MessageRef{Conversation: "C1:1", ID: "ts1"},
+	}
+}
+
+// The whole path, with nothing stubbed in the middle: a prompt arrives on the
+// stream, becomes a question, and a press turns that question into the record
+// of how it was answered. What the other tests here shortcut is the part where
+// the question posted and the question quoted back are the same one.
+func TestTheQuestionAskedIsTheQuestionTheRecordKeeps(t *testing.T) {
+	d := newPermsDaemon(t, bashPrompt)
+	r, fake, _ := permsRouter(t, d)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	e := liveEntry(r, "C1:1")
+
+	r.watchPermsIfOffered(ctx, "C1:1", e, capsWith(true))
+	posted := <-fake.replies
+
+	err := r.HandlePress(ctx, chat.Press{
+		Conversation: "C1:1", Caller: "presser@example.com",
+		DecisionID: ref("pr1"), Option: "allow-once",
+		Message: chat.MessageRef{Conversation: "C1:1", ID: "ts1"},
+	})
+	if err != nil {
+		t.Fatalf("HandlePress: %v", err)
+	}
+	ups := fake.updatedCalls()
+	if len(ups) != 1 {
+		t.Fatalf("got %d edits, want the posted question edited once", len(ups))
+	}
+	// Not merely "some text with the command in it" — the question that was
+	// actually put in the thread, minus the prose list of answers nobody can
+	// press any more.
+	want := strings.TrimSuffix(posted.Text, "\n\n"+chat.DecisionText(posted.Decision))
+	if !strings.HasPrefix(ups[0].text, want) {
+		t.Errorf("the record does not open with the question that was asked.\nasked:  %q\nrecord: %q", want, ups[0].text)
+	}
+	if !strings.Contains(ups[0].text, "presser@example.com") {
+		t.Errorf("the record names nobody: %q", ups[0].text)
+	}
+}
+
+// A question with live buttons and no sign of having been answered is the state
+// this whole feature is supposed to leave the thread out of. Whoever scrolls
+// past it later has to be able to see that it was settled, by whom, and how.
+func TestAnAnsweredQuestionSaysWhoAnsweredIt(t *testing.T) {
+	d := newPermsDaemon(t)
+	r, fake, _ := permsRouter(t, d)
+	e := liveEntry(r, "C1:1")
+	p := askedPress(e, "pr1", "allow-once", "**Permission needed** — `bash`\n\n```\nrm -rf /tmp/build\n```")
+
+	if err := r.HandlePress(context.Background(), p); err != nil {
+		t.Fatalf("HandlePress: %v", err)
+	}
+	ups := fake.updatedCalls()
+	if len(ups) != 1 {
+		t.Fatalf("got %d edits, want the question edited once", len(ups))
+	}
+	if ups[0].ref != p.Message {
+		t.Errorf("edited %v, want the message the press came from (%v)", ups[0].ref, p.Message)
+	}
+	if !strings.Contains(ups[0].text, "presser@example.com") {
+		t.Errorf("the record names nobody: %q", ups[0].text)
+	}
+	if !strings.Contains(ups[0].text, "Allowed") {
+		t.Errorf("the record does not say what was decided: %q", ups[0].text)
+	}
+	// Without this the audit line reads "Allowed by X" over a blank — true, and
+	// useless to anyone who was not watching when it was asked.
+	if !strings.Contains(ups[0].text, "rm -rf /tmp/build") {
+		t.Errorf("the record lost what was being decided: %q", ups[0].text)
+	}
+}
+
+// The edit carries no Decision, which is how an adapter knows to take the
+// buttons down. Leaving them up is worse than never rendering them: the
+// question reads as settled and still invites a press that answers nothing.
+func TestTheRecordOffersNothingLeftToPress(t *testing.T) {
+	d := newPermsDaemon(t)
+	r, fake, _ := permsRouter(t, d)
+	e := liveEntry(r, "C1:1")
+
+	if err := r.HandlePress(context.Background(), askedPress(e, "pr1", "deny", "q")); err != nil {
+		t.Fatalf("HandlePress: %v", err)
+	}
+	ups := fake.updatedCalls()
+	if len(ups) != 1 {
+		t.Fatalf("got %d edits, want 1", len(ups))
+	}
+	if ups[0].reply.Decision != nil {
+		t.Errorf("the settled question still carries answers: %+v", ups[0].reply.Decision)
+	}
+	if ups[0].reply.Kind != chat.KindDecision {
+		t.Errorf("edit kind = %q, want %q so an adapter knows what it is replacing",
+			ups[0].reply.Kind, chat.KindDecision)
+	}
+}
+
+// A denial is the answer most worth reading correctly off a thread later. It
+// must never be phrased as an allowance, whatever else changes here.
+func TestADenialIsNotRecordedAsAnAllowance(t *testing.T) {
+	d := newPermsDaemon(t)
+	r, fake, _ := permsRouter(t, d)
+	e := liveEntry(r, "C1:1")
+
+	if err := r.HandlePress(context.Background(), askedPress(e, "pr1", "deny", "q")); err != nil {
+		t.Fatalf("HandlePress: %v", err)
+	}
+	got := fake.updatedCalls()[0].text
+	if !strings.Contains(got, "Denied") {
+		t.Errorf("a denial does not say so: %q", got)
+	}
+	if strings.Contains(got, "Allowed") || strings.Contains(got, "✅") {
+		t.Errorf("a denial reads as an approval: %q", got)
+	}
+}
+
+// Every decision the gateway offers needs its own past tense. A missing one
+// falls through to the raw wire value, which is what the buttons were labelled
+// to avoid showing anybody.
+func TestEveryAnswerHasSomethingToSayAfterwards(t *testing.T) {
+	// Derived from the vocabulary, not copied out of it. A seventh decision
+	// added to approval.Decisions renders through decided's fallback as its own
+	// wire value — "**allow-session-path**" on an audit line — and a hand-kept
+	// list here would go on passing while that shipped.
+	seen := map[string]bool{}
+	all := approval.Decisions()
+	if len(all) == 0 {
+		t.Fatal("the vocabulary is empty, so this test asserts nothing")
+	}
+	for _, dec := range all {
+		got := decided(dec)
+		if strings.Contains(got, string(dec)) {
+			t.Errorf("%s renders as its own wire value (%q), so it has no phrasing of its own", dec, got)
+		}
+		if seen[got] {
+			t.Errorf("%s reads exactly like another answer (%q), so the record cannot tell them apart", dec, got)
+		}
+		seen[got] = true
+	}
+}
+
+// Two people press at the same moment. The one that lands writes the record;
+// the other comes back "no longer pending", which is true and much less useful
+// — and must not replace a named approver with it.
+func TestTheLoserOfARaceDoesNotOverwriteTheWinnersRecord(t *testing.T) {
+	d := newPermsDaemon(t)
+	r, fake, _ := permsRouter(t, d)
+	e := liveEntry(r, "C1:1")
+	p := askedPress(e, "pr1", "allow-once", "q")
+
+	if err := r.HandlePress(context.Background(), p); err != nil {
+		t.Fatalf("first press: %v", err)
+	}
+	d.mu.Lock()
+	d.respondStatus = http.StatusNotFound
+	d.mu.Unlock()
+	if err := r.HandlePress(context.Background(), p); err != nil {
+		t.Fatalf("second press: %v", err)
+	}
+
+	ups := fake.updatedCalls()
+	if len(ups) != 1 {
+		t.Fatalf("the question was rewritten %d times, want once", len(ups))
+	}
+	if !strings.Contains(ups[0].text, "presser@example.com") {
+		t.Errorf("the record lost the approver it had: %q", ups[0].text)
+	}
+}
+
+// Two presses that both get an answer out of the daemon — a double-click, or
+// two people reaching the same conclusion at once. The second is as firm as the
+// first, and a record may only be replaced by something firmer, so the thread is
+// rewritten once rather than twice with the same words.
+func TestTheSameAnswerPressedTwiceIsRecordedOnce(t *testing.T) {
+	d := newPermsDaemon(t)
+	r, fake, _ := permsRouter(t, d)
+	e := liveEntry(r, "C1:1")
+	p := askedPress(e, "pr1", "allow-once", "q")
+
+	for i := range 2 {
+		if err := r.HandlePress(context.Background(), p); err != nil {
+			t.Fatalf("press %d: %v", i+1, err)
+		}
+	}
+	if ups := fake.updatedCalls(); len(ups) != 1 {
+		t.Fatalf("the question was rewritten %d times, want once", len(ups))
+	}
+}
+
+// The other way a question stops being pending: it timed out, or it was
+// answered at the agent's own console. Nobody here knows what was decided, so
+// the record says that rather than guessing at it.
+func TestAQuestionSettledElsewhereSaysSoWithoutGuessing(t *testing.T) {
+	d := newPermsDaemon(t)
+	d.respondStatus = http.StatusNotFound
+	r, fake, _ := permsRouter(t, d)
+	e := liveEntry(r, "C1:1")
+
+	if err := r.HandlePress(context.Background(), askedPress(e, "pr1", "allow-always", "q")); err != nil {
+		t.Fatalf("HandlePress: %v", err)
+	}
+	ups := fake.updatedCalls()
+	if len(ups) != 1 {
+		t.Fatalf("got %d edits, want the question marked settled", len(ups))
+	}
+	if !strings.Contains(ups[0].text, noticeSettled) {
+		t.Errorf("edit = %q, want the settled notice", ups[0].text)
+	}
+	if strings.Contains(ups[0].text, "Allowed") {
+		t.Errorf("the record claims a decision nobody here observed: %q", ups[0].text)
+	}
+}
+
+// An approval the backend could attribute to nobody is a hole in the trail. It
+// is already logged; the thread has to show it too, because the thread is where
+// the person who pressed is looking and "Allowed by <nobody>" reads as fine.
+func TestAnApprovalWithNoApproverSaysSoOnTheQuestion(t *testing.T) {
+	d := newPermsDaemon(t)
+	d.respondBody = `{"acknowledged":true}`
+	r, fake, _ := permsRouter(t, d)
+	e := liveEntry(r, "C1:1")
+
+	if err := r.HandlePress(context.Background(), askedPress(e, "pr1", "allow-once", "q")); err != nil {
+		t.Fatalf("HandlePress: %v", err)
+	}
+	got := fake.updatedCalls()[0].text
+	if !strings.Contains(got, "approver not recorded") {
+		t.Errorf("edit = %q, want it to say nobody was named", got)
+	}
+}
+
+// The record is written from what the daemon says it recorded, not from what
+// the press claimed. They agree in every ordinary case; where they do not, the
+// backend's audit line is the true one and the thread must not show the other.
+func TestTheRecordNamesWhoTheBackendRecorded(t *testing.T) {
+	d := newPermsDaemon(t)
+	d.respondBody = `{"acknowledged":true,"approver":"ana@example.com"}`
+	r, fake, _ := permsRouter(t, d)
+	e := liveEntry(r, "C1:1")
+	p := askedPress(e, "pr1", "allow-once", "q")
+	p.Caller = "someone-else@example.com"
+
+	if err := r.HandlePress(context.Background(), p); err != nil {
+		t.Fatalf("HandlePress: %v", err)
+	}
+	got := fake.updatedCalls()[0].text
+	if !strings.Contains(got, "ana@example.com") {
+		t.Errorf("edit = %q, want the approver the backend recorded", got)
+	}
+	if strings.Contains(got, "someone-else@example.com") {
+		t.Errorf("edit names the caller the press asserted rather than the recorded approver: %q", got)
+	}
+}
+
+// Not every platform says which message a press came from. That costs the
+// record and must cost nothing else — above all not the answer itself.
+func TestAPressWithNoMessageToEditStillAnswers(t *testing.T) {
+	d := newPermsDaemon(t)
+	r, fake, _ := permsRouter(t, d)
+	e := liveEntry(r, "C1:1")
+	p := askedPress(e, "pr1", "allow-once", "q")
+	p.Message = chat.MessageRef{}
+
+	if err := r.HandlePress(context.Background(), p); err != nil {
+		t.Fatalf("HandlePress: %v", err)
+	}
+	if posts := d.posts(); len(posts) != 1 {
+		t.Fatalf("got %d answers, want the press answered anyway", len(posts))
+	}
+	if ups := fake.updatedCalls(); len(ups) != 0 {
+		t.Errorf("edited %v with no message to edit", ups)
+	}
+	// Nowhere to write the record does not mean nothing to say. A press is the
+	// one inbound action with no reply of its own.
+	if got := drainNotice(t, fake); !strings.Contains(got, "presser@example.com") {
+		t.Errorf("thread got %q, want the outcome said beside the question", got)
+	}
+}
+
+// A question this process never posted — a session adopted across a restart, or
+// one the bounded record dropped — has no body to write the record under.
+// Editing anyway would replace the question with a bare verdict and take the
+// buttons down with it, so the outcome goes beside the question instead. What it
+// must not do is nothing: the buttons here are still live, and a press that
+// answers and says nothing is indistinguishable from a button that is broken.
+func TestAQuestionThisGatewayNeverAskedIsAnsweredBesideIt(t *testing.T) {
+	d := newPermsDaemon(t)
+	r, fake, _ := permsRouter(t, d)
+	liveEntry(r, "C1:1")
+
+	press := chat.Press{
+		Conversation: "C1:1", Caller: "presser@example.com",
+		DecisionID: ref("pr1"), Option: "allow-once",
+		Message: chat.MessageRef{Conversation: "C1:1", ID: "ts1"},
+	}
+	if err := r.HandlePress(context.Background(), press); err != nil {
+		t.Fatalf("HandlePress: %v", err)
+	}
+	if posts := d.posts(); len(posts) != 1 {
+		t.Fatalf("got %d answers, want the press answered", len(posts))
+	}
+	if ups := fake.updatedCalls(); len(ups) != 0 {
+		t.Errorf("rewrote a question it has no record of: %v", ups)
+	}
+	if got := drainNotice(t, fake); !strings.Contains(got, "presser@example.com") {
+		t.Errorf("thread got %q, want the outcome said beside the question", got)
+	}
+	// And again on the next press, because the buttons never came down. Saying
+	// it once and going quiet is the failure this is guarding.
+	d.mu.Lock()
+	d.respondStatus = http.StatusNotFound
+	d.mu.Unlock()
+	if err := r.HandlePress(context.Background(), press); err != nil {
+		t.Fatalf("second press: %v", err)
+	}
+	if got := drainNotice(t, fake); !strings.Contains(got, noticeSettled) {
+		t.Errorf("second press got %q, want the settled notice", got)
+	}
+}
+
+// drainNotice returns the one reply the thread was sent, failing if there was
+// none or more than one.
+func drainNotice(t *testing.T, fake *fakeSender) string {
+	t.Helper()
+	var got string
+	select {
+	case r := <-fake.replies:
+		got = r.Text
+	default:
+		t.Fatal("the thread was told nothing")
+	}
+	select {
+	case extra := <-fake.replies:
+		t.Fatalf("a second reply nobody asked for: %q", extra.Text)
+	default:
+	}
+	return got
+}
+
+// An edit that fails changes nothing about the decision, which has already been
+// applied. Reporting it as a failed press invites a second press that answers
+// nothing and gets told the question is gone.
+func TestAFailedEditIsNotAFailedPress(t *testing.T) {
+	d := newPermsDaemon(t)
+	r, fake, logs := permsRouter(t, d)
+	fake.failUpdates(true)
+	e := liveEntry(r, "C1:1")
+
+	if err := r.HandlePress(context.Background(), askedPress(e, "pr1", "allow-once", "q")); err != nil {
+		t.Fatalf("HandlePress reported a failure the presser cannot act on: %v", err)
+	}
+	if !hasLine(logs(), "record decision") {
+		t.Errorf("the failed edit left no trace at all: %v", logs())
+	}
+}
+
+// An edit that fails must not cost the thread the record. It cannot be retried
+// on the next press: the prompt is spent, so the daemon answers that press "no
+// longer pending" — which would write "expired" over an approval that was
+// applied and attributed. So the outcome goes beside the question instead, and
+// the claim it took is kept.
+func TestAnEditThatFailedPutsTheRecordBesideTheQuestion(t *testing.T) {
+	d := newPermsDaemon(t)
+	d.respondOnce = true
+	r, fake, _ := permsRouter(t, d)
+	fake.failUpdates(true)
+	e := liveEntry(r, "C1:1")
+	p := askedPress(e, "pr1", "allow-once", "a question")
+
+	if err := r.HandlePress(context.Background(), p); err != nil {
+		t.Fatalf("first press: %v", err)
+	}
+	got := drainNotice(t, fake)
+	if !strings.Contains(got, "presser@example.com") || !strings.Contains(got, "Allowed") {
+		t.Errorf("the thread was told %q, want the record the edit could not carry", got)
+	}
+
+	// The buttons are still up, so the question is still pressable — and what
+	// that press finds is a prompt nobody can answer any more.
+	fake.failUpdates(false)
+	if err := r.HandlePress(context.Background(), p); err != nil {
+		t.Fatalf("second press: %v", err)
+	}
+	for _, up := range fake.updatedCalls() {
+		if strings.Contains(up.text, noticeSettled) {
+			t.Errorf("an applied approval was overwritten with %q", up.text)
+		}
+	}
+}
+
+// The vaguer record loses to the real one whichever press writes first. A press
+// that finds nothing pending knows the question is over and nothing else; if
+// that arrives before the answer that actually settled it — two independent
+// round trips, so it can — the thread must still end up naming the approver.
+func TestTheRecordThatNamesAnApproverOutranksTheOneThatDoesNot(t *testing.T) {
+	d := newPermsDaemon(t)
+	d.respondStatus = http.StatusNotFound
+	r, fake, _ := permsRouter(t, d)
+	e := liveEntry(r, "C1:1")
+	p := askedPress(e, "pr1", "allow-always", "a question")
+
+	if err := r.HandlePress(context.Background(), p); err != nil {
+		t.Fatalf("the press that found nothing pending: %v", err)
+	}
+	d.mu.Lock()
+	d.respondStatus = 0
+	d.mu.Unlock()
+	if err := r.HandlePress(context.Background(), p); err != nil {
+		t.Fatalf("the press that was answered: %v", err)
+	}
+
+	ups := fake.updatedCalls()
+	if len(ups) != 2 {
+		t.Fatalf("got %d edits, want the vague record replaced by the real one", len(ups))
+	}
+	if !strings.Contains(ups[0].text, noticeSettled) {
+		t.Errorf("first edit = %q, want the settled notice", ups[0].text)
+	}
+	last := ups[len(ups)-1]
+	if !strings.Contains(last.text, "presser@example.com") {
+		t.Errorf("the thread was left saying %q, want the approver named", last.text)
+	}
+	if strings.Contains(last.text, noticeSettled) {
+		t.Errorf("the thread was left with the vaguer account: %q", last.text)
+	}
+	// And the question, which the first record had to keep for the second.
+	if !strings.Contains(last.text, "a question") {
+		t.Errorf("the replacement lost what was being decided: %q", last.text)
+	}
+}
+
+// The same thing under an actual race, which is the only way the ordering above
+// arises in production: Slack hands each press to its own goroutine. Run with
+// -race, this is also the only concurrent exercise the press path gets.
+func TestSimultaneousPressesLeaveTheThreadNamingTheApprover(t *testing.T) {
+	for attempt := 0; attempt < 50; attempt++ {
+		d := newPermsDaemon(t)
+		d.respondOnce = true // the first answer lands; every one after it 404s
+		r, fake, _ := permsRouter(t, d)
+		e := liveEntry(r, "C1:1")
+		p := askedPress(e, "pr1", "allow-once", "a question")
+
+		var wg sync.WaitGroup
+		for i := 0; i < 4; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if err := r.HandlePress(context.Background(), p); err != nil {
+					t.Errorf("press: %v", err)
+				}
+			}()
+		}
+		wg.Wait()
+
+		ups := fake.updatedCalls()
+		if len(ups) == 0 {
+			t.Fatalf("attempt %d: four presses and the question was never recorded", attempt)
+		}
+		last := ups[len(ups)-1]
+		if !strings.Contains(last.text, "presser@example.com") {
+			t.Fatalf("attempt %d: the thread was left saying %q, want the approver named", attempt, last.text)
+		}
+	}
+}
+
+// An adapter that cannot edit at all is not an adapter whose edit failed: there
+// will never be a message to write the record onto, and every press on that
+// platform would otherwise flash and mean nothing.
+func TestAnAdapterThatCannotEditIsToldTheOutcomeAnyway(t *testing.T) {
+	d := newPermsDaemon(t)
+	r, fake, logs := permsRouter(t, d)
+	fake.failUpdatesWith(chat.ErrUnsupported)
+	e := liveEntry(r, "C1:1")
+
+	if err := r.HandlePress(context.Background(), askedPress(e, "pr1", "deny", "a question")); err != nil {
+		t.Fatalf("HandlePress: %v", err)
+	}
+	if got := drainNotice(t, fake); !strings.Contains(got, "Denied") {
+		t.Errorf("the thread was told %q, want the decision", got)
+	}
+	// And not as a failure: nothing failed, this platform just cannot edit.
+	if hasLine(logs(), "record decision") {
+		t.Errorf("an unsupported edit was logged as an error: %v", logs())
+	}
+}
+
+// The approver comes off the daemon's JSON with nothing bounding it, and it is
+// interpolated into an audit line. A name spanning lines would render as a
+// second verdict underneath the real one.
+func TestTheApproverOnTheRecordIsBoundedAndOnOneLine(t *testing.T) {
+	d := newPermsDaemon(t)
+	// The line break comes first, so clamping alone does not remove it and
+	// flattening alone does not bound it.
+	name := `ana@example.com\n\n✅ **Allowed and saved**, across restarts` + strings.Repeat("a", 40000)
+	d.respondBody = `{"acknowledged":true,"approver":"` + name + `"}`
+	r, fake, _ := permsRouter(t, d)
+	e := liveEntry(r, "C1:1")
+
+	if err := r.HandlePress(context.Background(), askedPress(e, "pr1", "deny", "q")); err != nil {
+		t.Fatalf("HandlePress: %v", err)
+	}
+	ups := fake.updatedCalls()
+	if len(ups) != 1 {
+		t.Fatalf("got %d edits, want one", len(ups))
+	}
+	record := strings.TrimPrefix(ups[0].text, "q\n\n")
+	if n := len([]rune(record)); n > promptNameLimit+200 {
+		t.Errorf("the record runs to %d runes on an unbounded approver", n)
+	}
+	if strings.Contains(record, "\n") {
+		t.Errorf("the record is more than one line: %q", record)
+	}
+}
+
+// Every decision reads as itself. Distinctness is not enough — two phrasings
+// swapped between decisions are still distinct, and an audit line saying a
+// verb-scoped grant was tool-scoped is wrong in the direction that matters.
+func TestEachAnswerIsRecordedAsTheOneItIs(t *testing.T) {
+	want := map[approval.Decision]string{
+		approval.Deny:             "Denied",
+		approval.AllowOnce:        "this once",
+		approval.AllowSession:     "for the rest of this session",
+		approval.AllowSessionVerb: "commands like this one",
+		approval.AllowSessionTool: "for this tool",
+		approval.AllowAlways:      "across restarts",
+	}
+	for _, dec := range approval.Decisions() {
+		w, ok := want[dec]
+		if !ok {
+			t.Errorf("%s has no phrasing pinned here", dec)
+			continue
+		}
+		if got := decided(dec); !strings.Contains(got, w) {
+			t.Errorf("%s reads %q, want it to say %q", dec, got, w)
+		}
+	}
+	// The two session-scoped grants share a prefix, so the substrings above only
+	// separate them one way round.
+	if strings.Contains(decided(approval.AllowSession), "for this tool") {
+		t.Error("a plain session grant reads as a tool-scoped one")
+	}
+}
+
+// The question is the largest thing on a record and the record outlives the
+// answer, so it is dropped once nothing can outrank what was written.
+func TestARecordedDecisionStopsHoldingTheQuestion(t *testing.T) {
+	d := newPermsDaemon(t)
+	r, _, _ := permsRouter(t, d)
+	e := liveEntry(r, "C1:1")
+	body := "**Permission needed** — `bash`\n\n```\n" + strings.Repeat("x", 1000) + "\n```"
+
+	if err := r.HandlePress(context.Background(), askedPress(e, "pr1", "allow-once", body)); err != nil {
+		t.Fatalf("HandlePress: %v", err)
+	}
+	e.qmu.Lock()
+	held := e.asked["pr1"].text
+	e.qmu.Unlock()
+	if held != "" {
+		t.Errorf("a settled question is still held: %d bytes", len(held))
+	}
+}
+
+// The ordering guarantee, with the reordering made to happen rather than raced
+// for. A vaguer record gets its claim in first and its edit is slow; the record
+// that names an approver arrives while that edit is still in the air. Unless
+// claiming and writing are one step, both edits are in flight at once and the
+// thread is left showing whichever the platform happened to finish last — which
+// is the vague one, over an approval that was applied and attributed.
+func TestASlowRecordCannotLandOnTopOfAFirmerOne(t *testing.T) {
+	r, fake, _ := permsRouter(t, newPermsDaemon(t))
+	e := liveEntry(r, "C1:1")
+	e.claimAsk("pr1", "a question")
+	p := chat.Press{
+		Conversation: "C1:1",
+		Message:      chat.MessageRef{Conversation: "C1:1", ID: "ts1"},
+	}
+	fake.stallEditsSaying(noticeSettled, 200*time.Millisecond)
+
+	claimed := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		close(claimed)
+		r.traceDecision(context.Background(), e, p, "pr1", noticeSettled, settledElsewhere)
+	}()
+	<-claimed
+	// Long enough for the goroutine to have claimed and be inside its edit, and
+	// well short of the stall it is sitting in.
+	time.Sleep(20 * time.Millisecond)
+
+	const record = "✅ **Allowed**, this once — ana@example.com"
+	r.traceDecision(context.Background(), e, p, "pr1", record, settledHere)
+	<-done
+
+	ups := fake.updatedCalls()
+	if len(ups) == 0 {
+		t.Fatal("nothing was written onto the question")
+	}
+	if last := ups[len(ups)-1].text; !strings.Contains(last, record) {
+		t.Errorf("the thread was left saying %q, wanted the record that names an approver", last)
+	}
+}
+
+// A 2xx the daemon then spoiled is not "that didn't reach the agent". Telling
+// somebody to press again there is wrong twice over: the decision is probably
+// in force, and the retry finds nothing pending, so the thread would settle on
+// "expired" over an answer that took effect.
+func TestAnAnswerThatMayHaveLandedIsNotReportedAsOneThatDidNot(t *testing.T) {
+	for _, tc := range []struct{ name, body string }{
+		{"unreadable", `{"acknowledged":`},
+		{"unacknowledged", `{"acknowledged":false}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := newPermsDaemon(t)
+			d.respondBody = tc.body
+			r, fake, _ := permsRouter(t, d)
+			e := liveEntry(r, "C1:1")
+
+			if err := r.HandlePress(context.Background(), askedPress(e, "pr1", "allow-once", "q")); err == nil {
+				t.Fatal("a decision with no confirmation was reported as confirmed")
+			}
+			if got := drainNotice(t, fake); got != noticeMaybeApplied {
+				t.Errorf("the thread was told %q, want %q", got, noticeMaybeApplied)
+			}
+			if len(fake.updatedCalls()) != 0 {
+				t.Error("a decision nobody confirmed was written onto the question as one")
+			}
+		})
+	}
 }

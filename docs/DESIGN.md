@@ -150,6 +150,61 @@ has, never a new one: a press can only ever answer a question posted into a live
 conversation, so a miss means the session went away in between, and a fresh
 session holds none of the pending prompts the old one did.
 
+A press is also the one inbound action with no reply of its own. The button
+flashes, the platform considers it delivered, and nothing in the thread says
+what happened — so switchboard edits the question to record how it ended and who
+ended it, and the edit takes the buttons down. An edit is `KindDecision` with no
+`Decision` on it: there is nothing left to answer, and an adapter reading that
+must dismantle whatever interactive surface it built for the original. A button
+that survives the decision it was for is worse than one that never rendered.
+
+Three things about that record. It keeps the question above it, because a line
+reading "Allowed once by ana@example.com" with the command it allowed gone is
+not an audit line. It is phrased from the decision switchboard validated, never
+from the label the platform round-tripped — a claim about what a person
+authorized is the wrong place to render a string that arrived from outside — and
+it names the approver the backend says it recorded rather than the one the press
+asserted.
+
+And it is ranked rather than first-come. Two people can press at the same
+moment; only one answer reaches a pending prompt, and the other comes back "no
+longer pending", which is true and says nothing about who decided what. Those
+are two independent round trips and either can return first, so the record that
+names an approver outranks the one that does not and replaces it if it arrives
+second. Claiming the right to write a record and writing it are one step, held
+under a per-conversation lock, so the order the thread ends up in is the order
+the records were claimed in and not the order two edits happened to land.
+
+The record cannot always go onto the question. A press may name a question
+switchboard has no record of asking — a session adopted across a restart, or one
+the bounded record dropped — and then there is no body to write it under, and
+replacing the question with a bare verdict would take the buttons down along with
+what they were for. The platform may not say which message the press came from.
+The edit may fail, or the adapter may not support editing at all. In every one of
+those the outcome is posted *beside* the question rather than onto it, because a
+press has to end in something to read.
+
+An edit that failed keeps its claim rather than giving it back. Giving it back
+looks like the generous choice — the buttons are still up, so let a later press
+write the record instead — but the prompt behind that question is spent, so the
+only answer a later press can get is "no longer pending", and the record it
+would write is *weaker* than the one that was lost. Better to say the real
+outcome beside the question once than to let an applied, attributed approval be
+overwritten with "expired".
+
+A press with no session bound under its conversation at all is refused the same
+way a press for a replaced session is, and told so: nothing repopulates the
+session map at startup, so a restart leaves live buttons over a thread that
+cannot answer them until somebody posts in it again.
+
+The one thing a press must never be told is "try again" when trying again would
+make things worse. A daemon that accepts the answer and then returns something
+unreadable has probably applied the decision and lost only the confirmation of
+it, so `pkg/approval` reports that as `ErrMaybeApplied` rather than as an
+ordinary failure. A retry there finds the prompt spent, and the thread would end
+up recording "no longer pending" over a decision that took effect — so the
+thread is told to go and look at the agent instead.
+
 Relaying is off unless `--approvals` is set, and that default is not caution
 about a young feature. Turning it on means anyone who can post in a conversation
 can answer its permission prompts, and some of those answers — `allow-always`
@@ -439,7 +494,9 @@ per-platform branches in the router.
 `KindDecision` is the one kind that carries structure with it — `Reply.Decision`
 — and it is still advisory in the same sense. An adapter that renders nothing
 special posts the question as text, with the answers listed in the body, and the
-reader can at least see that the agent is blocked and on what.
+reader can at least see that the agent is blocked and on what. The one part that
+is not advisory is the *edit* that settles a question: a `KindDecision` reply
+with no `Decision` must leave nothing pressable behind (§2.3).
 
 Two optional capabilities work the same way — an adapter type-asserts for them
 and degrades if they are absent:
