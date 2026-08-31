@@ -101,10 +101,12 @@ const (
 	// carries a command like kindCommand, but also the message that hosts the
 	// card, so the card can be updated in place afterwards.
 	//
-	// Unreached today, in both directions: no card this gateway sends has a
-	// button, because a click never arrived over Pub/Sub (#28). Decoding is
-	// kept for the HTTP interaction endpoint (#29), which is the ingress that
-	// delivers them.
+	// Unreached today, in both directions and in both dialects: no card this
+	// gateway sends has a button, because a click never arrives for an add-on
+	// (#28). Legacy Chat-API apps do get clicks over Pub/Sub, but the gateway
+	// renders no button for them either — see cards.go. Decoding is kept for
+	// the HTTP interaction endpoint (#29), which is the ingress that delivers
+	// them to the dialect this gateway targets.
 	kindButton
 	// kindWelcome is the app being added to a space.
 	kindWelcome

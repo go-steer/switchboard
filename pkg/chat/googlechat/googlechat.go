@@ -21,15 +21,19 @@
 // the gateway stays a pull-only client with no inbound surface.
 //
 // What that costs is everything needing a synchronous HTTP response, which
-// rules out dialogs. Callback buttons are a separate and harsher limit, not a
-// consequence of that one: a click could have been answered asynchronously by
-// patching the hosting message, but it never arrives to be answered. The
-// add-on's connection settings route four triggers (message, app command,
-// added-to-space, removed-from-space), a card click is not one of them, and a
-// live click was answered with "Switchboard is unable to process your request"
-// while nothing at all reached the subscription (#28). Cards here are therefore
-// output, and a setting is changed by typing the command. The click path is
-// written and tested for the HTTP ingress in #29.
+// rules out dialogs. Callback buttons are a separate limit, not a consequence of
+// that one: a click could have been answered asynchronously by patching the
+// hosting message, but it never arrives to be answered. The add-on's connection
+// settings route four triggers (message, app command, added-to-space,
+// removed-from-space), a card click is not one of them, and a live click was
+// answered with "Switchboard is unable to process your request" while nothing at
+// all reached the subscription (#28). That is the add-on dialect's limit rather
+// than Pub/Sub's — legacy Chat-API apps do receive clicks over the same
+// transport — but the add-on framework is the one Google is migrating to and the
+// one this gateway targets, so buttons wait for the HTTP ingress in #29 rather
+// than for a console downgrade (DESIGN §3.3). Cards here are therefore output,
+// and a setting is changed by typing the command. The click path is written and
+// tested for that ingress.
 //
 // Egress is the Google Chat REST API (spaces.messages create/patch/delete),
 // which lets every long-turn progress mode work: the placeholder can be edited

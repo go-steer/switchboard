@@ -36,12 +36,15 @@
 // live click on one reached nothing: the app's connection settings route four
 // triggers (message, app command, added-to-space, removed-from-space) and a
 // click is not among them, so Chat answered it with "Switchboard is unable to
-// process your request" and no event arrived (#28). That was measured on the
-// add-on dialect, the one this gateway ships; the legacy Chat-API dialect over
-// Pub/Sub was never tested, and a control that fails in the configuration we
-// did measure is worse than no control. Where the welcome's row used to sit,
-// the accepted values are named in the text instead. Decoding a click is still
-// implemented, for the HTTP ingress in #29 — see event.go.
+// process your request" and no event arrived (#28). That is a limit of the
+// add-on dialect, the one this gateway ships — the legacy Chat-API dialect does
+// deliver clicks over the same Pub/Sub transport — and the gateway does not
+// render buttons for legacy either, because a control whose existence depends
+// on which console checkbox an operator ticked is worse than no control. See
+// DESIGN §3.3 for why the add-on dialect is the one worth designing against.
+// Where the welcome's row used to sit, the accepted values are named in the
+// text instead. Decoding a click is still implemented, for the HTTP ingress in
+// #29 — see event.go.
 package googlechat
 
 import (
