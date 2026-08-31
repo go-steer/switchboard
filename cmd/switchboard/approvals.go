@@ -140,7 +140,8 @@ func splitDecisionRef(ref string) (sess, promptID string, ok bool) {
 
 // postPrompt puts one pending permission prompt into the thread, once.
 func (r *Router) postPrompt(ctx context.Context, conv string, e *sessionEntry, p approval.Prompt) {
-	if !e.claimAsk(p.ID) {
+	body := promptText(p)
+	if !e.claimAsk(p.ID, body) {
 		// Already on screen. Every resubscription is seeded with everything
 		// still pending, which is what lets this watcher reconnect without a
 		// cursor — and would otherwise put the same question in the thread
@@ -156,7 +157,6 @@ func (r *Router) postPrompt(ctx context.Context, conv string, e *sessionEntry, p
 			Broad: o.Broad,
 		})
 	}
-	body := promptText(p)
 	if _, err := r.out.Send(ctx, chat.Reply{
 		Conversation: conv,
 		Text:         body + "\n\n" + chat.DecisionText(d),
@@ -174,13 +174,139 @@ func (r *Router) postPrompt(ctx context.Context, conv string, e *sessionEntry, p
 	r.logf("perms %s: asked about %s (%s)", conv, p.Tool, p.Kind)
 }
 
-// The two things a press can be told, and the reason it has to be told
-// anything: a press is the one inbound action with no reply of its own. The
+// decided phrases a decision in the past tense, for the record left on the
+// question after somebody answers it.
+//
+// Derived from the decision switchboard validated, never from anything the
+// press carried as text. The platform round-trips the button's own label and it
+// would read better — it names the verb, the tool, the directory — but a line
+// claiming what a person authorized is the wrong place to render a string that
+// arrived from outside. What is lost is detail the question above it still
+// carries.
+func decided(d approval.Decision) string {
+	switch d {
+	case approval.Deny:
+		return "🛑 **Denied**"
+	case approval.AllowOnce:
+		return "✅ **Allowed**, this once"
+	case approval.AllowSession:
+		return "✅ **Allowed** for the rest of this session"
+	case approval.AllowSessionVerb:
+		return "✅ **Allowed** for the rest of this session, for commands like this one"
+	case approval.AllowSessionTool:
+		return "✅ **Allowed** for the rest of this session, for this tool"
+	case approval.AllowAlways:
+		return "✅ **Allowed and saved**, across restarts"
+	}
+	// Unreachable: HandlePress validates before answering, and the daemon would
+	// have rejected anything else. Named rather than blank so a decision added
+	// to the vocabulary reads as unfamiliar instead of as nothing at all.
+	return "**" + string(d) + "**"
+}
+
+// traceDecision edits the question to record how it ended, taking its buttons
+// down with it.
+//
+// Called for the answer that lands and for the press that finds nothing left to
+// answer, at the authority each of those carries: the record naming an approver
+// outranks the one that names no decision, whichever press gets here first.
+//
+// A failure here is never reported as a failed press. The decision has already
+// been applied by the time this runs — the agent is unblocked whatever the
+// thread ends up showing — and reporting a bookkeeping failure as a failed
+// press would invite a second press that answers nothing. What it does instead
+// is fall back to saying the outcome beside the question, so that the one
+// inbound action with no reply of its own still ends in something to read.
+func (r *Router) traceDecision(ctx context.Context, e *sessionEntry, p chat.Press, promptID, outcome string, want settleState) {
+	if p.Message.ID == "" {
+		// The platform did not say which message the press came from, so there
+		// is nothing to edit — but there is still something to say, and this is
+		// the one inbound action with no reply of its own.
+		r.sayHowItEnded(ctx, p.Conversation, promptID, outcome)
+		return
+	}
+	// Claiming the record and writing it are one step; see sessionEntry.tmu.
+	e.tmu.Lock()
+	defer e.tmu.Unlock()
+
+	body, known, ok := e.claimSettle(promptID, want)
+	if !ok {
+		if known {
+			// Already recorded at least this firmly. The record on screen is
+			// the better one, and a second edit saying less is the thing this
+			// ranking exists to prevent.
+			return
+		}
+		// A question this process has no record of: a session adopted after a
+		// restart, or one whose set maxAskedPrompts cleared. Editing anyway
+		// would replace the question with a bare verdict — the buttons would
+		// come down, and what they were for would go with them. Say it beside
+		// the question instead. The buttons stay live, which is why this says
+		// something on every press rather than only the first: a dead control
+		// that answers is better than a dead control that is silent.
+		r.sayHowItEnded(ctx, p.Conversation, promptID, outcome)
+		return
+	}
+	text := outcome
+	if body != "" {
+		text = body + "\n\n" + outcome
+	}
+	// Bounded, and detached from the press, because tmu is held across it: the
+	// press context belongs to the adapter and outlives every individual press,
+	// so a platform connection that hangs rather than failing would block every
+	// later press on this conversation for as long as it hung.
+	ectx, cancel := platformContext(ctx)
+	defer cancel()
+
+	// No Decision on the reply: the answers are gone because there is nothing
+	// left to answer, and an adapter reading that takes its buttons down.
+	err := r.out.Update(ectx, p.Message, chat.Reply{
+		Conversation: p.Conversation,
+		Text:         text,
+		Kind:         chat.KindDecision,
+	})
+	if err == nil {
+		return
+	}
+	if !errors.Is(err, chat.ErrUnsupported) {
+		r.logf("perms %s: record decision on %s: %v", p.Conversation, promptID, err)
+	}
+	// The record could not go onto the question, so put it beside it. The claim
+	// is kept rather than given back: the only press that can still reach this
+	// question is one the daemon will answer 404, because the prompt it names is
+	// spent — so giving the claim back does not buy a second chance at this
+	// record, it buys "no longer pending" written over an applied decision that
+	// named an approver.
+	r.sayHowItEnded(ctx, p.Conversation, promptID, outcome)
+}
+
+// sayHowItEnded posts the outcome beside the question, for the presses that
+// have no message to write it onto.
+func (r *Router) sayHowItEnded(ctx context.Context, conv, promptID, outcome string) {
+	if err := r.surfaceNotice(ctx, conv, outcome); err != nil {
+		r.logf("perms %s: say how %s ended: %v", conv, promptID, err)
+	}
+}
+
+// The things a press can be told, and the reason it has to be told anything: a
+// press is the one inbound action with no reply of its own. The
 // button flashes, the platform considers it delivered, and a person who is not
 // told otherwise reasonably assumes the agent has been unblocked.
 const (
+	// noticeSettled replaces the question when a press arrives for something no
+	// longer pending and no other press recorded an outcome — a prompt that
+	// timed out, or one answered at the agent's own console. Deliberately does
+	// not name a decision: switchboard does not know what was decided, and
+	// guessing on an audit line is worse than saying so.
+	noticeSettled     = "⏹️ **No longer pending** — this was answered elsewhere or it expired."
 	noticePressFailed = "⚠️ That answer didn't reach the agent. It's still waiting — try pressing again."
-	noticeStalePress  = "⚠️ That question belongs to a session this thread no longer has, so the answer wasn't sent. If the agent is still waiting, it will ask again."
+	// noticeMaybeApplied is the same failure told honestly when the daemon
+	// accepted the answer and then said something unreadable. Telling somebody
+	// to press again would be wrong twice over: the prompt is spent, so the
+	// retry finds nothing and the thread settles on "expired" over a decision
+	// that took effect.
+	noticeMaybeApplied = "⚠️ The agent took that answer but didn't confirm it. It may already be in force — check the agent rather than pressing again."
+	noticeStalePress   = "⚠️ That question belongs to a session this thread no longer has, so the answer wasn't sent. If the agent is still waiting, it will ask again."
 )
 
 // promptDetailLimit bounds the agent-controlled detail put in a message. The
@@ -189,14 +315,24 @@ const (
 // helps nobody decide anything.
 const promptDetailLimit = 1500
 
+// promptNameLimit bounds the tool and the asking agent. Both are names, so this
+// is already far past anything meaningful; it is here because they are
+// agent-controlled and unbounded on the wire like Detail is, and because the
+// question is retained until it is answered — an unbounded field interpolated
+// into it is an unbounded field held for as long as the prompt is pending.
+const promptNameLimit = 120
+
 // promptText writes the question. It leads with the specifics — the command,
 // the path — because that is what is being decided; the tool name and the
 // asking agent are context for it.
+//
+// Everything it interpolates is clamped, so the result is bounded: see
+// askRecord, which keeps it.
 func promptText(p approval.Prompt) string {
 	var b strings.Builder
 	b.WriteString("**Permission needed**")
 	if p.Tool != "" {
-		b.WriteString(" — `" + p.Tool + "`")
+		b.WriteString(" — `" + clampRunes(p.Tool, promptNameLimit) + "`")
 	}
 	if detail := strings.TrimSpace(p.Detail); detail != "" {
 		b.WriteString("\n\n```\n" + clampRunes(detail, promptDetailLimit) + "\n```")
@@ -205,7 +341,7 @@ func promptText(p approval.Prompt) string {
 		// Which agent is asking, when it is not the one being talked to. The
 		// difference between approving something you just asked for and
 		// approving something a subagent you forgot about wants.
-		b.WriteString("\n_asked by the `" + p.Source + "` subagent_")
+		b.WriteString("\n_asked by the `" + clampRunes(p.Source, promptNameLimit) + "` subagent_")
 	}
 	return b.String()
 }
@@ -245,7 +381,13 @@ func (r *Router) HandlePress(ctx context.Context, p chat.Press) error {
 	}
 	e, err := r.boundSession(p.Conversation)
 	if err != nil {
-		return err
+		// Nothing bound under this conversation at all — most often a restart
+		// under a thread whose buttons are still on screen, with nobody having
+		// posted since to adopt the session back. The press cannot be answered
+		// and the buttons stay live, so it is told the same thing a press for a
+		// replaced session is told, for the same reason.
+		r.logf("perms %s: press has no session to answer: %v", p.Conversation, err)
+		return r.surfaceNotice(ctx, p.Conversation, noticeStalePress)
 	}
 	if sess != sessionRef(e.sess) {
 		// The conversation is on a different session than the one that asked.
@@ -261,27 +403,49 @@ func (r *Router) HandlePress(ctx context.Context, p chat.Press) error {
 	if err != nil {
 		if errors.Is(err, approval.ErrNotFound) {
 			// Someone else got there first, or the prompt timed out. Not a
-			// failure to report as one — the question is settled either way.
+			// failure to report as one — the question is settled either way, and
+			// saying so on the question is the whole of what is owed here. If
+			// the press that settled it got there first, it has already written
+			// a better record and claimSettle declines to replace it.
 			r.logf("perms %s: %s is no longer pending", p.Conversation, promptID)
+			r.traceDecision(ctx, e, p, promptID, noticeSettled, settledElsewhere)
 			return nil
 		}
 		// Say so in the thread. A press is the one inbound action with no reply
 		// of its own: the button flashes, the platform considers it delivered,
 		// and without this the person who pressed it watches an agent stay
 		// blocked with nothing anywhere to say the answer did not land.
-		if nerr := r.surfaceNotice(ctx, p.Conversation, noticePressFailed); nerr != nil {
+		notice := noticePressFailed
+		if errors.Is(err, approval.ErrMaybeApplied) {
+			notice = noticeMaybeApplied
+		}
+		if nerr := r.surfaceNotice(ctx, p.Conversation, notice); nerr != nil {
 			r.logf("perms %s: surface failed press: %v", p.Conversation, nerr)
 		}
 		return fmt.Errorf("answer %s in %s: %w", promptID, p.Conversation, err)
 	}
-	if !ack.Attributed() {
+	// Whoever the daemon says it recorded, never who the press said it was. The
+	// two agree in every ordinary case; where they do not, the audit line the
+	// backend wrote is the one that is true, and the thread should show that
+	// one.
+	//
+	// Clamped and flattened first. It is a name off the daemon's JSON, as
+	// unbounded on the wire as the question's own fields, and it goes onto an
+	// audit line: an identity carrying a blank line and a bolded phrase would
+	// render underneath the real verdict as a second one.
+	approver := clampRunes(strings.Join(strings.Fields(ack.Approver), " "), promptNameLimit)
+	outcome := decided(d) + " — " + approver
+	if approver == "" {
 		// The decision applied, but the audit line names nobody — worth a log
 		// line, because an approval trail with a hole in it is the kind of
-		// thing that is only ever noticed afterwards.
+		// thing that is only ever noticed afterwards, and worth saying in the
+		// thread for the same reason.
 		r.logf("perms %s: %s recorded with no approver named", p.Conversation, d)
+		outcome = decided(d) + " — _approver not recorded_"
 	} else {
-		r.logf("perms %s: %s by %s", p.Conversation, d, ack.Approver)
+		r.logf("perms %s: %s by %s", p.Conversation, d, approver)
 	}
+	r.traceDecision(ctx, e, p, promptID, outcome, settledHere)
 	return nil
 }
 

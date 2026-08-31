@@ -40,8 +40,42 @@ type fakeSender struct {
 	mu       sync.Mutex
 	nextID   int
 	failures int
+	editErr  error
 	updated  []fakeUpdate
 	deleted  []chat.MessageRef
+
+	stallText string
+	stallFor  time.Duration
+}
+
+// failUpdates makes every edit fail, for the paths where an edit is bookkeeping
+// on top of something that already happened and must not be reported as the
+// thing itself failing.
+func (f *fakeSender) failUpdates(fail bool) {
+	if fail {
+		f.failUpdatesWith(errors.New("edit refused"))
+		return
+	}
+	f.failUpdatesWith(nil)
+}
+
+// failUpdatesWith is failUpdates for the tests that care which failure it is —
+// an adapter that cannot edit at all is a different thing from one whose edit
+// did not land.
+func (f *fakeSender) failUpdatesWith(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.editErr = err
+}
+
+// stallEditsSaying holds every edit whose text contains s, so a test can make
+// the platform finish two edits in the opposite order from the one they were
+// started in. That reordering is the thing a settle lock exists to prevent, and
+// it is not reachable by racing goroutines and hoping.
+func (f *fakeSender) stallEditsSaying(s string, d time.Duration) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.stallText, f.stallFor = s, d
 }
 
 // failNext makes the next n sends fail, for the paths that have to cope with a
@@ -61,10 +95,12 @@ func (f *fakeSender) sendCount() int {
 	return f.nextID
 }
 
-// fakeUpdate records one in-place edit (used to assert status-mode behavior).
+// fakeUpdate records one in-place edit (used to assert status-mode behavior,
+// and what a settled permission question was left saying).
 type fakeUpdate struct {
-	ref  chat.MessageRef
-	text string
+	ref   chat.MessageRef
+	text  string
+	reply chat.Reply
 }
 
 func (f *fakeSender) Send(_ context.Context, r chat.Reply) (chat.MessageRef, error) {
@@ -85,7 +121,16 @@ func (f *fakeSender) Send(_ context.Context, r chat.Reply) (chat.MessageRef, err
 
 func (f *fakeSender) Update(_ context.Context, ref chat.MessageRef, r chat.Reply) error {
 	f.mu.Lock()
-	f.updated = append(f.updated, fakeUpdate{ref: ref, text: r.Text})
+	err, stallText, stallFor := f.editErr, f.stallText, f.stallFor
+	f.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	if stallFor > 0 && strings.Contains(r.Text, stallText) {
+		time.Sleep(stallFor)
+	}
+	f.mu.Lock()
+	f.updated = append(f.updated, fakeUpdate{ref: ref, text: r.Text, reply: r})
 	f.mu.Unlock()
 	return nil
 }

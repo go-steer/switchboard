@@ -441,8 +441,16 @@ func (a *Adapter) Update(ctx context.Context, ref chat.MessageRef, r chat.Reply)
 		}
 	}
 
+	// An empty block set, explicitly, not a missing one. chat.update leaves
+	// whatever blocks the message already has when the field is absent, so a
+	// text-only edit of a message that was posted with blocks keeps rendering
+	// them — including a permission question's buttons, which stay pressable
+	// after the decision they were asking about has been made. Sending "[]"
+	// is what takes them down, and it costs nothing on a message that never
+	// had any.
 	if _, _, _, err := a.api.UpdateMessageContext(ctx, channel, ref.ID,
 		slack.MsgOptionText(clamp(rendered, slackTextLimit), false),
+		slack.MsgOptionBlocks(),
 	); err != nil {
 		return fmt.Errorf("slack: update %s: %w", ref.Conversation, platformErr(err))
 	}

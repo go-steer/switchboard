@@ -473,7 +473,7 @@ type sessionEntry struct {
 	watchingPerms atomic.Bool
 
 	// asked records which permission prompts have already been put in the
-	// thread, guarded by pmu.
+	// thread, and what each one said, guarded by qmu.
 	//
 	// One watcher is not enough to make a question appear once. The prompt
 	// stream has no keep-alive, so an intermediary cuts an idle one routinely,
@@ -484,7 +484,19 @@ type sessionEntry struct {
 	// question per reconnect, each with its own live buttons, and only the
 	// first press does anything.
 	qmu   sync.Mutex
-	asked map[string]bool
+	asked map[string]*askRecord
+
+	// tmu serializes recording how a question ended, the edit included, so that
+	// claiming the right to write a record and writing it are one step. Two
+	// presses that both claim before either writes would land their edits in
+	// whichever order the platform answered in, and the thread would settle on
+	// whichever that was rather than on the one that won.
+	//
+	// Held across the edit, which is a network call. It is a leaf — nothing
+	// reached from the adapter comes back here — and it blocks only other
+	// presses on the same conversation, which are the things that have to be
+	// ordered anyway.
+	tmu sync.Mutex
 
 	// described is the claim on logging what the daemon said it is and can do.
 	// The capabilities frame arrives on every stream open, so a session that
@@ -775,21 +787,56 @@ func (e *sessionEntry) claimPermsWatch() bool { return e.watchingPerms.CompareAn
 // nobody was told about.
 const maxAskedPrompts = 4096
 
+// settleState is how a question's outcome has been recorded, in increasing
+// order of authority. A record may only ever be replaced by a firmer one.
+type settleState uint8
+
+const (
+	// unsettled: the question is on screen and still waiting.
+	unsettled settleState = iota
+
+	// settledElsewhere: a press found nothing pending. The question is over —
+	// it timed out, or it was answered at the agent's own console — but this
+	// side does not know how, so the record names no decision.
+	settledElsewhere
+
+	// settledHere: a decision the backend confirmed, with an approver on it.
+	// Nothing outranks this, and it may replace a settledElsewhere written by
+	// a simultaneous press that reached its own answer first.
+	settledHere
+)
+
+// askRecord is one question this thread has been shown, and how it ended.
+//
+// The question text is kept so the message can be edited to record what was
+// decided without losing what was being decided — an audit line reading
+// "Allowed once by ana@example.com", with the command it allowed gone, is not
+// one. It is held past a settledElsewhere outcome, which a real one can still
+// replace and which needs the question just as much, and dropped the moment a
+// decision is recorded, because nothing outranks that. What bounds it until
+// then is maxAskedPrompts and the clamping promptText does on every
+// agent-supplied field it interpolates.
+type askRecord struct {
+	text    string
+	settled settleState
+}
+
 // claimAsk reports whether this prompt is one the thread has not been shown
-// yet, and records it. See sessionEntry.asked.
-func (e *sessionEntry) claimAsk(id string) bool {
+// yet, and records it along with what the thread was shown. See
+// sessionEntry.asked.
+func (e *sessionEntry) claimAsk(id, text string) bool {
 	e.qmu.Lock()
 	defer e.qmu.Unlock()
-	if e.asked[id] {
+	if e.asked[id] != nil {
 		return false
 	}
 	if len(e.asked) >= maxAskedPrompts {
 		e.asked = nil
 	}
 	if e.asked == nil {
-		e.asked = make(map[string]bool)
+		e.asked = make(map[string]*askRecord)
 	}
-	e.asked[id] = true
+	e.asked[id] = &askRecord{text: text}
 	return true
 }
 
@@ -798,6 +845,44 @@ func (e *sessionEntry) releaseAsk(id string) {
 	e.qmu.Lock()
 	defer e.qmu.Unlock()
 	delete(e.asked, id)
+}
+
+// claimSettle claims the right to record how a question ended at the given
+// authority, and hands back the question as it was posted so the record can be
+// written under it. Callers hold tmu across the claim and the write it
+// authorizes; see sessionEntry.tmu.
+//
+// Two people can press the same buttons at the same moment, and only one of
+// their answers reaches a pending prompt — the other comes back "no longer
+// pending", which is true and says nothing about who decided what. Whichever of
+// the two gets here first, the record that names an approver is the one the
+// thread is left showing: a want that outranks what is recorded replaces it, an
+// equal or lesser one is refused.
+//
+// known reports whether this entry posted the question at all. A session
+// adopted after a restart holds no record of what the previous process asked,
+// and neither does one whose set was cleared by maxAskedPrompts; there is no
+// body to write a record under in either case, which is a different thing from
+// a record already written and is answered differently.
+func (e *sessionEntry) claimSettle(id string, want settleState) (text string, known, ok bool) {
+	e.qmu.Lock()
+	defer e.qmu.Unlock()
+	rec := e.asked[id]
+	if rec == nil {
+		return "", false, false
+	}
+	if rec.settled >= want {
+		return "", true, false
+	}
+	rec.settled = want
+	text = rec.text
+	if want == settledHere {
+		// Nothing outranks this, so no later record will need the question
+		// again. It is by far the largest thing here and the record outlives the
+		// answer, so hand it over and stop holding it.
+		rec.text = ""
+	}
+	return text, true, true
 }
 
 // takeProgress atomically reads and clears the entry's progress message along

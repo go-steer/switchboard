@@ -377,7 +377,17 @@ func TestRespondRefusesADecisionTheDaemonWouldNotAccept(t *testing.T) {
 // decision this client mangles is a permission granted or refused wrongly.
 func TestEveryDecisionGoesOutOnTheWireUnchanged(t *testing.T) {
 	want := []string{"deny", "allow-once", "allow-session", "allow-session-verb", "allow-session-tool", "allow-always"}
-	all := []Decision{Deny, AllowOnce, AllowSession, AllowSessionVerb, AllowSessionTool, AllowAlways}
+	// From the exported vocabulary, so this also pins what Decisions hands out:
+	// a caller iterating it to be exhaustive is only exhaustive if it is.
+	all := Decisions()
+	if len(all) != len(want) {
+		t.Fatalf("Decisions returns %d values, want the %d the daemon accepts", len(all), len(want))
+	}
+	scratch := Decisions()
+	scratch[0] = ""
+	if Decisions()[0] == "" {
+		t.Error("Decisions hands out the vocabulary itself, so a caller can edit it")
+	}
 	for i, d := range all {
 		if !d.Valid() {
 			t.Errorf("%q is not Valid", string(d))
@@ -417,15 +427,28 @@ func TestAnUnrecognisedDecisionDoesNotReadAsAnApproval(t *testing.T) {
 
 // A 2xx whose body is unreadable must not report an empty approver: that is
 // indistinguishable from the daemon saying it recorded nobody, which is the
-// one distinction this path exists to keep.
+// one distinction this path exists to keep. Nor may it read as a plain failure
+// — the daemon took the request before the reply went wrong, so the decision
+// has probably taken effect and a caller must be able to tell that apart from
+// an answer that never arrived.
 func TestRespondDoesNotPassOffAnUnreadableReplyAsAnonymous(t *testing.T) {
-	c, _ := respondServer(t, http.StatusOK, `{"acknowledged":`)
-	ack, err := c.Respond(context.Background(), testSession, "alice", "p1", Deny)
-	if err == nil {
-		t.Fatalf("Respond succeeded with ack %+v on an unreadable body", ack)
-	}
-	if !strings.Contains(err.Error(), "may have been applied") {
-		t.Errorf("err = %v, want it to warn the decision probably landed", err)
+	for name, body := range map[string]string{
+		"unreadable":     `{"acknowledged":`,
+		"unacknowledged": `{"acknowledged":false}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			c, _ := respondServer(t, http.StatusOK, body)
+			ack, err := c.Respond(context.Background(), testSession, "alice", "p1", Deny)
+			if err == nil {
+				t.Fatalf("Respond succeeded with ack %+v", ack)
+			}
+			if !errors.Is(err, ErrMaybeApplied) {
+				t.Errorf("err = %v, want it to warn the decision probably landed", err)
+			}
+			if errors.Is(err, ErrNotFound) {
+				t.Errorf("err = %v reads as a prompt that was never there", err)
+			}
+		})
 	}
 }
 
