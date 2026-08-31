@@ -343,6 +343,80 @@ healthy; since the daemon opens every stream with a capabilities frame, a
 connection that keeps being re-established keeps proving itself, and only a
 genuine outage accumulates.
 
+### Approving what the agent asks for
+
+An agent that hits its permission gate stops and waits for a human. Without
+`--approvals` that human is whoever is watching the daemon's own console, and
+from the thread's side the turn simply stops producing anything. With it, the
+question lands in the thread instead:
+
+```
+**Permission needed** — `bash`
+
+    rm -rf /tmp/build
+
+_asked by the `builder` subagent_
+
+[ Deny ]  [ Allow once ]  [ Allow for this session ]  [ Allow every rm this session ]  …
+```
+
+Pressing an answer releases the blocked call, and the daemon records the press
+against the person who made it — resolved from the platform's own callback, so
+an approval cannot be attributed to anyone but the presser.
+
+**It is off by default, and turning it on is a real grant.** Anyone who can post
+in the conversation can answer its prompts, and some of those answers outlive
+the request: `allow-always` persists across restarts and applies to the whole
+agent backend, not the thread it was pressed in. Decide it per deployment, with
+the channel's membership in mind. It is ignored under `--outbound-only`, which
+warns — there is no turn to unblock.
+
+Because it is a grant, it is announced on every start:
+
+```
+2026-08-31T09:00:00.000Z switchboard: approvals: permission prompts go to the conversation, and anyone who can post there can answer them
+```
+
+Six answers exist, and switchboard offers the ones that mean what they say for
+the prompt in front of you:
+
+| Answer | Scope |
+|---|---|
+| `deny` | this call |
+| `allow-once` | this call |
+| `allow-session` | the rest of the session |
+| `allow-session-verb` | every bash command with the same leading word, this session |
+| `allow-session-tool` | every call to this tool, this session |
+| `allow-always` | saved, across restarts |
+
+Some are withheld where the gate would grant less — or more — than the label
+claims: everything wider than `allow-once` on a write to the agent's own
+permission config, which records any non-deny as a one-off and saves nothing;
+the two session grants on a path prompt, which that gate never reads back.
+`allow-session-verb` appears only when there is a verb to scope it to. See the
+[design notes](docs/DESIGN.md#21-optional-routes-and-knowing-before-you-ask)
+for why each one goes.
+
+On Slack the answers are buttons, and the ones that outlive the request ask
+again before applying. The app needs **Interactivity & Shortcuts** enabled for
+Slack to deliver a press at all — it is off by default and easy to miss, so
+[slack-setup.md](docs/slack-setup.md#create-the-app) makes it a step. Google
+Chat has no interactive surface yet ([#29]), so the question arrives as text
+with the answers listed — enough to see that the agent is blocked and on what.
+Either way the choices are in the message body too, so nothing depends on the
+buttons rendering.
+
+A press that cannot be delivered says so in the thread rather than leaving a
+flashed button and a still-blocked agent: if the answer does not reach the
+daemon, or the thread has moved on to a different session since the question was
+posted, the reason is posted as a notice.
+
+Only sessions whose agent actually has a permission broker are watched, which
+switchboard reads off the capabilities frame the daemon already sends. Nothing
+is relayed for a session that would answer `501`.
+
+[#29]: https://github.com/go-steer/switchboard/issues/29
+
 ### Outbound ingress
 
 Everything above starts with someone in a thread. `--ingress-addr` opens the

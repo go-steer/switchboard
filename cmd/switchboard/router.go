@@ -27,6 +27,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/go-steer/switchboard/pkg/approval"
 	"github.com/go-steer/switchboard/pkg/chat"
 	"github.com/go-steer/switchboard/pkg/daemon"
 )
@@ -402,6 +403,12 @@ type Router struct {
 	// uses the process default (r.progress); progressFor resolves the two.
 	omu       sync.Mutex
 	overrides map[string]ProgressMode
+
+	// approvals relays the daemon's permission prompts into the thread and
+	// sends back what someone decided. Nil leaves the feature off entirely —
+	// see setApprovals. Set once at startup, before dispatch begins, like
+	// showUsage.
+	approvals *approval.Client
 }
 
 // sessionEntry is a conversation's session plus the state to create it
@@ -457,6 +464,27 @@ type sessionEntry struct {
 	// failure still has to be reported. Reset per turn.
 	inFlight atomic.Bool
 	failed   atomic.Bool
+
+	// watchingPerms is the claim on this entry's permission subscription. The
+	// capabilities frame that starts it arrives on every reconnect, so without
+	// it a session that reconnects for a week accumulates a watcher per
+	// connection — each one seeded with the same pending prompts, each one
+	// posting the same question again.
+	watchingPerms atomic.Bool
+
+	// asked records which permission prompts have already been put in the
+	// thread, guarded by pmu.
+	//
+	// One watcher is not enough to make a question appear once. The prompt
+	// stream has no keep-alive, so an intermediary cuts an idle one routinely,
+	// and every resubscription is seeded with every prompt still pending — by
+	// design, since that is what makes reconnecting cursorless. A permission
+	// prompt is exactly the thing that stays pending for minutes while somebody
+	// is found, so without this the thread collects one more copy of the same
+	// question per reconnect, each with its own live buttons, and only the
+	// first press does anything.
+	qmu   sync.Mutex
+	asked map[string]bool
 
 	// described is the claim on logging what the daemon said it is and can do.
 	// The capabilities frame arrives on every stream open, so a session that
@@ -734,6 +762,43 @@ func (e *sessionEntry) claimFailureNotice() bool { return e.failed.CompareAndSwa
 // claimCapabilitiesLog reports whether this is the first capabilities frame
 // seen for the session, and so the one worth logging.
 func (e *sessionEntry) claimCapabilitiesLog() bool { return e.described.CompareAndSwap(false, true) }
+
+// claimPermsWatch reports whether this goroutine is the one that starts the
+// entry's permission subscription. See sessionEntry.watchingPerms.
+func (e *sessionEntry) claimPermsWatch() bool { return e.watchingPerms.CompareAndSwap(false, true) }
+
+// maxAskedPrompts bounds the set of prompts already put in the thread. It is
+// far above what a session plausibly raises, and exists only so a very long
+// session cannot grow the set without limit. Overflowing it clears the set
+// rather than refusing to ask: the failure it reintroduces is a duplicate
+// question, which is recoverable, where the alternative is a blocked agent
+// nobody was told about.
+const maxAskedPrompts = 4096
+
+// claimAsk reports whether this prompt is one the thread has not been shown
+// yet, and records it. See sessionEntry.asked.
+func (e *sessionEntry) claimAsk(id string) bool {
+	e.qmu.Lock()
+	defer e.qmu.Unlock()
+	if e.asked[id] {
+		return false
+	}
+	if len(e.asked) >= maxAskedPrompts {
+		e.asked = nil
+	}
+	if e.asked == nil {
+		e.asked = make(map[string]bool)
+	}
+	e.asked[id] = true
+	return true
+}
+
+// releaseAsk undoes a claim whose question never made it into the thread.
+func (e *sessionEntry) releaseAsk(id string) {
+	e.qmu.Lock()
+	defer e.qmu.Unlock()
+	delete(e.asked, id)
+}
 
 // takeProgress atomically reads and clears the entry's progress message along
 // with the rest of the turn's ticker state, and stops the ticker: the message
@@ -1333,11 +1398,15 @@ var reliedOnEvents = []string{
 // absence — a thread that stays quiet, a reply with no footer, a clock that
 // runs to its backstop. None of those looks like a version mismatch from the
 // outside, so the mismatch is stated here instead of left to be deduced.
-func (r *Router) noteCapabilities(conv string, e *sessionEntry, c daemon.Capabilities) {
+func (r *Router) noteCapabilities(ctx context.Context, conv string, e *sessionEntry, c daemon.Capabilities) {
 	// Before the log claim, not after it: this is read on every turn and has to
 	// be refreshed by every frame, while the logging below is deliberately
 	// once-per-session.
 	e.signalsEnd.Store(c.Advertises(daemon.EventTurnComplete))
+	// Also before it, and for a related reason: the watcher is started once per
+	// entry rather than once per frame, but the claim that decides which frame
+	// wins belongs to the watcher, not to the logging.
+	r.watchPermsIfOffered(ctx, conv, e, c)
 	if !e.claimCapabilitiesLog() {
 		return
 	}
@@ -1922,7 +1991,7 @@ func (r *Router) relay(ctx context.Context, conv string, e *sessionEntry, owner 
 					r.logf("relay %s: unreadable capabilities frame: %s", conv, ev.Data)
 					return nil
 				}
-				r.noteCapabilities(conv, e, c)
+				r.noteCapabilities(ctx, conv, e, c)
 				return nil
 			case daemon.EventStatusUpdate:
 				st, ok := daemon.StatusUpdated(ev.Data)

@@ -643,10 +643,12 @@ func TestPatchMaskNamesOnlyUpdatablePaths(t *testing.T) {
 	}
 }
 
-// fakeHandler records the turns and commands dispatch routes to the router.
+// fakeHandler records the turns, commands and presses dispatch routes to the
+// router.
 type fakeHandler struct {
 	msgs    []chat.Message
 	cmds    []chat.Command
+	presses []chat.Press
 	ack     string
 	err     error
 	choices []string
@@ -660,6 +662,14 @@ func (h *fakeHandler) Handle(_ context.Context, m chat.Message) error {
 func (h *fakeHandler) HandleCommand(_ context.Context, c chat.Command) (string, error) {
 	h.cmds = append(h.cmds, c)
 	return h.ack, h.err
+}
+
+// HandlePress is here to satisfy chat.Handler. This adapter has no interactive
+// surface yet (#29), so nothing in this package should ever call it — which is
+// what the recording is for.
+func (h *fakeHandler) HandlePress(_ context.Context, p chat.Press) error {
+	h.presses = append(h.presses, p)
+	return h.err
 }
 
 // choiceHandler adds the optional chat.CommandChoices capability, which is how

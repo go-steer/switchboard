@@ -32,6 +32,7 @@ import (
 
 	"github.com/go-steer/switchboard/internal/logging"
 	"github.com/go-steer/switchboard/internal/version"
+	"github.com/go-steer/switchboard/pkg/approval"
 	"github.com/go-steer/switchboard/pkg/chat"
 	"github.com/go-steer/switchboard/pkg/chat/googlechat"
 	"github.com/go-steer/switchboard/pkg/chat/slack"
@@ -144,6 +145,10 @@ func runServe(args []string) (err error) {
 		"append each answer's model, tokens, cost and latency as a footer; rich renders only "+
 			"(--slack-rich-blocks, --googlechat-cards rich), and off by default because it "+
 			"discloses spend to everyone in the conversation")
+	approvals := fs.Bool("approvals", false,
+		"relay the agent's permission prompts into the conversation as buttons, and send back "+
+			"what someone presses; off by default because anyone who can post in a conversation "+
+			"can then answer its prompts, and some of those answers outlive the request")
 	googleProject := fs.String("google-project", envOr("SWITCHBOARD_GOOGLE_PROJECT", ""),
 		"GCP project hosting the Google Chat Pub/Sub subscription (--platform googlechat)")
 	googleSub := fs.String("google-subscription", envOr("SWITCHBOARD_GOOGLE_SUBSCRIPTION", ""),
@@ -211,13 +216,23 @@ func runServe(args []string) (err error) {
 	// the adapter. So an outbound-only deployment is not asked for a bearer
 	// token it would never present.
 	var dc *daemon.Client
+	var ac *approval.Client
 	if inbound {
 		token := os.Getenv(*tokenEnv)
 		if token == "" {
 			return fmt.Errorf("no daemon token in $%s (set --token-env to the right var)", *tokenEnv)
 		}
-		if dc, err = daemon.New(daemon.Config{BaseURL: *daemonURL, BearerToken: token}); err != nil {
+		dcfg := daemon.Config{BaseURL: *daemonURL, BearerToken: token}
+		if dc, err = daemon.New(dcfg); err != nil {
 			return err
+		}
+		// Same daemon, same credential, different routes — and built here
+		// rather than inside the router so that a run without --approvals
+		// holds no client for a surface it does not offer.
+		if *approvals {
+			if ac, err = approval.New(dcfg); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -336,6 +351,18 @@ func runServe(args []string) (err error) {
 	if inbound {
 		router = NewRouter(dc, adapter, progress, m, logf)
 		router.setShowUsage(*showUsage)
+		router.setApprovals(ac)
+	}
+	if *approvals {
+		if !inbound {
+			logf("warning: --approvals answers prompts raised by an agent turn, and an outbound-only run has none")
+		} else {
+			// Said on every start, like the outbound-only banner, because this
+			// one is a grant: from here on, anyone who can post in a
+			// conversation can answer that session's permission prompts, and
+			// some of those answers outlive the request.
+			logf("approvals: permission prompts go to the conversation, and anyone who can post there can answer them")
+		}
 	}
 	if *showUsage {
 		switch {

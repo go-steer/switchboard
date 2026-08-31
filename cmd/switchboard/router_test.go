@@ -16,6 +16,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -36,10 +37,28 @@ import (
 type fakeSender struct {
 	replies chan chat.Reply
 
-	mu      sync.Mutex
-	nextID  int
-	updated []fakeUpdate
-	deleted []chat.MessageRef
+	mu       sync.Mutex
+	nextID   int
+	failures int
+	updated  []fakeUpdate
+	deleted  []chat.MessageRef
+}
+
+// failNext makes the next n sends fail, for the paths that have to cope with a
+// message that never made it into the conversation.
+func (f *fakeSender) failNext(n int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.failures = n
+}
+
+// sendCount is how many sends were attempted, including the failed ones — the
+// count a test asserts against when what matters is that something was posted
+// once rather than what it said.
+func (f *fakeSender) sendCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.nextID
 }
 
 // fakeUpdate records one in-place edit (used to assert status-mode behavior).
@@ -52,7 +71,14 @@ func (f *fakeSender) Send(_ context.Context, r chat.Reply) (chat.MessageRef, err
 	f.mu.Lock()
 	f.nextID++
 	ref := chat.MessageRef{Conversation: r.Conversation, ID: fmt.Sprintf("ts%d", f.nextID)}
+	fail := f.failures > 0
+	if fail {
+		f.failures--
+	}
 	f.mu.Unlock()
+	if fail {
+		return chat.MessageRef{}, errors.New("post refused")
+	}
 	f.replies <- r
 	return ref, nil
 }

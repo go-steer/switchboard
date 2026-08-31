@@ -7,6 +7,72 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- `--approvals`: relay a blocked tool call into the thread as a question with
+  buttons, and send back what someone presses (#40). A permission prompt that
+  used to park a turn until whoever started it noticed a console now reaches the
+  people already in the conversation, and the answer releases the call. **Off by
+  default, and it is a real grant to turn on**: anyone who can post in a
+  conversation can answer its prompts, and some of those answers outlive the
+  request that raised them. Because that is a grant rather than a rendering
+  choice, it is announced on every start, like the outbound-only banner.
+  Ignored under `--outbound-only`, which warns — there is no turn to unblock.
+  - Subscription is gated on the capabilities frame — can this session ask? —
+    rather than on a turn state saying it is asking right now. The backend
+    declares an `awaiting_permission` state and emits it nowhere, so waiting for
+    it would relay no prompt on any build shipping today. The cost is a second
+    stream per session whose agent registered a broker; nothing is lost by
+    attaching early, because a new subscriber is seeded with every prompt already
+    pending. One watcher per session no matter how often the event stream
+    reconnects, and it reconnects on its own without a cursor for the same
+    reason.
+  - A question is asked once, however often the prompt stream is cut. The
+    seeding that removes the need for a cursor also redelivers everything still
+    pending on *every* resubscription, and an idle stream is cut routinely, so
+    each reconnect would otherwise add another copy of the same unanswered
+    question with its own live buttons. The record of what has been asked is
+    kept per session and the claim is given back if the post fails, since the
+    next reconnect's seeding is the only retry there is. A stream that carried a
+    prompt resets the reconnect backoff, as the event relay's does — without
+    that, a session whose stream is cut periodically settles at the ceiling and
+    the next question waits that long before anybody sees it.
+  - A press names the session that asked, not just the prompt. A conversation's
+    session can be replaced while a question is still on screen with live
+    buttons, and answering it against whatever session the thread holds now
+    would apply a decision — possibly a standing one — to something that never
+    asked. Refused, and said so in the thread.
+  - A press that does not reach the backend says so in the thread. It is the one
+    inbound action with no reply of its own: the button flashes, the platform
+    considers it delivered, and without a notice the person who pressed it
+    watches an agent stay blocked with every appearance of having unblocked it.
+  - `pkg/chat` grew the press seam: a `Reply` may carry a `Decision`, and a
+    `Handler` takes the presses back. `HandlePress` is on the interface rather
+    than an optional capability, so an adapter that renders buttons cannot be
+    paired with a handler that has nowhere to send them — a person clicking and
+    watching nothing happen is worse than the button never appearing. Answers are
+    also written into the message text, so a platform that renders no buttons
+    still says what the choices are.
+  - Slack renders the question as Block Kit buttons and reads `block_actions`
+    back. This needs the app's *Interactivity & Shortcuts* toggle, which is off
+    by default and delivers no press without it, so `docs/slack-setup.md` makes
+    it a numbered step rather than a footnote. The ack goes out first, before
+    the payload is read as ours: Slack allows three seconds and then tells the
+    person their request failed, which is exactly the wrong thing to say about
+    a decision that is being applied. The press is attributed to whoever pressed
+    it, from the callback's own user and never from the message being answered.
+    Answers that outlive the request get a confirmation dialog, which is what
+    Slack has to spend on friction. Every Block Kit limit is enforced on the way out —
+    labels are clipped, unrepresentable options dropped, the element count
+    capped — because exceeding one fails the whole post and takes the question
+    with it. Buttons post whether or not `--slack-rich-blocks` is set: that flag
+    is about how prose looks, this is about whether the question can be answered.
+  - Google Chat has no interactive surface yet (#29), so it posts the question
+    as prose with the answers listed.
+  - A press against a conversation with no live session opens none. It can only
+    ever answer a question posted into a live one, so a miss means the session
+    went away in between — and a fresh session holds none of the old one's
+    pending prompts. A prompt that is no longer pending is not reported as a
+    failure: someone else answered first, or it timed out, and the question is
+    settled either way.
 - `pkg/approval`: a client for the agent backend's permission broker, the first
   half of turning a blocked tool call into a question someone in a chat thread
   can answer (#40). It streams pending prompts from

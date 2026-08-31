@@ -22,6 +22,10 @@ Slack half. Design rationale is in [DESIGN.md](DESIGN.md).
   `@switchboard progress on the ticket?` still reaches the daemon.
 - A native slash command (`/switchboard progress status`) is handled too, if you
   configure one. It is acked **ephemerally**, visible only to the invoker.
+- One thing arrives that is not a message: a **button press** on a permission
+  question, when the gateway runs with `--approvals`. It answers a question
+  switchboard asked; it never starts a turn. Slack only delivers it if the app
+  has *Interactivity & Shortcuts* enabled (step 3 below).
 
 ## Prerequisites
 
@@ -58,12 +62,17 @@ At <https://api.slack.com/apps> → **Create New App** → **From scratch**:
    with the `connections:write` scope. Copy it now; it is not shown again.
 2. **Event Subscriptions** → enable, and under *Subscribe to bot events* add
    **`app_mention`**. Socket Mode needs no Request URL — leave it empty.
-3. **OAuth & Permissions** → add the bot scopes in the table below.
-4. *(optional)* **Slash Commands** → create `/switchboard`. The command word is
+3. **Interactivity & Shortcuts** → enable. Socket Mode needs no Request URL here
+   either — leave it empty. This toggle is what makes Slack deliver button
+   presses, and it is off by default: without it a permission question posted by
+   `--approvals` renders its buttons, they click, and nothing is ever sent. Skip
+   this step if you are not running `--approvals`.
+4. **OAuth & Permissions** → add the bot scopes in the table below.
+5. *(optional)* **Slash Commands** → create `/switchboard`. The command word is
    discarded and the rest is parsed as `verb args…`, so one command covers every
    gateway verb. Requires the `commands` scope.
-5. **Install to Workspace** → this mints the **bot token** (`xoxb-…`).
-6. **Invite the bot to a channel**: `/invite @switchboard`. Slack will not let it
+6. **Install to Workspace** → this mints the **bot token** (`xoxb-…`).
+7. **Invite the bot to a channel**: `/invite @switchboard`. Slack will not let it
    post into a channel it is not a member of, and the failure (`not_in_channel`)
    arrives on the *reply*, not on the mention — so it looks like the app read
    your message and ignored it.
@@ -105,8 +114,8 @@ Rename the vars with `--slack-app-token-env` / `--slack-bot-token-env` /
 The app-level token is the *inbound* half and nothing else. A deployment that
 only posts — a digest job driving the outbound ingress — can do without it, by
 passing `--outbound-only` ([#23]). switchboard then opens no WebSocket, and
-steps 1 and 2 of *Create the app* (Socket Mode, `app_mention`) are not needed at
-all. Nor are most of the scopes: `connections:write`, `app_mentions:read`, both
+steps 1 to 3 of *Create the app* (Socket Mode, `app_mention`, interactivity) are
+not needed at all. Nor are most of the scopes: `connections:write`, `app_mentions:read`, both
 `users:read*` and `commands` are all reached only from the inbound path, so an
 outbound-only bot token needs `chat:write` and nothing else. It still has to be
 invited to the channels it posts into. The daemon token goes too — there is no
@@ -192,12 +201,15 @@ apps get no "added to space" event the gateway acts on.
 | Turns attributed to `U0123ABC` instead of an address | `users:read.email` missing — the log says `has no email (need users:read.email?)` |
 | Thread shows `asserted-caller header rejected: identity is not provisioned` | the caller is not in the daemon's bearer table — [register it](daemon-setup.md#register-every-human-who-will-talk-to-the-app) |
 | Rich blocks look flat | `--slack-rich-blocks` not set, or the payload was rejected and fell back (logged) |
+| Permission buttons click but nothing happens, and no `perms …` line is logged | **Interactivity & Shortcuts** not enabled — Slack is not delivering the press. The agent stays blocked until it is |
+| No permission question ever appears | `--approvals` not set, or the session's agent registered no prompt broker (logged as `session advertised permission prompts but serves none` when the frame and the route disagree) |
 
 ## What is covered without a workspace
 
 `pkg/chat/slack` unit-tests the mrkdwn translation, the Block Kit renderer
-(including the fallbacks), mention stripping, conversation-key round-tripping,
-and the error classification. All of it runs on a checkout with no Slack account.
+(including the fallbacks and the permission buttons), mention stripping,
+conversation-key round-tripping, the interaction payload a press arrives as, and
+the error classification. All of it runs on a checkout with no Slack account.
 
 What it cannot tell you is whether Slack *renders* the blocks the way the
 renderer assumes. Google Chat has a zero-cost answer to that question — golden
