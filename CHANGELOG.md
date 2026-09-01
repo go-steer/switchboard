@@ -243,10 +243,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 - Docs attributed the missing Google Chat buttons to Pub/Sub, and recorded the
   legacy Chat-API dialect as *expected* to share the limit. It does not: legacy
-  apps receive `CARD_CLICKED` over the same transport, so the limit belongs to
-  the add-on framework, whose connection settings route four triggers and no
-  click (#28). Nothing about the build changes — buttons are still unrendered in
-  both dialects, and still wait on the HTTP interaction endpoint (#29) — but the
+  apps receive `CARD_CLICKED` over the same transport. The limit is the add-on
+  framework's, whose connection settings route four triggers and no click —
+  which is the half #28 actually measured; the legacy half is known from
+  operating Chat and is marked as such wherever it is now written down, rather
+  than borrowing #28's provenance. Nothing about the build changes — buttons are
+  still unrendered in both dialects, and still wait on the HTTP interaction
+  endpoint (#29) — but the
   reason is now the right one, which is what makes the decision reviewable:
   switchboard does not buy interactivity by staying on the framework Google is
   migrating off, since converting an app is one-way and a control that stops

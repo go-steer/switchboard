@@ -548,23 +548,31 @@ no-public-ingress, distroless posture. Two costs come with it:
   Delivery may be retried, so a patch is written to be idempotent — the same
   event twice leaves the card in the same end state.
 
-That limit belongs to the **add-on framework, not to Pub/Sub**. The legacy
-Chat-API dialect delivers `CARD_CLICKED` over the same transport; what Google
-documents a Pub/Sub app as giving up is dialogs and synchronous single-card
-updates, and delivery is not on that list. So there is a configuration in which
-buttons work today, and switchboard deliberately does not take it. Google is
-migrating Chat apps onto add-ons, converting an app is one-way, and buying
-interactivity by staying on the framework being retired trades a durable
-limitation for a dated one. Legacy events therefore stay *decodable* — apps that
-have not converted are still out there, and the dialect split costs one
-normalizer — but the add-on dialect is what this gateway is designed against,
-and its buttons wait on the endpoint below rather than on a console downgrade.
+**The callback-button limit belongs to the add-on framework, not to Pub/Sub.**
+The legacy Chat-API dialect delivers `CARD_CLICKED` over the same transport —
+known from operating the platform rather than from a test here, so it carries
+none of #28's provenance and should not be read as if it did. Google's list of
+what a Pub/Sub app gives up names dialogs and synchronous single-card updates
+and does not mention delivery, which is consistent with that but does not on its
+own establish it.
+
+So there is a configuration in which buttons work today, and switchboard does
+not take it. Google is migrating Chat apps onto add-ons, converting an app is
+one-way, and buying interactivity by staying on the framework being retired
+trades a durable limitation for a dated one. Nor could the choice be made per
+event: the decoder normalizes both dialects into one `inbound` and the rest of
+the package never learns which one a turn arrived in (`event.go`), while an
+agent-initiated post has no inbound event to infer a dialect from at all — a
+button that renders only for legacy is not something this design can express.
+Legacy events therefore stay *decodable*, since apps that have not converted are
+still out there and the split costs one normalizer, but the add-on dialect is
+what this gateway is designed against.
 
 Callback buttons are therefore what an **HTTP interaction endpoint** buys
-([#29](https://github.com/go-steer/switchboard/issues/29)) for the dialect this
-gateway ships. Only the *rendering* of a button was dropped, and dropped for both
-dialects, so the decode and dispatch path is unreached in either one today; it is
-kept and still tested because #29 is the ingress it is waiting for.
+([#29](https://github.com/go-steer/switchboard/issues/29)). Only the *rendering*
+of a button was dropped, and dropped for both dialects, so the decode and
+dispatch path is unreached in either one today; it is kept and still tested
+because #29 is the ingress it is waiting for.
 
 When a click does arrive, add-ons never report an **invoked function name** back
 to the app, so a button's identity travels in `action.parameters` — which the

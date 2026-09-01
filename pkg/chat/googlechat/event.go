@@ -63,8 +63,9 @@ const (
 // commonEventObject.invokedFunction. The legacy dialect carries the same keys
 // in common.parameters, so one encoding serves both.
 //
-// Decode-only today: no card this gateway sends has a button, since Chat
-// delivers no click over Pub/Sub (#28). The writer comes back with #29.
+// Decode-only today: no card this gateway sends has a button, since a click
+// never reaches an add-on (#28) — see kindButton below. The writer comes back
+// with #29.
 const (
 	paramCommand = "switchboard_command"
 	paramArg     = "switchboard_arg"
@@ -103,10 +104,11 @@ const (
 	//
 	// Unreached today, in both directions and in both dialects: no card this
 	// gateway sends has a button, because a click never arrives for an add-on
-	// (#28). Legacy Chat-API apps do get clicks over Pub/Sub, but the gateway
-	// renders no button for them either — see cards.go. Decoding is kept for
-	// the HTTP interaction endpoint (#29), which is the ingress that delivers
-	// them to the dialect this gateway targets.
+	// (#28). Legacy Chat-API apps do get clicks over Pub/Sub — known from
+	// operating Chat, not measured here — but the gateway renders no button for
+	// them either, and could not render one only for them; see cards.go.
+	// Decoding is kept for the HTTP interaction endpoint (#29), which is the
+	// ingress that delivers clicks to the dialect this gateway targets.
 	kindButton
 	// kindWelcome is the app being added to a space.
 	kindWelcome

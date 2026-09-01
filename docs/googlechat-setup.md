@@ -81,9 +81,10 @@ invariant in one glance — equivalent events must produce identical outcomes.
 The card-click payloads cannot be replaced that way: no card the gateway sends
 has a button, and Chat delivered no click to the subscription when one did
 (#28). A legacy app would have received that click, but the gateway renders no
-button in either dialect, so neither can produce real traffic. They stay
-hand-written, pinning the decode path for the HTTP ingress in
-[#29](https://github.com/go-steer/switchboard/issues/29).
+button in either dialect, so neither can produce real traffic — and the legacy
+half is known from operating Chat rather than tested here, so the fixture is
+what pins our reading of it. They stay hand-written, pinning the decode path for
+the HTTP ingress in [#29](https://github.com/go-steer/switchboard/issues/29).
 
 ### Capturing real payloads
 
@@ -411,9 +412,10 @@ In the order that shows what is new:
    a fenced code block. None of the delimiters should be visible — before this
    change they were.
 3. **`/progress`** with no argument → an ack card naming the modes it takes.
-   No buttons: for an add-on, a click never reached the subscription and errored
-   in the UI ([#28](https://github.com/go-steer/switchboard/issues/28)), so a row
-   of them would be a control that can only fail. Then **`/progress stream`** → the ack
+   No buttons: for an add-on, a click never reached the subscription and
+   errored in the UI
+   ([#28](https://github.com/go-steer/switchboard/issues/28)), so a row of them
+   would be a control that can only fail. Then **`/progress stream`** → the ack
    confirms the new mode, and names nothing, which is the one thing the row's
    removal cost.
 4. **Long turn** → a progress card; **stop the daemon before sending** → an
