@@ -748,3 +748,63 @@ func TestParseAppCommands(t *testing.T) {
 		}
 	}
 }
+
+// TestRunServeApproverValidation checks the wiring around --approvers, not the
+// parser — that the flag is consulted at all, that it is checked against the
+// caller mode chosen by the same run, and that the environment alternative is
+// honoured. An --approvers that parsed correctly and was never read would look
+// identical to one that works, right up until somebody it names is refused.
+func TestRunServeApproverValidation(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		env  string // SWITCHBOARD_APPROVERS; "-" means leave it unset
+		want string
+	}{
+		{
+			name: "a list nobody could match is refused at startup",
+			args: []string{"--approvals", "--approvers", "ana@example.com ben@example.com"},
+			env:  "-",
+			want: "invalid --approvers",
+		},
+		{
+			// Emails against a run that will assert platform IDs. Both halves
+			// are individually valid, which is why nothing else catches it.
+			name: "checked against the caller mode this run uses",
+			args: []string{"--approvals", "--caller-id", "id", "--approvers", "ana@example.com"},
+			env:  "-",
+			want: "invalid --approvers",
+		},
+		{
+			// The env path is the one a Deployment uses, and the one where an
+			// unset ConfigMap key renders as "". It must not mean "everybody".
+			name: "set to nothing in the environment is not the same as unset",
+			args: []string{"--approvals"},
+			env:  "",
+			want: envApprovers,
+		},
+		{
+			name: "read from the environment when the flag is absent",
+			args: []string{"--approvals"},
+			env:  "not-an-email",
+			want: "invalid --approvers",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("SWITCHBOARD_DAEMON_TOKEN", "daemon-token")
+			// Setenv first either way, so the cleanup it registers restores
+			// whatever the developer running this had exported.
+			t.Setenv(envApprovers, tc.env)
+			if tc.env == "-" {
+				os.Unsetenv(envApprovers)
+			}
+			err := runServe(tc.args)
+			if err == nil {
+				t.Fatal("runServe accepted an approver list it cannot honour")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error = %q, want it to mention %q", err, tc.want)
+			}
+		})
+	}
+}

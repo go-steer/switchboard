@@ -203,6 +203,7 @@ apps get no "added to space" event the gateway acts on.
 | Rich blocks look flat | `--slack-rich-blocks` not set, or the payload was rejected and fell back (logged) |
 | Permission buttons click but nothing happens, and no `perms …` line is logged | **Interactivity & Shortcuts** not enabled — Slack is not delivering the press. The agent stays blocked until it is |
 | No permission question ever appears | `--approvals` not set, or the session's agent registered no prompt broker (logged as `session advertised permission prompts but serves none` when the frame and the route disagree) |
+| A listed approver is told **Not an approver** | the log line `press by "…" is not an approver` says what identity actually arrived. If it is a `U0123ABC`, `users.info` is failing for that user — see the `users:read.email` row above — and `--approvers` is keyed by whatever `--caller-id` selects, not by whichever of the two you happened to write down |
 
 ## What is covered without a workspace
 

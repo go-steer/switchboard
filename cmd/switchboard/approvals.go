@@ -36,6 +36,12 @@ import (
 // should not have to name it.
 func (r *Router) setApprovals(c *approval.Client) { r.approvals = c }
 
+// setApprovers narrows who may answer a permission prompt. The zero policy is
+// the open one, so a router nobody calls this on behaves as it did before the
+// setting existed — which is also what the default preserves for a deployment
+// upgrading into it.
+func (r *Router) setApprovers(p approverPolicy) { r.approvers = p }
+
 // watchPermsIfOffered starts this session's permission watcher, at most once.
 //
 // The trigger is the capabilities frame, not the daemon's awaiting_permission
@@ -307,7 +313,111 @@ const (
 	// that took effect.
 	noticeMaybeApplied = "⚠️ The agent took that answer but didn't confirm it. It may already be in force — check the agent rather than pressing again."
 	noticeStalePress   = "⚠️ That question belongs to a session this thread no longer has, so the answer wasn't sent. If the agent is still waiting, it will ask again."
+	// noticeNotApprover is the refusal switchboard makes itself, before the
+	// daemon hears anything. It does not name who may answer instead: the list
+	// is configuration, and reading it back to whoever presses hardest turns a
+	// refusal into a directory.
+	noticeNotApprover = "⛔ **Not an approver** — that answer wasn't sent. Someone on this gateway's approver list has to answer it."
 )
+
+// approversChannel is the --approvers value meaning "anyone who can post here".
+const approversChannel = "channel"
+
+// envApprovers is the environment alternative to --approvers. Named here rather
+// than spelled at the flag, because runServe also has to notice it being set to
+// nothing — which is not the same as it being unset.
+const envApprovers = "SWITCHBOARD_APPROVERS"
+
+// approverPolicy decides whether a press may answer a question at all.
+//
+// The open posture is a value rather than the absence of one, and that is the
+// whole design. "Anyone in the conversation" is a real control, not a hole:
+// channel and space membership is access control the platform already enforces,
+// and a press only ever arrives from somebody the platform rendered the buttons
+// to — there is no path by which a non-member's click reaches this process. What
+// switchboard cannot see is how wide the room is. A public channel is the whole
+// workspace; a Slack Connect channel or a Chat space with external members
+// reaches outside the org; and an AllowAlways press writes a grant that outlives
+// the session that raised it. So the open posture is something an operator
+// spells, and can read back out of the process args, rather than something they
+// arrive at by leaving a flag unset.
+type approverPolicy struct {
+	// allowed is the narrowed set, keyed by the identity switchboard asserts
+	// (chat.CallerMode — an email by default, a platform ID under --caller-id)
+	// and folded to lower case at both ends. Empty is the open posture.
+	allowed map[string]bool
+}
+
+// open reports whether anyone who can post in the conversation may answer.
+func (p approverPolicy) open() bool { return len(p.allowed) == 0 }
+
+// allows reports whether this asserted identity may answer a prompt.
+//
+// An empty caller is refused under a narrowed policy and permitted under an open
+// one, which is the right way round both times: a press switchboard cannot
+// attribute is exactly the press a named list is there to exclude, while under
+// the open posture attribution was never what granted it.
+func (p approverPolicy) allows(caller string) bool {
+	if p.open() {
+		return true
+	}
+	return p.allowed[strings.ToLower(strings.TrimSpace(caller))]
+}
+
+// approverJunk is the punctuation that means an entry was never one identity.
+// A space is the comma somebody forgot, a semicolon is the separator another
+// tool uses, and angle brackets are a mail client's display-name form.
+const approverJunk = " \t<>;"
+
+// parseApprovers validates an --approvers value against the identity the
+// gateway will actually assert.
+//
+// Folded to lower case because an email is not case-sensitive in any deployment
+// this gateway sees, and a list that silently fails to match on capitalisation
+// would fail closed in the least legible way available: the buttons work for
+// nobody and the log says only that somebody is not an approver.
+//
+// Everything else here guards the same failure from the other direction. An
+// unparseable list is not a syntax error — every entry this cannot recognise is
+// simply an identity that will never match, so a stray semicolon, a display
+// name, or a list of emails under --caller-id "id" starts cleanly, announces
+// its approvers, and then refuses all of them forever. Startup is the only
+// place that mismatch is visible, so it is refused here rather than discovered
+// from a thread.
+func parseApprovers(s string, mode chat.CallerMode) (approverPolicy, error) {
+	allowed := make(map[string]bool)
+	channel := false
+	for _, f := range strings.Split(s, ",") {
+		f = strings.ToLower(strings.TrimSpace(f))
+		switch {
+		case f == "":
+			continue
+		case f == approversChannel:
+			channel = true
+			continue
+		case strings.ContainsAny(f, approverJunk):
+			return approverPolicy{}, fmt.Errorf("%q is not one identity: separate approvers with commas", f)
+		case mode == chat.CallerEmail && !strings.Contains(f, "@"):
+			return approverPolicy{}, fmt.Errorf(`%q is not an email, and this gateway asserts emails: list emails, or run --caller-id "id"`, f)
+		case mode == chat.CallerID && strings.Contains(f, "@"):
+			return approverPolicy{}, fmt.Errorf(`%q is an email, and --caller-id "id" asserts platform IDs: list platform IDs, or drop --caller-id`, f)
+		}
+		allowed[f] = true
+	}
+	switch {
+	case channel && len(allowed) > 0:
+		// Refused rather than resolved either way: read as "these people plus
+		// everyone" it is a list that narrows nothing, and read as a name it is
+		// an approver called "channel". Neither is worth guessing at on an
+		// authorization setting.
+		return approverPolicy{}, errors.New(`"channel" cannot be combined with named approvers`)
+	case channel:
+		return approverPolicy{}, nil
+	case len(allowed) == 0:
+		return approverPolicy{}, errors.New(`names nobody: pass "channel" to let anyone in the conversation answer`)
+	}
+	return approverPolicy{allowed: allowed}, nil
+}
 
 // promptDetailLimit bounds the agent-controlled detail put in a message. The
 // command or path is the whole substance of the question, so this is generous;
@@ -374,6 +484,15 @@ func (r *Router) HandlePress(ctx context.Context, p chat.Press) error {
 		// doing something unexpected. Refusing beats guessing: the nearest
 		// wrong guess is an approval.
 		return fmt.Errorf("press on %s carried an answer that is not a decision: %q", p.Conversation, p.Option)
+	}
+	if !r.approvers.allows(p.Caller) {
+		// Refused here, before the prompt is even located: a press switchboard
+		// will not relay should not get to learn whether the question is still
+		// live, or which session this thread is on. Not silent, though, and the
+		// buttons stay up — somebody else in the room may be allowed to answer,
+		// and a press that vanishes reads as one that worked.
+		r.logf("perms %s: press by %q is not an approver", p.Conversation, p.Caller)
+		return r.surfaceNotice(ctx, p.Conversation, noticeNotApprover)
 	}
 	sess, promptID, ok := splitDecisionRef(p.DecisionID)
 	if !ok {

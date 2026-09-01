@@ -1501,3 +1501,265 @@ func TestAnAnswerThatMayHaveLandedIsNotReportedAsOneThatDidNot(t *testing.T) {
 		})
 	}
 }
+
+// --------------------------------------------------------------------------
+// Who may answer (#65)
+// --------------------------------------------------------------------------
+
+// The shipped default. An operator who upgrades into the setting without
+// naming it keeps exactly the behaviour they had, which is the whole reason
+// "channel" is a value rather than the absence of one.
+func TestByDefaultAnyoneInTheConversationMayAnswer(t *testing.T) {
+	d := newPermsDaemon(t)
+	r, _, _ := permsRouter(t, d)
+	e := liveEntry(r, "C1:1")
+
+	p := askedPress(e, "pr1", "allow-once", "q")
+	p.Caller = "a-stranger@example.com"
+	if err := r.HandlePress(context.Background(), p); err != nil {
+		t.Fatalf("HandlePress: %v", err)
+	}
+	if len(d.posts()) != 1 {
+		t.Fatalf("the default policy sent %d answers to the daemon, want 1", len(d.posts()))
+	}
+}
+
+// The refusal switchboard makes itself. The press must not reach the daemon at
+// all — this is the check that makes --approvers a control rather than a label.
+func TestAPressBySomebodyNotOnTheListAnswersNothing(t *testing.T) {
+	d := newPermsDaemon(t)
+	r, fake, logs := permsRouter(t, d)
+	r.setApprovers(mustApprovers(t, "ana@example.com"))
+	e := liveEntry(r, "C1:1")
+
+	p := askedPress(e, "pr1", "allow-always", "q")
+	p.Caller = "ben@example.com"
+	if err := r.HandlePress(context.Background(), p); err != nil {
+		t.Fatalf("HandlePress: %v", err)
+	}
+	if n := len(d.posts()); n != 0 {
+		t.Fatalf("a press by a non-approver reached the daemon %d time(s)", n)
+	}
+	if got := drainNotice(t, fake); got != noticeNotApprover {
+		t.Errorf("the thread was told %q, want %q", got, noticeNotApprover)
+	}
+	// Somebody tried to approve a mutation and was not allowed to. The thread
+	// notice tells the presser; this is the half an operator can go back and
+	// read, and it names who it was.
+	if !hasLine(logs(), `press by "ben@example.com" is not an approver`) {
+		t.Errorf("a refused press was not logged; got %q", logs())
+	}
+	// The buttons stay up: somebody else in the room may be allowed to answer,
+	// and taking the question down would strand the agent on it.
+	if n := len(fake.updatedCalls()); n != 0 {
+		t.Errorf("a refused press rewrote the question %d time(s)", n)
+	}
+}
+
+func TestAPressBySomebodyOnTheListIsAnswered(t *testing.T) {
+	d := newPermsDaemon(t)
+	r, _, _ := permsRouter(t, d)
+	r.setApprovers(mustApprovers(t, "ana@example.com,ben@example.com"))
+	e := liveEntry(r, "C1:1")
+
+	p := askedPress(e, "pr1", "deny", "q")
+	p.Caller = "ben@example.com"
+	if err := r.HandlePress(context.Background(), p); err != nil {
+		t.Fatalf("HandlePress: %v", err)
+	}
+	if len(d.posts()) != 1 {
+		t.Fatalf("an approver's press sent %d answers to the daemon, want 1", len(d.posts()))
+	}
+}
+
+// A list that failed to match on capitalisation would fail closed in the least
+// legible way there is: the buttons work for nobody, and the log says only that
+// somebody is not an approver.
+func TestTheListMatchesWithoutRegardToCase(t *testing.T) {
+	d := newPermsDaemon(t)
+	r, _, _ := permsRouter(t, d)
+	r.setApprovers(mustApprovers(t, "  Ana@Example.COM , ben@example.com "))
+	e := liveEntry(r, "C1:1")
+
+	p := askedPress(e, "pr1", "deny", "q")
+	p.Caller = "ANA@example.com"
+	if err := r.HandlePress(context.Background(), p); err != nil {
+		t.Fatalf("HandlePress: %v", err)
+	}
+	if len(d.posts()) != 1 {
+		t.Fatal("an approver whose address differed only in case was refused")
+	}
+}
+
+// Under --caller-id "id" the asserted identity is a platform ID, so that is what
+// the list holds — and parseApprovers is what stops the two from disagreeing.
+func TestTheListIsKeyedByWhateverIdentityIsAsserted(t *testing.T) {
+	policy, err := parseApprovers("U0123ABC,U0456DEF", chat.CallerID)
+	if err != nil {
+		t.Fatalf("parseApprovers: %v", err)
+	}
+	d := newPermsDaemon(t)
+	r, fake, _ := permsRouter(t, d)
+	r.setApprovers(policy)
+	e := liveEntry(r, "C1:1")
+
+	p := askedPress(e, "pr1", "deny", "q")
+	p.Caller = "U0456DEF"
+	if err := r.HandlePress(context.Background(), p); err != nil {
+		t.Fatalf("HandlePress: %v", err)
+	}
+	if len(d.posts()) != 1 {
+		t.Fatalf("an approver named by platform ID sent %d answers, want 1", len(d.posts()))
+	}
+
+	p = askedPress(e, "pr2", "deny", "q")
+	p.Caller = "U0999ZZZ"
+	if err := r.HandlePress(context.Background(), p); err != nil {
+		t.Fatalf("HandlePress: %v", err)
+	}
+	if n := len(d.posts()); n != 1 {
+		t.Errorf("a press by an unlisted platform ID sent an answer (%d total)", n)
+	}
+	if got := drainNotice(t, fake); got != noticeNotApprover {
+		t.Errorf("the thread was told %q, want %q", got, noticeNotApprover)
+	}
+}
+
+// A press switchboard cannot attribute is exactly the press a named list exists
+// to exclude. Under the open posture the same press is fine, because attribution
+// was never what granted it.
+func TestAnUnattributablePressIsRefusedOnlyByANamedList(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		policy  approverPolicy
+		answers int
+	}{
+		{"named list", mustApprovers(t, "ana@example.com"), 0},
+		{"channel", approverPolicy{}, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := newPermsDaemon(t)
+			r, _, _ := permsRouter(t, d)
+			r.setApprovers(tc.policy)
+			e := liveEntry(r, "C1:1")
+
+			p := askedPress(e, "pr1", "deny", "q")
+			p.Caller = ""
+			if err := r.HandlePress(context.Background(), p); err != nil {
+				t.Fatalf("HandlePress: %v", err)
+			}
+			if n := len(d.posts()); n != tc.answers {
+				t.Errorf("an unattributed press sent %d answers, want %d", n, tc.answers)
+			}
+		})
+	}
+}
+
+// The refusal comes before the prompt is located, so a press this gateway will
+// not relay never learns whether the question is still live or which session
+// the thread is on.
+func TestARefusedPressIsNotToldWhetherTheQuestionIsStillLive(t *testing.T) {
+	d := newPermsDaemon(t)
+	r, fake, _ := permsRouter(t, d)
+	r.setApprovers(mustApprovers(t, "ana@example.com"))
+
+	// No session bound at all: an approver would be told so.
+	if err := r.HandlePress(context.Background(), chat.Press{
+		Conversation: "C1:gone", Caller: "ben@example.com", DecisionID: ref("pr1"), Option: "deny",
+	}); err != nil {
+		t.Fatalf("HandlePress: %v", err)
+	}
+	if got := drainNotice(t, fake); got != noticeNotApprover {
+		t.Errorf("a refused press was told %q, want %q", got, noticeNotApprover)
+	}
+}
+
+func TestParseApprovers(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		in      string
+		mode    chat.CallerMode
+		wantErr bool
+		open    bool
+		allows  []string
+		refuses []string
+	}{
+		{name: "channel", in: "channel", open: true, allows: []string{"anyone@example.com", ""}},
+		{name: "channel is not case sensitive either", in: "Channel", open: true},
+		{name: "one name", in: "ana@example.com", allows: []string{"ana@example.com"}, refuses: []string{"ben@example.com"}},
+		{
+			name:    "several, with the spacing a human types",
+			in:      "ana@example.com, ben@example.com ,cat@example.com",
+			allows:  []string{"ana@example.com", "ben@example.com", "cat@example.com"},
+			refuses: []string{"dan@example.com"},
+		},
+		{name: "platform ids", in: "U0123ABC,U0456DEF", mode: chat.CallerID, allows: []string{"U0123ABC", "u0456def"}},
+		{name: "chat resource names", in: "users/1234,users/5678", mode: chat.CallerID, allows: []string{"users/1234"}},
+		// Trailing separators are typing, not members. What must not happen is
+		// the empty field becoming a key: "" is what an unattributable press
+		// carries, so an approver spelled "" would admit exactly those.
+		{name: "trailing comma is a typo, not a member", in: "ana@example.com,", allows: []string{"ana@example.com"}, refuses: []string{""}},
+		{name: "leading comma likewise", in: ",ana@example.com", allows: []string{"ana@example.com"}, refuses: []string{""}},
+		// The two ways of reading this disagree about everything that matters:
+		// a list that narrows nothing, or an approver named "channel".
+		{name: "channel mixed with names", in: "channel,ana@example.com", wantErr: true},
+		{name: "names mixed with channel", in: "ana@example.com,channel", wantErr: true},
+		// ...but "channel," names nobody else, so it is a trailing comma like
+		// any other and must not be reported as a mix.
+		{name: "channel with a trailing comma", in: "channel,", open: true},
+		// Refused rather than silently opened: --approvers= is a mistake, and
+		// the mistake must not resolve to "everybody".
+		{name: "empty", in: "", wantErr: true},
+		{name: "only separators", in: " , , ", wantErr: true},
+		// Every one of these parses happily as "one identity nobody has", which
+		// is a total approval outage that starts clean and announces approvers.
+		{name: "spaces instead of commas", in: "ana@example.com ben@example.com", wantErr: true},
+		{name: "semicolons instead of commas", in: "ana@example.com;ben@example.com", wantErr: true},
+		{name: "a mail client's display-name form", in: "Ana Smith <ana@example.com>", wantErr: true},
+		// The list has to be keyed by the identity the gateway asserts, and the
+		// only moment that mismatch is visible is startup.
+		{name: "emails under --caller-id id", in: "ana@example.com", mode: chat.CallerID, wantErr: true},
+		{name: "platform ids under --caller-id email", in: "U0123ABC", wantErr: true},
+		// The mode check must not swallow "channel", which is neither.
+		{name: "channel under --caller-id id", in: "channel", mode: chat.CallerID, open: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mode := tc.mode
+			if mode == "" {
+				mode = chat.CallerEmail
+			}
+			got, err := parseApprovers(tc.in, mode)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("parseApprovers(%q, %q) was accepted, want an error", tc.in, mode)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseApprovers(%q, %q): %v", tc.in, mode, err)
+			}
+			if got.open() != tc.open {
+				t.Errorf("parseApprovers(%q).open() = %v, want %v", tc.in, got.open(), tc.open)
+			}
+			for _, who := range tc.allows {
+				if !got.allows(who) {
+					t.Errorf("parseApprovers(%q) refuses %q", tc.in, who)
+				}
+			}
+			for _, who := range tc.refuses {
+				if got.allows(who) {
+					t.Errorf("parseApprovers(%q) allows %q", tc.in, who)
+				}
+			}
+		})
+	}
+}
+
+func mustApprovers(t *testing.T, s string) approverPolicy {
+	t.Helper()
+	p, err := parseApprovers(s, chat.CallerEmail)
+	if err != nil {
+		t.Fatalf("parseApprovers(%q): %v", s, err)
+	}
+	return p
+}

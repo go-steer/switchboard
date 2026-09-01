@@ -206,10 +206,56 @@ up recording "no longer pending" over a decision that took effect — so the
 thread is told to go and look at the agent instead.
 
 Relaying is off unless `--approvals` is set, and that default is not caution
-about a young feature. Turning it on means anyone who can post in a conversation
-can answer its permission prompts, and some of those answers — `allow-always`
-above all — outlive the request that raised them. That is a grant an operator
-makes deliberately, per deployment, with the channel's membership in mind.
+about a young feature. Turning it on means, by default, that anyone who can post
+in a conversation can answer its permission prompts, and some of those answers —
+`allow-always` above all — outlive the request that raised them. That is a grant
+an operator makes deliberately, per deployment, with the channel's membership in
+mind.
+
+Membership is the reason the default is defensible rather than lax. A press only
+ever arrives from somebody the platform rendered the buttons to, over a
+connection the platform authenticated, so channel membership is access control
+already enforced upstream and switchboard needs no membership call to lean on
+it. What it cannot see is how wide the room is: a public channel is the whole
+workspace, and a Slack Connect channel reaches past the org entirely.
+`--approvers` is the narrowing — a comma-separated list of the identities
+switchboard asserts, matched case-insensitively against `Press.Caller`, the same
+string that goes out as `X-Asserted-Caller`. Its default is the literal
+`channel`, so the open posture is a value an operator can spell rather than an
+omission nobody notices.
+
+A list that cannot match is the failure mode worth designing against, because it
+is indistinguishable at runtime from a list that is working: every entry the
+gateway will never see is simply an approver who never presses, so the deployment
+starts cleanly, announces its approvers, and refuses all of them. So the list is
+validated at startup against the caller mode the same run selected — emails under
+`--caller-id "id"` are refused, as are platform IDs under `email`, along with the
+punctuation that means an entry was never one identity. `SWITCHBOARD_APPROVERS`
+set to the empty string is refused for the same reason and not read as unset:
+that is how an absent ConfigMap key renders, and resolving it to `channel` would
+widen the grant at the moment somebody was trying to set it.
+
+The same reasoning reaches back into the Slack adapter. `resolveCaller` falls
+back to the raw user ID when `users.info` fails, which used to cost an odd audit
+identity and now decides an authorization question, so that fallback is no longer
+cached: one rate-limit response would otherwise pin an approver to their user ID
+for the life of the process.
+
+The gate runs in `HandlePress` before the prompt is looked up, so a press this
+gateway will not relay cannot learn whether the question is still live or which
+session the thread holds. A refusal is posted, not swallowed — a press that
+vanishes reads as one that worked — and the buttons are left standing, because
+someone else in the room may be entitled to answer. There is no value meaning
+"nobody": leaving `--approvals` off already means that. Being in the router
+rather than an adapter, it is a Slack control only for as long as Slack is the
+only platform delivering a press: the add-on framework routes no click trigger
+to a Chat app (§3.3), so `--approvers` narrows nothing there until the HTTP
+interaction endpoint lands (#29), and covers it with no further work when it
+does.
+
+None of this is the backend's authorization moving here. Switchboard is gating a
+surface it invented, on the identity it already asserts; core-agent still decides
+what that caller may *do* with the decision, and is free to refuse it again.
 
 ## 3. Architecture
 
