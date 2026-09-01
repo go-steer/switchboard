@@ -106,8 +106,16 @@ Cards here are therefore output only: the welcome names the progress values in
 its text and you type the one you want. An `openLink` button should be fine,
 since it sends no event to the app, but that is untested here. Updating a card
 means patching the whole hosting message, and a patch is idempotent so a
-redelivery is harmless. Clickable controls need the HTTP interaction endpoint
-tracked in [#29](https://github.com/go-steer/switchboard/issues/29).
+redelivery is harmless.
+
+The missing clicks are the **add-on** dialect's limit, not Pub/Sub's — a legacy
+Chat-API app does receive them over the same transport, which is known from
+operating Chat rather than tested here as #28's half was. Switchboard still
+renders no button there: add-ons are where Google is taking Chat apps, the
+conversion is one-way, and the decoder normalizes both dialects away before
+anything downstream could tell them apart, so a legacy-only button is not
+expressible anyway. Clickable controls need the HTTP interaction endpoint tracked
+in [#29](https://github.com/go-steer/switchboard/issues/29).
 
 #### App commands
 

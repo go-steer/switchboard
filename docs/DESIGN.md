@@ -526,13 +526,13 @@ no-public-ingress, distroless posture. Two costs come with it:
 
 - **Nothing that needs a response channel.** A pulled event has none, so the app
   cannot answer an interaction — it can only act and then patch. That rules out
-  dialogs. **Callback buttons** are ruled out by something worse, and not by
-  this: a click needs no response channel — patching the hosting message
-  afterwards would have answered it — but it is **never delivered**. An add-on's
-  Connection settings enumerate exactly four routable triggers (added-to-space,
-  message, removed-from-space, app command), and a click is not among them; the
-  subscription receives nothing and the user sees "Switchboard is unable to
-  process your request".
+  dialogs. **Callback buttons** are ruled out too, but by something else, and the
+  difference is what decides where the fix has to live: a click needs no response
+  channel — patching the hosting message afterwards would have answered it — it
+  is simply **never delivered**. An add-on's Connection settings enumerate
+  exactly four routable triggers (added-to-space, message, removed-from-space,
+  app command), and a click is not among them; the subscription receives nothing
+  and the user sees "Switchboard is unable to process your request".
   Established by live testing,
   [#28](https://github.com/go-steer/switchboard/issues/28). So no card the
   gateway sends carries one — nor any other widget a user can operate. The
@@ -548,12 +548,31 @@ no-public-ingress, distroless posture. Two costs come with it:
   Delivery may be retried, so a patch is written to be idempotent — the same
   event twice leaves the card in the same end state.
 
+**The callback-button limit belongs to the add-on framework, not to Pub/Sub.**
+The legacy Chat-API dialect delivers `CARD_CLICKED` over the same transport —
+known from operating the platform rather than from a test here, so it carries
+none of #28's provenance and should not be read as if it did. Google's list of
+what a Pub/Sub app gives up names dialogs and synchronous single-card updates
+and does not mention delivery, which is consistent with that but does not on its
+own establish it.
+
+So there is a configuration in which buttons work today, and switchboard does
+not take it. Google is migrating Chat apps onto add-ons, converting an app is
+one-way, and buying interactivity by staying on the framework being retired
+trades a durable limitation for a dated one. Nor could the choice be made per
+event: the decoder normalizes both dialects into one `inbound` and the rest of
+the package never learns which one a turn arrived in (`event.go`), while an
+agent-initiated post has no inbound event to infer a dialect from at all — a
+button that renders only for legacy is not something this design can express.
+Legacy events therefore stay *decodable*, since apps that have not converted are
+still out there and the split costs one normalizer, but the add-on dialect is
+what this gateway is designed against.
+
 Callback buttons are therefore what an **HTTP interaction endpoint** buys
-([#29](https://github.com/go-steer/switchboard/issues/29)), not something Pub/Sub
-gives up gracefully. Only the *rendering* of a button was dropped; the decode and
-dispatch path for a click is kept and still tested, since that is the ingress it
-is waiting for, and because the legacy Chat-API dialect over Pub/Sub is expected
-— but not confirmed — to be subject to the same limit.
+([#29](https://github.com/go-steer/switchboard/issues/29)). Only the *rendering*
+of a button was dropped, and dropped for both dialects, so the decode and
+dispatch path is unreached in either one today; it is kept and still tested
+because #29 is the ingress it is waiting for.
 
 When a click does arrive, add-ons never report an **invoked function name** back
 to the app, so a button's identity travels in `action.parameters` — which the
