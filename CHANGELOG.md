@@ -7,6 +7,48 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- Gateway config file (#71): `-c` / `--config` (or `$SWITCHBOARD_CONFIG`) reads
+  every setting from JSON, with precedence **explicit flag > `$SWITCHBOARD_*` >
+  file > built-in default**. Twenty-three flags had grown nine environment
+  alternatives one at a time, so a Deployment set some settings under `args:`
+  and others under `env:` with no rule explaining which; the file gives every
+  setting one home. But the reason it exists is the two things a flag cannot do
+  at all: hold structure (`ingress_allow` and `googlechat_commands` stop being
+  lists and maps flattened into one string), and scope a setting to a channel.
+  - **Per-channel settings.** A `channels` block keyed by the platform's channel
+    ID scopes `approvals`, `approvers`, `progress_mode` and `show_usage`, over a
+    `defaults` block that scopes them process-wide. #65 wanted "the SRE channel
+    approves prod, a scratch channel approves nothing" and shipped global
+    because a flag has nowhere to put the channel. A block outranks even a flag
+    you passed — the flag says "everywhere" and the block says "here" — and a
+    key that is not the shape of a channel ID on the platform being bridged is a
+    startup error, since `"#sre"` is the obvious thing to write and would match
+    nothing while reading as a room that had been narrowed.
+  - **A channel's approver list replaces the wider one** rather than extending
+    it: the block answers "who may approve here", and the additive reading
+    cannot express *fewer* than the default at all. So a channel can widen as
+    well as narrow — `["channel"]` puts a room back to anyone who can post in it
+    — and the startup banner counts both postures rather than implying the
+    default is a floor.
+  - One resolver now serves every channel-scopable setting. Before this, the
+    progress mode had `progressFor` and everything else was read straight off
+    the router, which is the asymmetry that would have made the third scoped
+    setting invent a third lookup.
+  - **Credentials are refused, not documented against.** A key that reads like a
+    credential, or a value that looks like a live one (`xoxb-…`, a PEM header),
+    stops the run; tokens are named via `*_token_env` and held in the
+    environment, as they already were for flags. A config file is the artifact
+    designed to be checked in, which is why this is enforced.
+  - Unknown keys are refused, a `--config` naming a file that is not there is a
+    startup error, and there is no auto-discovery of a file in the working
+    directory. All three are the same failure class: a config that looks applied
+    and is not — and the version of it that matters is a narrowed approver list
+    quietly becoming an open one.
+  - Startup says which file it read and which channels it configured, and a
+    `progress` command that contradicts a channel's `progress_mode` logs the
+    divergence: a chat command is the one setting reachable from inside a room,
+    so the account of why a channel stopped matching its own block should not be
+    a message that has scrolled away.
 - `--approvals`: relay a blocked tool call into the thread as a question with
   buttons, and send back what someone presses (#40). A permission prompt that
   used to park a turn until whoever started it noticed a console now reaches the

@@ -352,17 +352,21 @@ func formatElapsed(d time.Duration) string {
 // per-turn) is what keeps the daemon from replaying prior turns on every
 // message.
 type Router struct {
-	client   *daemon.Client
-	out      sender
-	progress ProgressMode
-	metrics  *metrics
-	logf     func(string, ...any)
+	client  *daemon.Client
+	out     sender
+	metrics *metrics
+	logf    func(string, ...any)
 
-	// showUsage turns on the per-turn tokens/cost footer. Off unless the
-	// operator asked for it: what a turn cost is spend data, and a shared
-	// channel is the wrong place to disclose it by default. Set once at
-	// startup via setShowUsage, before the adapter is running.
-	showUsage bool
+	// defaults are the channel-scopable settings as they apply to a channel
+	// with nothing said about it, and byChannel is what a config file said
+	// about the ones it named (#71). Both are written once at startup — by
+	// NewRouter and the setters below — before the adapter is dispatching, and
+	// read through settingsFor from then on. Neither is guarded: nothing
+	// mutates them after startup, and the one setting that does change at
+	// runtime (the progress mode, via a chat command) lives in overrides,
+	// which is.
+	defaults  channelSettings
+	byChannel map[string]channelSettings
 
 	// Reconnect backoff bounds for the SSE relay; defaulted in NewRouter and
 	// overridable in tests so a reconnect can be exercised without real waits.
@@ -399,21 +403,47 @@ type Router struct {
 	reserving map[string]string
 
 	// omu guards overrides, the per-channel progress-mode overrides set at
-	// runtime via chat commands (HandleCommand). A channel absent from the map
-	// uses the process default (r.progress); progressFor resolves the two.
+	// runtime via chat commands (HandleCommand). This is the narrowest of the
+	// three layers settingsFor resolves and the only one reachable at runtime;
+	// a channel absent from the map falls back to its byChannel block, or to
+	// defaults.
 	omu       sync.Mutex
 	overrides map[string]ProgressMode
 
 	// approvals relays the daemon's permission prompts into the thread and
-	// sends back what someone decided. Nil leaves the feature off entirely —
-	// see setApprovals. Set once at startup, before dispatch begins, like
-	// showUsage.
+	// sends back what someone decided. Nil leaves the feature off for every
+	// channel, whatever a config file says — see setApprovals. Set once at
+	// startup, before dispatch begins.
+	//
+	// Whether a given channel uses it is channelSettings.approvals: the client
+	// is one connection to one daemon and cannot be per-channel, while the
+	// decision to put prompts in front of a particular room can be.
 	approvals *approval.Client
+}
 
-	// approvers is who may answer one of those prompts. The zero value lets
-	// anyone who can post in the conversation answer, which is the shipped
-	// default — see approverPolicy for why that is a posture rather than an
-	// omission. Set once at startup alongside approvals.
+// channelSettings is every gateway setting that may differ between channels,
+// resolved for one of them. It exists so that adding the next such setting is
+// a field here rather than a third bespoke lookup: before #71 the progress mode
+// had progressFor and everything else was read straight off Router, which is
+// exactly the asymmetry that made "the SRE channel approves prod, a scratch
+// channel approves nothing" impossible to express.
+type channelSettings struct {
+	// progress is the long-turn feedback mode.
+	progress ProgressMode
+
+	// approvals is whether permission prompts are put into this channel at
+	// all. False leaves them where they were, waiting on a console.
+	approvals bool
+
+	// showUsage turns on the per-turn tokens/cost footer. Off unless the
+	// operator asked for it: what a turn cost is spend data, and a shared
+	// channel is the wrong place to disclose it by default.
+	showUsage bool
+
+	// approvers is who may answer one of this channel's prompts. The zero
+	// value lets anyone who can post in the conversation answer, which is the
+	// shipped default — see approverPolicy for why that is a posture rather
+	// than an omission.
 	approvers approverPolicy
 }
 
@@ -1166,7 +1196,7 @@ func NewRouter(client *daemon.Client, out sender, progress ProgressMode, m *metr
 	return &Router{
 		client:       client,
 		out:          out,
-		progress:     progress,
+		defaults:     channelSettings{progress: progress},
 		metrics:      m,
 		logf:         logf,
 		minBackoff:   reconnectMinBackoff,
@@ -1182,29 +1212,64 @@ func NewRouter(client *daemon.Client, out sender, progress ProgressMode, m *metr
 	}
 }
 
-// setShowUsage turns the per-turn usage footer on. Unlike the progress mode
-// it is not a runtime, per-channel setting — disclosing spend is an operator
-// decision, not something a channel member should be able to flip — so it is
-// set once at startup, before the adapter begins dispatching.
-func (r *Router) setShowUsage(on bool) { r.showUsage = on }
+// setShowUsage turns the per-turn usage footer on for every channel that does
+// not say otherwise. Unlike the progress mode it is not something a channel
+// member can flip at runtime — disclosing spend is an operator decision — so it
+// is set once at startup, before the adapter begins dispatching.
+func (r *Router) setShowUsage(on bool) { r.defaults.showUsage = on }
 
-// progressFor resolves the progress mode in effect for a channel: its runtime
-// override (set via a chat command) if any, else the process default. An empty
-// channel has no per-channel override and always resolves to the default.
-func (r *Router) progressFor(channel string) ProgressMode {
-	if channel != "" {
-		r.omu.Lock()
-		m, ok := r.overrides[channel]
-		r.omu.Unlock()
-		if ok {
-			return m
-		}
+// setChannels installs the per-channel settings a config file named (#71),
+// already resolved against the defaults: an entry here is the whole answer for
+// its channel, not a delta to merge at read time. Keyed by the channel ID an
+// adapter reports in Message.Channel.
+func (r *Router) setChannels(m map[string]channelSettings) { r.byChannel = m }
+
+// settingsFor resolves the settings in effect for a channel.
+//
+// Three layers, narrowest first: a runtime progress-mode override set by a chat
+// command in that channel, then the config file's entry for it, then the
+// process-wide defaults. An empty channel — an ingress post with no channel to
+// speak of — has neither of the first two and always resolves to the defaults.
+//
+// The runtime override applies last and only to the progress mode, which is the
+// only setting a chat command can change. That ordering is deliberate for the
+// others: a config file saying who may approve in a room must not be reachable
+// from inside the room.
+func (r *Router) settingsFor(channel string) channelSettings {
+	s := r.defaults
+	if channel == "" {
+		return s
 	}
-	return r.progress
+	if cs, ok := r.byChannel[channel]; ok {
+		s = cs
+	}
+	r.omu.Lock()
+	m, ok := r.overrides[channel]
+	r.omu.Unlock()
+	if ok {
+		s.progress = m
+	}
+	return s
+}
+
+// progressFor is settingsFor narrowed to the progress mode, which is by far its
+// most frequent caller: a turn in flight resolves it on every tick.
+func (r *Router) progressFor(channel string) ProgressMode {
+	return r.settingsFor(channel).progress
 }
 
 // setProgress records a per-channel progress-mode override.
+//
+// A command that overrides a mode the config file set for this channel says so
+// in the log. The file is the operator's statement of intent and the command is
+// somebody in a room quietly contradicting it, so the divergence should be
+// findable later from outside the room — otherwise the only account of why a
+// channel stopped matching its own config block is a chat message that has
+// scrolled away (#71).
 func (r *Router) setProgress(channel string, mode ProgressMode) {
+	if cs, ok := r.byChannel[channel]; ok && cs.progress != mode {
+		r.logf("progress: channel %s overridden to %q, config file says %q", channel, mode, cs.progress)
+	}
 	r.omu.Lock()
 	r.overrides[channel] = mode
 	r.omu.Unlock()
@@ -1711,7 +1776,7 @@ func (r *Router) deliverText(ctx context.Context, e *sessionEntry, conv, text st
 		r.clearProgress(ctx, e, conv)
 		r.metrics.recordTurnRelayed()
 	}
-	if !r.showUsage {
+	if !r.settingsFor(e.channel).showUsage {
 		usage = nil
 	}
 	_, err := r.out.Send(ctx, chat.Reply{Conversation: conv, Text: text, Usage: usage})

@@ -152,6 +152,93 @@ markdown from the agent does not arrive with its delimiters showing.
 Full setup, card-preview and event-replay testing, and a demo script:
 [docs/googlechat-setup.md](docs/googlechat-setup.md).
 
+### Config file
+
+Every setting below is a flag, and every flag can also be written into a JSON
+file:
+
+```sh
+switchboard serve -c /etc/switchboard/config.json
+# --config is the same setting; $SWITCHBOARD_CONFIG names the path too.
+```
+
+**Precedence, narrowest first: an explicit flag, then `$SWITCHBOARD_*`, then the
+file, then the built-in default.** "Explicit" means the flag was on the command
+line — passing a flag its default value still beats the file, because you said
+it.
+
+**One exception, and it is the point of the file: a `channels` block beats
+everything, including a flag you passed.** The flag says "everywhere" and the
+block says "here", and the narrower scope is the one that was meant. So
+`--approvers ana@example.com` with a block naming `ben@example.com` in
+`C0SRE0000` gives Ana every channel except that one, and Ben that one.
+
+Two things a flag cannot do are the reason the file exists. It can hold
+structure, so the lists and maps that flags flatten into one string are written
+as lists and maps. And it can **scope a setting to a channel**:
+
+```json
+{
+  "daemon_url": "http://127.0.0.1:7777",
+  "platform": "slack",
+  "slack_bot_token_env": "TEAM_SLACK_BOT_TOKEN",
+  "ingress_allow": ["C0123ABCD", "C0456EFGH:1723742401.001900"],
+  "googlechat_commands": {"1": "progress", "2": "help"},
+
+  "defaults": {
+    "progress_mode": "indicator",
+    "approvals": false
+  },
+  "channels": {
+    "C0SRE0000": {
+      "name": "#sre",
+      "approvals": true,
+      "approvers": ["ana@example.com", "ben@example.com"],
+      "progress_mode": "status"
+    },
+    "C0SCRATCH": {
+      "name": "#scratch",
+      "approvals": false,
+      "show_usage": true
+    }
+  }
+}
+```
+
+`channels` is keyed by the **channel ID** the platform reports — a Slack
+`C0123ABCD`, a Chat `spaces/AAAA` — not by name: resolving a name costs an API
+call and a scope switchboard does not otherwise need. A key that is not that
+shape is a startup error, because `"#sre"` is the obvious thing to write and
+would match nothing while looking like it had narrowed the channel. `name` is a
+comment for whoever reads the file next, since JSON has none; nothing reads it.
+A block
+inherits every setting it does not mention from `defaults`, and `defaults`
+inherits from the flags. Four settings are scopable: `approvals`, `approvers`,
+`progress_mode`, `show_usage`. The two render modes (`slack_rich_blocks`,
+`googlechat_cards`) are process-wide — the adapter reads them when it is built,
+before there is a channel to ask about.
+
+Four deliberate refusals, all of the same kind: a config that looks applied and
+is not.
+
+- **A `channels` key that is not a channel ID is refused** — see above.
+- **A `--config` naming a file that is not there is a startup error**, not a
+  fallback to the defaults. Starting anyway is how a narrowed approver list
+  quietly becomes an open one.
+- **An unknown key is refused.** A misspelled `approver` that decodes to nothing
+  starts cleanly, announces settings that look right, and does nothing.
+- **A credential in the file is refused.** Tokens are named, never held —
+  `"slack_bot_token_env": "TEAM_SLACK_BOT_TOKEN"`, with the value in the
+  environment. A key that reads like a credential, or a value that looks like a
+  live one (`xoxb-…`, a PEM header), stops the run. A config file is the artifact
+  designed to be checked in, which is exactly why this is enforced rather than
+  documented.
+
+There is **no auto-discovery**: switchboard reads a file only when told to.
+core-agent picks up `.agents/config.json` from the working directory, which is a
+convenience for a CLI; a long-lived gateway changing who may approve a production
+change because of a file that appeared beside it is not.
+
 ### Long-turn feedback
 
 While an agent turn runs, switchboard can show liveness. `--progress-mode` sets
@@ -441,6 +528,29 @@ wrong place to publish who can approve production changes:
 
 ```
 2026-08-31T09:00:00.000Z switchboard: approvals: permission prompts go to the conversation, and 2 named approver(s) may answer them
+```
+
+A config file can name approvers **per channel**, which is what the setting
+wanted from the start — the room the grant is wide in is rarely the room it is
+narrow in:
+
+```json
+"channels": {
+  "C0SRE0000": {"approvals": true, "approvers": ["ana@example.com"]},
+  "C0SCRATCH": {"approvals": false}
+}
+```
+
+A channel's list **replaces** the wider one rather than adding to it: the block
+answers "who may approve here", and the additive reading has no way to say
+*fewer* than the default at all. The corollary is that a channel can widen as
+well as narrow — `"approvers": ["channel"]` puts a room back to anyone who can
+post in it — so a narrowed default is not a floor. Startup says so, counted
+rather than named:
+
+```
+2026-08-31T09:00:00.000Z switchboard: approvals: permission prompts go to the conversation, and 2 named approver(s) may answer them
+2026-08-31T09:00:00.000Z switchboard: approvals: 1 configured channel(s) let anyone answer, 3 name their own approvers
 ```
 
 A list is checked at startup against the identity this run will actually assert,
