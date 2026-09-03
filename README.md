@@ -955,7 +955,7 @@ Images are published to **GHCR** and are multi-arch
 ```sh
 docker pull ghcr.io/go-steer/switchboard:latest        # newest release
 docker pull ghcr.io/go-steer/switchboard:main          # tip of main (every merged PR)
-docker run --rm -e SWITCHBOARD_DAEMON_TOKEN ghcr.io/go-steer/switchboard:0.1.0 \
+docker run --rm -e SWITCHBOARD_DAEMON_TOKEN ghcr.io/go-steer/switchboard:0.3.0 \
   --daemon-url http://core-agent:7777
 ```
 
@@ -981,7 +981,7 @@ Every image is signed with **Sigstore keyless** (cosign, GitHub OIDC → Fulcio,
 logged in Rekor). Verify before deploying:
 
 ```sh
-cosign verify ghcr.io/go-steer/switchboard:v0.1.0 \
+cosign verify ghcr.io/go-steer/switchboard:0.3.0 \
   --certificate-identity-regexp '^https://github.com/go-steer/switchboard' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```

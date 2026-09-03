@@ -29,7 +29,9 @@ name: Release images
 # Images are signed via Sigstore keyless (GitHub Actions OIDC → Fulcio
 # short-lived cert; signature recorded in Rekor). Verify with:
 #
-#   cosign verify ghcr.io/go-steer/switchboard:vX.Y.Z \
+# (X.Y.Z, not vX.Y.Z — the semver handler below strips the `v`.)
+#
+#   cosign verify ghcr.io/go-steer/switchboard:X.Y.Z \
 #     --certificate-identity-regexp '^https://github.com/go-steer/switchboard' \
 #     --certificate-oidc-issuer https://token.actions.githubusercontent.com
 #
