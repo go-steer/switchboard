@@ -1,0 +1,14 @@
+{
+  "platform": "slack",
+  "daemon_url": "http://core-agent.agent-triage.svc.cluster.local:7777",
+  "caller_id": "email",
+  "metrics_addr": ":9090",
+
+  "token_env": "SWITCHBOARD_DAEMON_TOKEN",
+  "slack_app_token_env": "SWITCHBOARD_SLACK_APP_TOKEN",
+  "slack_bot_token_env": "SWITCHBOARD_SLACK_BOT_TOKEN",
+
+  "defaults": {
+    "progress_mode": "indicator"
+  }
+}

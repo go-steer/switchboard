@@ -1,0 +1,19 @@
+{
+  "platform": "googlechat",
+  "daemon_url": "http://core-agent.agent-triage.svc.cluster.local:7777",
+  "caller_id": "email",
+  "metrics_addr": ":9090",
+
+  "token_env": "SWITCHBOARD_DAEMON_TOKEN",
+
+  "google_project": "PROJECT_ID",
+  "google_subscription": "SUBSCRIPTION_ID",
+  "googlechat_cards": "status",
+  "googlechat_commands": {
+    "1": "progress"
+  },
+
+  "defaults": {
+    "progress_mode": "indicator"
+  }
+}

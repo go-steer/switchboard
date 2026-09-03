@@ -24,8 +24,27 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
+# Set here rather than in the base, because the ConfigMap below is
+# generated at this level and would otherwise land in `default` while
+# the Deployment went elsewhere — see base/kustomization.yaml.
+namespace: agent-triage
+
 resources:
   - ../../base
+
+# The settings, as a file rather than as flags: the base's argv is
+# --config alone, because a flag would outrank the same setting here and
+# an edit to this file would then do nothing (#71). Edit config.json to
+# change how this deployment behaves.
+#
+# Generated rather than hand-written so the name carries a content hash.
+# switchboard reads the file once at startup, so a ConfigMap edited in
+# place changes nothing until something else restarts the pod; the hash
+# makes the Deployment roll when — and only when — the config changes.
+configMapGenerator:
+  - name: switchboard-config
+    files:
+      - config.json
 
 patches:
   - path: patch-deployment.yaml

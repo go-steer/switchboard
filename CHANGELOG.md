@@ -49,6 +49,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     divergence: a chat command is the one setting reachable from inside a room,
     so the account of why a channel stopped matching its own block should not be
     a message that has scrolled away.
+  - **The `deploy/` manifests moved onto the file.** Each overlay carries a
+    `config.json` that a `configMapGenerator` turns into the ConfigMap the base
+    mounts at `/etc/switchboard/config.json`, and the container's argv is
+    `--config` alone. Leaving any setting in `args:` would have been worse than
+    verbose: a flag outranks the file, so an operator would edit the ConfigMap,
+    roll the pod, and see nothing change. Generated rather than hand-written
+    because the name then carries a content hash — switchboard reads the file
+    once at startup, so `kubectl apply -k` has to roll the Deployment when the
+    config changes, and a ConfigMap edited in place would not. The Google Chat
+    overlay's Deployment patch is gone entirely, every arg it appended now being
+    a key; the Slack patch keeps only its two `secretKeyRef` entries, which is
+    the shape the split was aiming for — credentials in the pod spec, settings
+    in the file. `namespace:` moved from the base to both overlays, because a
+    generated resource is namespaced by the kustomization that generates it: set
+    in the base, the ConfigMap lands in `default` while the Deployment does not,
+    and kustomize rewrites a name reference only within one namespace, so the
+    pod would mount a hashed name that exists nowhere.
 - `--approvals`: relay a blocked tool call into the thread as a question with
   buttons, and send back what someone presses (#40). A permission prompt that
   used to park a turn until whoever started it noticed a console now reaches the
