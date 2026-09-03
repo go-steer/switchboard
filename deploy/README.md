@@ -142,7 +142,13 @@ Workload Identity — no JSON key is mounted.
 The base pins `ghcr.io/go-steer/switchboard:main` (the floating tag
 published on every merge). For anything beyond staging, override it with
 a released, cosign-verifiable tag via the overlay's `images:` field —
-e.g. `newTag: v0.1.0` — once the first release is cut.
+`newTag: v0.3.0` for the current release. Verify the signature with:
+
+```sh
+cosign verify ghcr.io/go-steer/switchboard:v0.3.0 \
+  --certificate-identity-regexp '^https://github.com/go-steer/switchboard' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
 
 ## Notes
 
