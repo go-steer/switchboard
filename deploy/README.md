@@ -10,19 +10,75 @@ networking and a chat platform's API over the internet.
 deploy/
   base/                 platform-neutral: SA, metrics-only NetworkPolicy, Deployment
   overlays/
-    slack/              --platform=slack + Slack token Secret
-    googlechat/         --platform=googlechat + Workload Identity
+    slack/              config.json + Slack token Secret
+    googlechat/         config.json + Workload Identity
 ```
 
 The base is **not applyable on its own** — pick a platform overlay.
 
+## Where the settings live
+
+Everything switchboard does is configured by **one JSON file per overlay**,
+`overlays/<platform>/config.json`, mounted at `/etc/switchboard/config.json`.
+The container's only argument is `--config` pointing at it.
+
+That is deliberate, and it is the one rule to keep in mind when editing these
+manifests: **precedence is flag > `$SWITCHBOARD_*` > file**, so a setting also
+named in `args:` would outrank the file, and editing the ConfigMap would then
+do nothing at all. Add settings to `config.json`, not to `args:`.
+
+The ConfigMap is produced by a `configMapGenerator`, so its name carries a hash
+of the content. switchboard reads the file once at startup; the hash is what
+makes `kubectl apply -k` roll the Deployment when — and only when — the config
+actually changed. A hand-written ConfigMap edited in place would leave the old
+settings running until something unrelated restarted the pod.
+
+Two things stay out of the file. **Credentials**, which ride env vars sourced
+from Secrets — the file names the variable (`"slack_bot_token_env": "..."`) and
+never holds the value, and switchboard refuses to start on a file that looks
+like it does. And the **`metrics` containerPort**, which has to agree with
+`metrics_addr` in the file; they are in two files now, which is the one seam
+this arrangement introduces.
+
+JSON has no comments, which the YAML args did. For a channel block there is a
+`name` key that exists purely to say which room an ID is; nothing reads it.
+
+### Per-channel settings
+
+`approvals`, `approvers`, `progress_mode` and `show_usage` can be scoped to a
+channel, over a `defaults` block that sets them process-wide:
+
+```json
+{
+  "platform": "slack",
+  "defaults": { "approvals": false, "progress_mode": "indicator" },
+  "channels": {
+    "C0SRE0000": {
+      "name": "#sre",
+      "approvals": true,
+      "approvers": ["ana@example.com", "ben@example.com"]
+    },
+    "C0SCRATCH": { "name": "#scratch", "show_usage": true }
+  }
+}
+```
+
+Keyed by the **channel ID the platform reports** — a Slack `C0123ABCD`, a Chat
+`spaces/AAAA` — never by name; a key that is not that shape is refused at
+startup, because `"#sre"` would match nothing while reading like a room that
+had been locked down. A channel's `approvers` **replaces** the wider list
+rather than adding to it, so a block can widen a room as well as narrow one.
+A `channels` block also outranks a flag, which is the one exception to the
+precedence rule above.
+
 ## Prerequisites (not created by these manifests)
 
 1. **Namespace** — everything targets `agent-triage` (change with
-   `namespace:` in `base/kustomization.yaml`), the namespace core-agent
-   runs in. switchboard reaches the daemon at
-   `core-agent.agent-triage.svc.cluster.local:7777`; override
-   `--daemon-url` for a different Service or a remote daemon.
+   `namespace:` in the *overlay's* `kustomization.yaml`, not the base's —
+   see the comment there for why the base does not set it), the namespace
+   core-agent runs in. switchboard reaches the daemon at
+   `core-agent.agent-triage.svc.cluster.local:7777`; change `daemon_url`
+   in `config.json` for a different Service or a remote daemon.
 
 2. **core-agent bearer token Secret** (both platforms):
 
@@ -74,8 +130,8 @@ Workload Identity — no JSON key is mounted.
    Chat-API and Workspace add-on event dialects per event — so converting the
    app to add-on mode does not have to be coordinated with a deploy.
 4. Edit `overlays/googlechat/patch-serviceaccount.yaml` (GSA email) and
-   `overlays/googlechat/patch-deployment.yaml` (`PROJECT_ID`,
-   `SUBSCRIPTION_ID`, and the `--googlechat-commands` id mapping), then:
+   `overlays/googlechat/config.json` (`google_project`,
+   `google_subscription`, and the `googlechat_commands` id mapping), then:
 
    ```sh
    kubectl apply -k deploy/overlays/googlechat
@@ -94,7 +150,7 @@ e.g. `newTag: v0.1.0` — once the first release is cut.
   in-memory map; a second replica would split the map and double-consume
   the platform stream. `strategy: Recreate` avoids overlap on rollout.
   Multi-replica waits on a durable session map (DESIGN.md).
-- **Health + metrics.** `--metrics-addr=:9090` serves `/healthz` (backing
+- **Health + metrics.** `"metrics_addr": ":9090"` serves `/healthz` (backing
   the liveness + readiness probes) and `/metrics` (Prometheus) on the
   named `metrics` port. That port is switchboard's only inbound surface;
   the NetworkPolicy admits it (kubelet probes bypass NetworkPolicy) and
@@ -102,8 +158,11 @@ e.g. `newTag: v0.1.0` — once the first release is cut.
   namespace if Prometheus runs in-cluster. `serve` still exits non-zero on
   a fatal error (bad token, adapter failure, metrics bind failure) so the
   container also restarts on real failures.
-- **Progress mode** is `--progress-mode=indicator` in the base; change it
-  there or per-channel at runtime via the `progress` chat command.
+- **Progress mode** is `defaults.progress_mode: "indicator"` in each
+  overlay's `config.json`; set it per channel in a `channels` block, or at
+  runtime via the `progress` chat command. A command that contradicts a
+  channel's configured mode logs the divergence, so the file stays the
+  account of record.
 - **Outbound ingress** (letting another in-cluster service post into a
   conversation) is **off** in these manifests. Enabling it means opening a
   second inbound surface, so it takes four deliberate steps in your own
@@ -117,13 +176,20 @@ e.g. `newTag: v0.1.0` — once the first release is cut.
        --from-literal=token="$(openssl rand -hex 32)"
      ```
 
-  2. Deployment args + env + port:
+  2. Three keys in `config.json` — `ingress_allow` is a real list here,
+     rather than the comma-separated string the flag had to flatten it
+     into:
+
+     ```json
+     "ingress_addr": ":8080",
+     "ingress_token_env": "SWITCHBOARD_INGRESS_TOKEN",
+     "ingress_allow": ["C0123ABCD"]
+     ```
+
+     plus the env var and the port, which stay in the Deployment because
+     one is a Secret and the other is a `containerPort`:
 
      ```yaml
-     args:
-       - "--ingress-addr=:8080"
-       - "--ingress-token-env=SWITCHBOARD_INGRESS_TOKEN"
-       - "--ingress-allow=C0123ABCD"     # confine it to known conversations
      env:
        - name: SWITCHBOARD_INGRESS_TOKEN
          valueFrom:
@@ -145,7 +211,7 @@ e.g. `newTag: v0.1.0` — once the first release is cut.
   4. A Service, since there is none today, so callers have a name to dial:
      `http://switchboard.agent-triage.svc.cluster.local:8080/v1/messages`.
 
-  Leave `--ingress-allow` unset only if callers really may post anywhere the
+  Leave `ingress_allow` unset only if callers really may post anywhere the
   bot is a member; `serve` logs a warning when it is empty. Treat the allowlist
   as the authorization model: a caller holding the token can edit *any* message
   the bot posted in those conversations, including the router's own replies.
@@ -157,38 +223,38 @@ e.g. `newTag: v0.1.0` — once the first release is cut.
   replicas, either front the ingress with a session-affinity Service or have
   callers fall back to full `text` on the `409`.
 
-- **Outbound-only Deployments.** If a workload only posts, add
-  `--outbound-only` to its args — **together with the outbound ingress
-  above**, which is then the only way in. Without `--ingress-addr` the flag
-  is refused at startup and the pod crash-loops, since a Deployment that can
-  neither receive nor be asked to post has nothing to do. With it,
+- **Outbound-only Deployments.** If a workload only posts, set
+  `"outbound_only": true` in its `config.json` — **together with the outbound
+  ingress above**, which is then the only way in. Without `ingress_addr` the
+  setting is refused at startup and the pod crash-loops, since a Deployment
+  that can neither receive nor be asked to post has nothing to do. With it,
   switchboard runs egress-only: no Socket Mode WebSocket on Slack, no
   Pub/Sub client on Chat.
 
   The inbound credential then goes unused, so drop it too — `app-token` from
-  the `switchboard-slack` Secret and the env var sourcing it, or
-  `--google-project` / `--google-subscription` from the Chat overlay's
-  Deployment patch, in which case the GSA needs no `roles/pubsub.subscriber`
-  and no topic or subscription has to exist. The daemon token goes the same
-  way: an outbound-only pod runs no turn and never reads
-  `SWITCHBOARD_DAEMON_TOKEN`, so remove the `env` entry in
-  `base/51-deployment.yaml` that sources it as well as the
-  `switchboard-daemon-token` Secret — the entry is a required `secretKeyRef`,
-  and leaving it pointed at a Secret you deleted parks the pod in
-  `CreateContainerConfigError` before switchboard ever runs.
+  the `switchboard-slack` Secret, the env var sourcing it, and
+  `slack_app_token_env` from the file; or `google_project` /
+  `google_subscription` from the Chat overlay's `config.json`, in which case
+  the GSA needs no `roles/pubsub.subscriber` and no topic or subscription has
+  to exist. The daemon token goes the same way: an outbound-only pod runs no
+  turn and never reads `SWITCHBOARD_DAEMON_TOKEN`, so remove `token_env` from
+  the file, the `env` entry in `base/51-deployment.yaml` that sources it, and
+  the `switchboard-daemon-token` Secret — the entry is a required
+  `secretKeyRef`, and leaving it pointed at a Secret you deleted parks the pod
+  in `CreateContainerConfigError` before switchboard ever runs.
 
   What stays on Chat is everything egress needs: it must still be the GSA
   configured as the Chat app's identity, and the Workload Identity annotation
   in `patch-serviceaccount.yaml` stays, because egress authenticates through
   ADC and switchboard builds the Chat client at startup.
 
-  Only the flag selects the mode — an emptied Secret does not. A bridged pod
-  whose app-token key goes missing crash-loops instead of coming back as a
+  Only the setting selects the mode — an emptied Secret does not. A bridged
+  pod whose app-token key goes missing crash-loops instead of coming back as a
   process that posts, passes `/healthz` and answers nobody, which is the one
   degradation a probe cannot see. Same reason for the other refusal: on Chat
-  without `--outbound-only` the two Pub/Sub flags go together, and one alone
-  is rejected. The pod logs `outbound-only: posting to …, receiving nothing`
-  on start.
+  without `outbound_only` the two Pub/Sub keys go together, and one alone is
+  rejected. The pod logs `outbound-only: posting to …, receiving nothing` on
+  start.
 
   One thing the mode gives up: a Slack bridge calls `auth.test` when it opens
   the socket, and an outbound-only pod never does, so a bad `xoxb-` token is

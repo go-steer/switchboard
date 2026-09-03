@@ -12,19 +12,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Slack overlay: append the Slack platform flags to the base args list
-# and mount the two Slack tokens from a Secret. JSON 6902 `add` with a
-# `-` index appends to the existing lists rather than replacing them, so
-# the base's --daemon-url / --token-env / --progress-mode survive.
+# Slack overlay: mount the two Slack tokens from a Secret. JSON 6902
+# `add` with a `-` index appends to the existing env list rather than
+# replacing it, so the base's daemon-token entry survives.
+#
+# The Slack *settings* are not here — they are in config.json, which the
+# overlay's configMapGenerator turns into the file the base mounts. Only
+# credentials stay in the pod spec, because only credentials have to come
+# from a Secret; the config file names the variables and never holds
+# their values (AGENTS.md, and switchboard refuses a file that does).
 #
 # Slack Socket Mode is a pure outbound WebSocket — no Workload Identity,
 # no cloud IAM — so the base ServiceAccount is used unchanged.
-- op: add
-  path: /spec/template/spec/containers/0/args/-
-  value: "--platform=slack"
-- op: add
-  path: /spec/template/spec/containers/0/args/-
-  value: "--caller-id=email"
+#
 # App-level (Socket Mode) token, xapp-…
 - op: add
   path: /spec/template/spec/containers/0/env/-

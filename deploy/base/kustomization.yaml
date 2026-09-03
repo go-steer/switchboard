@@ -13,13 +13,21 @@
 # limitations under the License.
 
 # Platform-neutral base. Not applyable on its own — build a platform
-# overlay instead (see overlays/slack, overlays/googlechat). The
-# namespace and image tag are set here so both overlays inherit one
-# source of truth; override newTag with a released :vX.Y.Z in production.
+# overlay instead (see overlays/slack, overlays/googlechat). The image
+# tag is set here so both overlays inherit one source of truth; override
+# newTag with a released :vX.Y.Z in production.
+#
+# The namespace is NOT set here, and that is load-bearing rather than an
+# omission. Each overlay generates the config ConfigMap, and a generated
+# resource is namespaced by the kustomization that generates it — so a
+# namespace declared down here would leave the ConfigMap in `default`
+# while everything else went to the overlay's namespace. kustomize only
+# rewrites a name reference within one namespace, so the Deployment's
+# volume would keep pointing at the un-hashed name and the pod would
+# mount a ConfigMap that does not exist. Declaring it once per overlay,
+# which is the applyable unit, keeps the two together.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
-
-namespace: agent-triage
 
 resources:
   - 11-serviceaccount.yaml

@@ -14,25 +14,27 @@
 
 # The switchboard Deployment: `switchboard serve` bridging one chat
 # platform onto the core-agent daemon. This base carries the
-# platform-NEUTRAL configuration — image, the daemon URL + bearer token,
-# and the progress mode. It is not meant to be applied on its own: a
-# platform overlay (overlays/slack or overlays/googlechat) appends the
-# --platform flag and that platform's env/secrets. Applying the base
-# alone would default to --platform=slack and crash-loop for want of the
-# Slack tokens.
+# platform-NEUTRAL shape — image, probes, security context, the daemon
+# token env var, and the mount the config file arrives on. It is not
+# meant to be applied on its own: the settings themselves live in a
+# ConfigMap a platform overlay (overlays/slack or overlays/googlechat)
+# generates, so applying the base alone leaves the pod mounting a
+# ConfigMap that does not exist and stuck before switchboard runs.
 #
 # Runs as its OWN Deployment alongside core-agent (not a sidecar) so the
 # two scale and restart independently. Talks to the daemon via the
-# in-cluster core-agent Service on :7777; for a remote daemon, override
-# --daemon-url in an overlay.
+# in-cluster core-agent Service on :7777; for a remote daemon, set
+# `daemon_url` in an overlay's config.json.
 #
-# Health + metrics: `--metrics-addr=:9090` serves /healthz (liveness +
-# readiness) and /metrics (Prometheus) on the metrics port. That port is
-# the ONLY inbound surface — both chat platforms are outbound — so the
-# NetworkPolicy admits scrapers to it and nothing else. serve() still
-# exits non-zero on any fatal error (bad token, adapter failure, or a
-# metrics bind failure), so the container also restarts on real failures
-# via restartPolicy.
+# Health + metrics: `metrics_addr: ":9090"` in the config file serves
+# /healthz (liveness + readiness) and /metrics (Prometheus) on the
+# containerPort declared below — the two have to agree, and they are in
+# different files now, which is the one seam this split introduces. That
+# port is the ONLY inbound surface — both chat platforms are outbound —
+# so the NetworkPolicy admits scrapers to it and nothing else. serve()
+# still exits non-zero on any fatal error (bad token, adapter failure, or
+# a metrics bind failure), so the container also restarts on real
+# failures via restartPolicy.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -74,14 +76,22 @@ spec:
           # release; pin :vX.Y.Z in a production overlay).
           image: ghcr.io/go-steer/switchboard:main
           imagePullPolicy: IfNotPresent
-          # ENTRYPOINT is ["/switchboard", "serve"]; these args splice in
-          # behind `serve`. Platform-specific args are appended by the
-          # overlay.
+          # ENTRYPOINT is ["/switchboard", "serve"]; this arg splices in
+          # behind `serve`. It is the only one, and deliberately: every
+          # other setting lives in the mounted config file (#71).
+          #
+          # Not a style preference. Precedence is flag > $SWITCHBOARD_* >
+          # file, so a setting named here would silently outrank the same
+          # setting in the ConfigMap — an operator edits the file, rolls
+          # the pod, and nothing changes. Keeping argv to --config alone
+          # means the file is the whole answer.
+          #
+          # --config rather than -c: core-agent shipped the short form
+          # alone and a distroless Deployment written as
+          # args: ["--config=..."] exited at flag-parse during a live demo
+          # (go-steer/core-agent#209). switchboard accepts both.
           args:
-            - "--daemon-url=http://core-agent.agent-triage.svc.cluster.local:7777"
-            - "--token-env=SWITCHBOARD_DAEMON_TOKEN"
-            - "--progress-mode=indicator"
-            - "--metrics-addr=:9090"
+            - "--config=/etc/switchboard/config.json"
           ports:
             - name: metrics
               containerPort: 9090
@@ -106,6 +116,14 @@ spec:
             # switchboard persists nothing (the session map is in-memory).
             - name: tmp
               mountPath: /tmp
+            # The gateway config file. Read once at startup, so a ConfigMap
+            # edit takes a pod restart to land — which the overlays get for
+            # free by generating the ConfigMap with a content hash in its
+            # name, so an edit rolls the Deployment. Read-only because
+            # nothing writes it and the root filesystem is read-only.
+            - name: config
+              mountPath: /etc/switchboard
+              readOnly: true
           # Liveness + readiness both hit /healthz on the metrics port. The
           # handler has no /metrics dependency, so it reports "the process is
           # up" rather than "Prometheus is scraping." A single-replica gateway
@@ -136,3 +154,11 @@ spec:
       volumes:
         - name: tmp
           emptyDir: {}
+        # Created by the platform overlay, not by this base — the config
+        # names the platform, so there is no neutral version of it to
+        # ship. Same posture as the Secrets referenced above: the base
+        # names what it needs and an overlay provides it. kustomize
+        # rewrites this reference to the generated name + hash.
+        - name: config
+          configMap:
+            name: switchboard-config
