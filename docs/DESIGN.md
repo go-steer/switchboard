@@ -639,6 +639,87 @@ sets `status`. Text is always sent as the message fallback, and a card
 Chat rejects with a 400 falls back to posting the text — a rich render never
 costs a reply.
 
+### 3.4 Configuration, and why it grew a file
+
+Flags were enough while every setting was a scalar the whole process shared.
+Two pressures ended that.
+
+The first is structure. `--approvers`, `--ingress-allow` and
+`--googlechat-commands` are a list, a list and a map, each flattened into one
+string and parsed back out — and most of `parseApprovers` is the cost of that
+round trip, not of the rule it enforces.
+
+The second is scope, and it is the one that mattered. #65 shipped `--approvers`
+process-wide because a flag has nowhere to put a channel, but the setting wanted
+scoping from the start: the room where the grant should be wide is rarely the
+room where it should be narrow. The adapters had already anticipated this —
+`Message.Channel` carries the platform's channel ID and its doc comment named
+"channel-scoped gateway settings" as the reason — and one setting had quietly
+grown a resolver of its own, `progressFor`, for the runtime progress-mode
+override. Everything else was read straight off `Router`. That asymmetry is the
+shape of a third bespoke lookup, so #71 collapsed it: one `settingsFor(channel)`
+serves `approvals`, `approvers`, `progress_mode` and `show_usage`, and adding
+the next scopable setting is a field on `channelSettings`.
+
+**Resolution is layered narrowest-first, and only one layer is reachable at
+runtime.** A channel's block in the file is a complete answer for that channel,
+resolved once at startup against the process defaults rather than merged on
+every read; on top of that sits the runtime progress-mode override a chat
+command sets, which is deliberately the only setting a command can change. Who
+may approve in a room must not be reachable from inside the room.
+
+**Precedence is explicit flag > `$SWITCHBOARD_*` > file > built-in default**, and
+making that expressible is why the flags no longer take their defaults from
+`envOr`. A flag whose default came from the environment cannot be told apart
+after `Parse` from one nobody passed, so no layer could ever sit underneath it —
+the environment would win by pretending to be the default. `flag.FlagSet.Visit`
+walks only the flags actually on argv, which is the one place the distinction
+survives.
+
+A `channels` block is the one thing that outranks an explicitly passed flag, and
+that is not an inconsistency in the ladder — it is a different axis. The ladder
+orders *where a value came from* for one scope; a channel block is a narrower
+scope, and the narrower scope wins because it is the one that named the room.
+The alternative reading, where a flag on the command line silently disables
+every per-channel rule in the file, is a config that looks applied and is not.
+
+Four refusals are load-bearing, and they are all the same failure: a config
+that looks applied and is not.
+
+- **A `channels` key must look like a channel ID on the platform being
+  bridged.** `Message.Channel` carries what the platform sends — `C0SRE0000`, or
+  `spaces/AAAA` — and `"#sre"` is what a person writes. A block keyed by the
+  name matches nothing and reads, in the file and in review, as a room that has
+  been narrowed.
+
+- **Credentials never go in the file.** AGENTS.md keeps tokens out of argv by
+  indirection — a flag names the variable, the environment holds the value — and
+  a config file is the artifact *designed* to be committed. So a key that reads
+  like a credential, or a value shaped like a live one, is a startup error rather
+  than a line in the docs. Keys ending `_env` are the sanctioned form and are
+  exempt from the name rule, not from the value rule.
+- **Unknown keys are refused.** A misspelled `approver` decodes to nothing, and
+  the run then starts cleanly, announces settings that look right, and enforces
+  none of them — the same shape as an approver list nobody can match.
+- **No auto-discovery, and a named file that is missing is fatal.** core-agent
+  reads `.agents/config.json` from the working directory, which is a convenience
+  for a CLI. A long-lived gateway is different: silently changing who may approve
+  a production change because of a file that appeared beside it, or falling back
+  to flag defaults when the file it was pointed at is gone, is how a narrowed
+  approver list becomes an open one with nothing in the log to say so.
+
+Everything else mirrors core-agent, because AGENTS.md says to: JSON rather than
+YAML, and `-c` as well as `--config` — the long form is not a courtesy, since
+core-agent shipped the short form alone and a distroless Deployment written as
+`args: ["--config=..."]` exited at flag-parse during a live demo
+(go-steer/core-agent#209).
+
+Two settings stay process-wide on purpose. `slack_rich_blocks` and
+`googlechat_cards` are read by the adapter when it is constructed, before there
+is a channel to ask about, and the adapter has no route back into the router to
+resolve one. Accepting them in a channel block and ignoring them is exactly what
+`DisallowUnknownFields` exists to prevent, so they are not accepted there.
+
 ### Conversation ↔ session mapping
 
 The mapping key is the platform's stable thread identifier. Same key across turns

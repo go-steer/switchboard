@@ -118,7 +118,20 @@ const defaultCardMode = string(googlechat.CardsRich)
 
 func runServe(args []string) (err error) {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
-	daemonURL := fs.String("daemon-url", envOr("SWITCHBOARD_DAEMON_URL", "http://127.0.0.1:7777"),
+	// -c and --config are one setting under two spellings, bound to one
+	// variable so the last one given wins rather than one shadowing the other.
+	// core-agent shipped -c alone and a distroless Deployment written as
+	// args: ["--config=..."] exited at flag-parse during a live demo
+	// (go-steer/core-agent#209); the alias costs a line.
+	var cfgPath string
+	const cfgUsage = "path to a JSON gateway config file (#71); a flag beats $SWITCHBOARD_*, which beats the file"
+	fs.StringVar(&cfgPath, "config", "", cfgUsage)
+	fs.StringVar(&cfgPath, "c", "", "shorthand for --config")
+
+	// No environment lookups in the defaults below. A flag whose default came from
+	// the environment cannot be told apart after parsing from one nobody passed,
+	// so the config file could never be layered underneath it — see resolver.
+	daemonURL := fs.String("daemon-url", "http://127.0.0.1:7777",
 		"core-agent daemon base URL (no trailing slash)")
 	tokenEnv := fs.String("token-env", "SWITCHBOARD_DAEMON_TOKEN",
 		"env var holding the daemon bearer token (never pass the token as a bare flag)")
@@ -149,36 +162,36 @@ func runServe(args []string) (err error) {
 		"relay the agent's permission prompts into the conversation as buttons, and send back "+
 			"what someone presses; off by default because it is a grant — see --approvers for "+
 			"who it goes to, and some of those answers outlive the request")
-	approvers := fs.String("approvers", envOr(envApprovers, approversChannel),
+	approvers := fs.String("approvers", approversChannel,
 		"who may answer a permission prompt (--approvals): \"channel\" for anyone who can post "+
 			"in the conversation, or a comma-separated list of the identities switchboard "+
 			"asserts (emails, or platform IDs under --caller-id \"id\")")
-	googleProject := fs.String("google-project", envOr("SWITCHBOARD_GOOGLE_PROJECT", ""),
+	googleProject := fs.String("google-project", "",
 		"GCP project hosting the Google Chat Pub/Sub subscription (--platform googlechat)")
-	googleSub := fs.String("google-subscription", envOr("SWITCHBOARD_GOOGLE_SUBSCRIPTION", ""),
+	googleSub := fs.String("google-subscription", "",
 		"Pub/Sub subscription carrying Google Chat events (--platform googlechat); required "+
 			"with --google-project unless --outbound-only")
-	googleCards := fs.String("googlechat-cards", envOr("SWITCHBOARD_GOOGLECHAT_CARDS", defaultCardMode),
+	googleCards := fs.String("googlechat-cards", defaultCardMode,
 		"Google Chat card rendering: \"rich\" (gateway cards, and a structured agent reply "+
 			"laid out as a card), \"status\" (gateway progress/notice/ack cards only), or "+
 			"\"off\"; text is always sent as the fallback")
 	googleLogEvents := fs.Bool("googlechat-log-events", false,
 		"log every inbound Google Chat payload verbatim, for capturing decoder fixtures; "+
 			"the payload includes message text and sender identity, so leave this off in production")
-	googleCommands := fs.String("googlechat-commands", envOr("SWITCHBOARD_GOOGLECHAT_COMMANDS", ""),
+	googleCommands := fs.String("googlechat-commands", "",
 		"comma-separated Chat app-command ID to gateway verb mappings (e.g. \"1=progress,2=help\"), "+
 			"matching the command IDs configured in the Chat API console")
-	metricsAddr := fs.String("metrics-addr", envOr("SWITCHBOARD_METRICS_ADDR", ""),
+	metricsAddr := fs.String("metrics-addr", "",
 		"Prometheus /metrics + /healthz listener address (host:port); empty = disabled")
-	ingressAddr := fs.String("ingress-addr", envOr("SWITCHBOARD_INGRESS_ADDR", ""),
+	ingressAddr := fs.String("ingress-addr", "",
 		"outbound-ingress listener address (host:port) for POST/PATCH /v1/messages; empty = disabled")
 	ingressTokenEnv := fs.String("ingress-token-env", "SWITCHBOARD_INGRESS_TOKEN",
 		"env var holding the bearer token callers must present to the outbound ingress")
-	ingressAllow := fs.String("ingress-allow", envOr("SWITCHBOARD_INGRESS_ALLOW", ""),
+	ingressAllow := fs.String("ingress-allow", "",
 		"comma-separated conversations the outbound ingress may post into (Slack channel IDs "+
 			"or channel:thread_ts; Chat spaces/AAA or spaces/AAA:spaces/AAA/threads/BBB); "+
 			"empty = any conversation the bot can reach")
-	logFormat := fs.String("log-format", envOr("SWITCHBOARD_LOG_FORMAT", string(logging.Text)),
+	logFormat := fs.String("log-format", string(logging.Text),
 		"log rendering: \"text\" (timestamped lines for a terminal) or \"json\" (one object "+
 			"per line for a collector)")
 	showVersion := fs.Bool("version", false, "print build identity and exit")
@@ -189,6 +202,54 @@ func runServe(args []string) (err error) {
 		fmt.Println(version.String(prog))
 		return nil
 	}
+
+	// The config file, before anything reads a setting — including the logger,
+	// because log_format is itself file-settable.
+	//
+	// Only when asked for: core-agent discovers .agents/config.json in the
+	// working directory and switchboard deliberately does not. A CLI picking up
+	// the config of the directory you are standing in is a convenience; a
+	// long-lived gateway changing who may approve a production change because of
+	// a file that appeared next to it is not. A named file that is not there is
+	// a startup error rather than a fall back to the defaults — starting anyway
+	// is precisely how a narrowed approver list would quietly become an open one.
+	if !hasFlag(fs, "config", "c") {
+		cfgPath = os.Getenv("SWITCHBOARD_CONFIG")
+	}
+	cfg := &Config{}
+	if cfgPath != "" {
+		if cfg, err = loadConfig(cfgPath); err != nil {
+			return err
+		}
+	}
+
+	res := newResolver(fs)
+	res.str("daemon-url", "SWITCHBOARD_DAEMON_URL", cfg.DaemonURL, daemonURL)
+	res.str("token-env", "", cfg.TokenEnv, tokenEnv)
+	res.str("platform", "", cfg.Platform, platform)
+	res.boolean("outbound-only", "", cfg.OutboundOnly, outboundOnly)
+	res.str("slack-app-token-env", "", cfg.AppTokenEnv, appTokenEnv)
+	res.str("slack-bot-token-env", "", cfg.BotTokenEnv, botTokenEnv)
+	res.str("caller-id", "", cfg.CallerID, callerID)
+	res.boolean("slack-rich-blocks", "", cfg.RichBlocks, richBlocks)
+	res.str("google-project", "SWITCHBOARD_GOOGLE_PROJECT", cfg.GoogleProject, googleProject)
+	res.str("google-subscription", "SWITCHBOARD_GOOGLE_SUBSCRIPTION", cfg.GoogleSub, googleSub)
+	res.str("googlechat-cards", "SWITCHBOARD_GOOGLECHAT_CARDS", cfg.GoogleCards, googleCards)
+	res.boolean("googlechat-log-events", "", cfg.GoogleLogEvents, googleLogEvents)
+	res.str("metrics-addr", "SWITCHBOARD_METRICS_ADDR", cfg.MetricsAddr, metricsAddr)
+	res.str("ingress-addr", "SWITCHBOARD_INGRESS_ADDR", cfg.IngressAddr, ingressAddr)
+	res.str("ingress-token-env", "", cfg.IngressTokenEnv, ingressTokenEnv)
+	res.str("log-format", "SWITCHBOARD_LOG_FORMAT", cfg.LogFormat, logFormat)
+	// The channel-scopable four resolve into the same variables, and then again
+	// per channel below: what lands here is the posture for a channel the file
+	// says nothing about.
+	res.boolean("approvals", "", cfg.Defaults.Approvals, approvals)
+	res.str("progress-mode", "", cfg.Defaults.ProgressMode, progressMode)
+	res.boolean("show-usage", "", cfg.Defaults.ShowUsage, showUsage)
+	if err := res.err(); err != nil {
+		return err
+	}
+	allowList := res.list("ingress-allow", "SWITCHBOARD_INGRESS_ALLOW", *ingressAllow, cfg.IngressAllow)
 
 	format, ok := logging.ParseFormat(*logFormat)
 	if !ok {
@@ -216,6 +277,91 @@ func runServe(args []string) (err error) {
 	// nobody (#23).
 	inbound := !*outboundOnly
 
+	callerMode, err := parseCallerMode(*callerID)
+	if err != nil {
+		return err
+	}
+
+	// After the caller mode, because an approver list is only meaningful against
+	// the identity this gateway will assert — see parseApprovers.
+	if v, ok := os.LookupEnv(envApprovers); ok && strings.TrimSpace(v) == "" && !res.passed("approvers") {
+		// An empty environment value reads as unset everywhere else here, which
+		// is right for a cosmetic default and wrong for this one: an unset
+		// ConfigMap key renders as the empty string, and quietly falling through
+		// to the file — or to "channel" — would widen the grant at the moment
+		// somebody was trying to set it.
+		//
+		// Not when the flag was passed, though. The flag outranks the variable
+		// everywhere else, and an operator who has just written the list out on
+		// the command line is not being saved from anything by a refusal to
+		// start over a variable that is about to be ignored.
+		return fmt.Errorf("%s is set but empty: pass %q to let anyone in the conversation answer", envApprovers, approversChannel)
+	}
+	approverFields := res.list("approvers", envApprovers, *approvers, cfg.Defaults.Approvers)
+	fileApprovers := ""
+	if cfg.Defaults.Approvers != nil {
+		fileApprovers = "defaults.approvers"
+	}
+	policy, err := parseApproverList(approverFields, callerMode)
+	if err != nil {
+		return fmt.Errorf("invalid value for %s: %w", res.origin("approvers", envApprovers, fileApprovers), err)
+	}
+
+	progress, err := parseProgressMode(*progressMode)
+	if err != nil {
+		return err
+	}
+
+	// Both Google Chat knobs are validated here rather than inside the adapter
+	// so a typo fails at startup instead of after Pub/Sub has been dialed.
+	cardMode, ok := googlechat.ParseCardMode(*googleCards)
+	if !ok {
+		return fmt.Errorf("invalid --googlechat-cards %q (want \"off\", \"status\" or \"rich\")", *googleCards)
+	}
+	appCommands, err := res.mapping("googlechat-commands", "SWITCHBOARD_GOOGLECHAT_COMMANDS", *googleCommands, cfg.GoogleCommands)
+	if err != nil {
+		return err
+	}
+
+	// The per-channel table, last of the settings work because it is built on
+	// top of everything above it: the defaults it overlays, the platform whose
+	// channel IDs its keys have to look like, and the caller mode its approver
+	// lists are checked against.
+	//
+	// Note the one place precedence inverts: a channels block wins over an
+	// explicitly passed flag, because the flag says "everywhere" and the block
+	// says "here", and the narrower scope is the one that was meant. Documented
+	// in the README next to the precedence rule, since it is the one rule a
+	// reader would otherwise get wrong.
+	defaults := channelSettings{
+		progress:  progress,
+		approvals: *approvals,
+		showUsage: *showUsage,
+		approvers: policy,
+	}
+	byChannel, err := channelsFrom(cfg, defaults, *platform, callerMode)
+	if err != nil {
+		return err
+	}
+	// Said out loud, because the file is the one input to this run that is not
+	// in the process args: an operator reading the log of a gateway that is
+	// behaving oddly should not have to infer which file it read, or whether it
+	// read one at all. The channel IDs go in the line too — they are the keys
+	// that had to match what the platform sends, and seeing them is how a block
+	// written for a room the bot is not in gets noticed.
+	if cfgPath != "" {
+		if ids := channelIDs(byChannel); len(ids) > 0 {
+			logf("config: read %s, %d configured channel(s): %s", cfgPath, len(ids), strings.Join(ids, " "))
+		} else {
+			logf("config: read %s, no configured channels", cfgPath)
+		}
+	}
+
+	// Whether anything, anywhere, relays permission prompts. Not the same as
+	// *approvals since #71: a file may leave the default off and turn one
+	// channel on, and the client is built once for the whole process.
+	wantApprovals := *approvals || anyApprovals(byChannel)
+
 	// Only a bridged run talks to the daemon: the ingress posts straight through
 	// the adapter. So an outbound-only deployment is not asked for a bearer
 	// token it would never present.
@@ -231,48 +377,13 @@ func runServe(args []string) (err error) {
 			return err
 		}
 		// Same daemon, same credential, different routes — and built here
-		// rather than inside the router so that a run without --approvals
-		// holds no client for a surface it does not offer.
-		if *approvals {
+		// rather than inside the router so that a run with approvals off
+		// everywhere holds no client for a surface it does not offer.
+		if wantApprovals {
 			if ac, err = approval.New(dcfg); err != nil {
 				return err
 			}
 		}
-	}
-
-	callerMode, err := parseCallerMode(*callerID)
-	if err != nil {
-		return err
-	}
-
-	// After the caller mode, because an approver list is only meaningful against
-	// the identity this gateway will assert — see parseApprovers.
-	if v, ok := os.LookupEnv(envApprovers); ok && strings.TrimSpace(v) == "" {
-		// envOr reads an empty value as unset, which is right for a cosmetic
-		// default and wrong for this one: an unset ConfigMap key renders as the
-		// empty string, and quietly resolving that to "channel" would widen the
-		// grant at the moment somebody was trying to set it.
-		return fmt.Errorf("%s is set but empty: pass %q to let anyone in the conversation answer", envApprovers, approversChannel)
-	}
-	policy, err := parseApprovers(*approvers, callerMode)
-	if err != nil {
-		return fmt.Errorf("invalid --approvers %q: %w", *approvers, err)
-	}
-
-	progress, err := parseProgressMode(*progressMode)
-	if err != nil {
-		return err
-	}
-
-	// Both Google Chat knobs are validated here rather than inside the adapter
-	// so a typo fails at startup instead of after Pub/Sub has been dialed.
-	cardMode, ok := googlechat.ParseCardMode(*googleCards)
-	if !ok {
-		return fmt.Errorf("invalid --googlechat-cards %q (want \"off\", \"status\" or \"rich\")", *googleCards)
-	}
-	appCommands, err := parseAppCommands(*googleCommands)
-	if err != nil {
-		return err
 	}
 
 	// An outbound-only run is a real deployment shape — a monitoring loop that
@@ -368,14 +479,18 @@ func runServe(args []string) (err error) {
 	var router *Router
 	if inbound {
 		router = NewRouter(dc, adapter, progress, m, logf)
-		router.setShowUsage(*showUsage)
-		router.setApprovals(ac)
-		router.setApprovers(policy)
+		configureRouter(router, ac, defaults, byChannel)
 	}
-	if *approvals {
+	if wantApprovals {
 		switch {
 		case !inbound:
-			logf("warning: --approvals answers prompts raised by an agent turn, and an outbound-only run has none")
+			logf("warning: approvals answer prompts raised by an agent turn, and an outbound-only run has none")
+		case !*approvals:
+			// On in a channel and off by default. Worth its own line: the two
+			// branches below describe the default posture, and saying either of
+			// them here would describe a posture most conversations do not have.
+			logf("approvals: permission prompts go to the conversation in %d configured channel(s) and nowhere else",
+				countApprovals(byChannel))
 		case policy.open():
 			// Said on every start, like the outbound-only banner, because this
 			// one is a grant: from here on, anyone who can post in a
@@ -389,8 +504,20 @@ func runServe(args []string) (err error) {
 			// publish a list of who can approve production changes.
 			logf("approvals: permission prompts go to the conversation, and %d named approver(s) may answer them", len(policy.allowed))
 		}
+		// Counted, not named, for the same reason. Reported at all because a
+		// channel list replaces the default rather than narrowing it, so a run
+		// whose banner says "3 named approvers" may still have a room where
+		// anyone can answer — and that is exactly the fact worth one line.
+		//
+		// Not on an outbound-only run: nothing above has described a posture
+		// there, only warned that there are no prompts to have one about, and
+		// counting the approvers of a feature that cannot fire reads as a
+		// working configuration.
+		if open, named := approverSpread(byChannel); inbound && open+named > 0 {
+			logf("approvals: %d configured channel(s) let anyone answer, %d name their own approvers", open, named)
+		}
 	} else if !policy.open() {
-		logf("warning: --approvers names who may answer permission prompts, and --approvals is off")
+		logf("warning: an approver list names who may answer permission prompts, and approvals are off")
 	}
 	if *showUsage {
 		switch {
@@ -409,10 +536,9 @@ func runServe(args []string) (err error) {
 	// caller.
 	var ing *ingress
 	if *ingressAddr != "" {
-		allow := splitList(*ingressAllow)
-		cfg := ingressConfig{
+		icfg := ingressConfig{
 			Token:   ingressToken,
-			Allow:   allow,
+			Allow:   allowList,
 			Out:     adapter,
 			Metrics: m,
 			Logf:    logf,
@@ -422,13 +548,13 @@ func runServe(args []string) (err error) {
 		// interface field is not a nil interface, and the ingress reads that
 		// field to decide whether a caller may name a session at all.
 		if router != nil {
-			cfg.Bind = router
+			icfg.Bind = router
 		}
-		ing, err = newIngress(cfg)
+		ing, err = newIngress(icfg)
 		if err != nil {
 			return err
 		}
-		if len(allow) == 0 {
+		if len(allowList) == 0 {
 			logf("warning: outbound ingress on %s may post into ANY conversation "+
 				"the bot can reach; narrow it with --ingress-allow", *ingressAddr)
 		}
@@ -585,11 +711,4 @@ func parseAppCommands(s string) (map[int64]string, error) {
 		out[id] = verb
 	}
 	return out, nil
-}
-
-func envOr(key, def string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return def
 }

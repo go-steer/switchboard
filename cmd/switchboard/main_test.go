@@ -765,7 +765,7 @@ func TestRunServeApproverValidation(t *testing.T) {
 			name: "a list nobody could match is refused at startup",
 			args: []string{"--approvals", "--approvers", "ana@example.com ben@example.com"},
 			env:  "-",
-			want: "invalid --approvers",
+			want: "invalid value for --approvers",
 		},
 		{
 			// Emails against a run that will assert platform IDs. Both halves
@@ -773,7 +773,7 @@ func TestRunServeApproverValidation(t *testing.T) {
 			name: "checked against the caller mode this run uses",
 			args: []string{"--approvals", "--caller-id", "id", "--approvers", "ana@example.com"},
 			env:  "-",
-			want: "invalid --approvers",
+			want: "invalid value for --approvers",
 		},
 		{
 			// The env path is the one a Deployment uses, and the one where an
@@ -784,10 +784,13 @@ func TestRunServeApproverValidation(t *testing.T) {
 			want: envApprovers,
 		},
 		{
+			// Named as the environment variable rather than as the flag: the
+			// operator never passed --approvers, and sending them to look at one
+			// they did not write is how a wrong list survives an afternoon.
 			name: "read from the environment when the flag is absent",
 			args: []string{"--approvals"},
 			env:  "not-an-email",
-			want: "invalid --approvers",
+			want: "invalid value for $" + envApprovers,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

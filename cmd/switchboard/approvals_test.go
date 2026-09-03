@@ -185,7 +185,7 @@ func permsRouter(t *testing.T, d *permsDaemon) (*Router, *fakeSender, func() []s
 		defer mu.Unlock()
 		lines = append(lines, fmt.Sprintf(f, v...))
 	})
-	r.setApprovals(ac)
+	r.setApprovals(ac, true)
 	r.minBackoff = time.Millisecond
 	r.maxBackoff = 2 * time.Millisecond
 	return r, fake, func() []string {
@@ -204,8 +204,12 @@ func ref(promptID string) string { return decisionRef(testSession, promptID) }
 
 // liveEntry registers a ready session for a conversation, as a completed turn
 // would have.
-func liveEntry(r *Router, conv string) *sessionEntry {
-	e := &sessionEntry{ready: make(chan struct{}), sess: testSession}
+func liveEntry(r *Router, conv string) *sessionEntry { return liveEntryIn(r, conv, "C1") }
+
+// liveEntryIn is liveEntry for a session in a named channel, which is what the
+// per-channel settings resolve against.
+func liveEntryIn(r *Router, conv, channel string) *sessionEntry {
+	e := &sessionEntry{ready: make(chan struct{}), sess: testSession, channel: channel}
 	close(e.ready)
 	r.mu.Lock()
 	r.sessions[conv] = e
@@ -248,7 +252,7 @@ func TestNoSubscriptionWhenTheSessionOffersNoPrompts(t *testing.T) {
 func TestNoSubscriptionWhenRelayingIsOff(t *testing.T) {
 	d := newPermsDaemon(t, bashPrompt)
 	r, _, _ := permsRouter(t, d)
-	r.setApprovals(nil)
+	r.setApprovals(nil, true)
 	e := liveEntry(r, "C1:1")
 
 	r.watchPermsIfOffered(context.Background(), "C1:1", e, capsWith(true))
@@ -836,7 +840,7 @@ func TestPressingTwiceIsNotAnError(t *testing.T) {
 func TestAPressAgainstAGatewayWithRelayingOffIsRefused(t *testing.T) {
 	d := newPermsDaemon(t)
 	r, _, _ := permsRouter(t, d)
-	r.setApprovals(nil)
+	r.setApprovals(nil, true)
 	liveEntry(r, "C1:1")
 
 	if err := r.HandlePress(context.Background(), chat.Press{
@@ -867,10 +871,15 @@ func askedPress(e *sessionEntry, promptID, option, body string) chat.Press {
 	e.claimAsk(promptID, body)
 	return chat.Press{
 		Conversation: "C1:1",
-		Caller:       "presser@example.com",
-		DecisionID:   ref(promptID),
-		Option:       option,
-		Message:      chat.MessageRef{Conversation: "C1:1", ID: "ts1"},
+		// Both adapters set this on every press — Slack refuses one it cannot
+		// find a channel for — and it is what the per-channel settings resolve
+		// against, so leaving it empty here would test a shape production never
+		// produces.
+		Channel:    "C1",
+		Caller:     "presser@example.com",
+		DecisionID: ref(promptID),
+		Option:     option,
+		Message:    chat.MessageRef{Conversation: "C1:1", ID: "ts1"},
 	}
 }
 
@@ -1762,4 +1771,112 @@ func mustApprovers(t *testing.T, s string) approverPolicy {
 		t.Fatalf("parseApprovers(%q): %v", s, err)
 	}
 	return p
+}
+
+// ------------------------------------------------ per-channel approvals (#71)
+
+// The point of scoping the setting at all: the SRE channel's list governs the
+// SRE channel, and the process default governs everywhere else. A resolver that
+// read the default whatever the press said would pass every test above and fail
+// only here.
+func TestAChannelsOwnApproversGovernThatChannel(t *testing.T) {
+	d := newPermsDaemon(t)
+	r, fake, _ := permsRouter(t, d)
+	r.setApprovers(mustApprovers(t, "ana@example.com"))
+	r.setChannels(map[string]channelSettings{
+		"C9": {approvals: true, approvers: mustApprovers(t, "ben@example.com")},
+	})
+	e := liveEntryIn(r, "C9:1", "C9")
+
+	// Ben is nobody by the default list and everybody by C9's.
+	p := pressIn(e, "C9", "pr1")
+	p.Caller = "ben@example.com"
+	if err := r.HandlePress(context.Background(), p); err != nil {
+		t.Fatalf("HandlePress: %v", err)
+	}
+	if n := len(d.posts()); n != 1 {
+		t.Fatalf("the channel's own approver answered %d times, want 1", n)
+	}
+
+	// And Ana, who governs every other channel, does not govern this one: a
+	// list that replaces has to actually replace.
+	p2 := pressIn(e, "C9", "pr2")
+	p2.Caller = "ana@example.com"
+	if err := r.HandlePress(context.Background(), p2); err != nil {
+		t.Fatalf("HandlePress: %v", err)
+	}
+	if n := len(d.posts()); n != 1 {
+		t.Fatalf("the replaced default approver answered anyway: %d posts, want still 1", n)
+	}
+	if got := drainNotice(t, fake); got != noticeNotApprover {
+		t.Errorf("the thread was told %q, want %q", got, noticeNotApprover)
+	}
+}
+
+// A channel with approvals off relays nothing, whatever the process default
+// says — and refuses a press without saying whether a prompt is there.
+func TestAChannelCanTurnApprovalsOff(t *testing.T) {
+	d := newPermsDaemon(t, bashPrompt)
+	r, _, _ := permsRouter(t, d)
+	r.setChannels(map[string]channelSettings{"C9": {approvals: false}})
+	e := liveEntryIn(r, "C9:1", "C9")
+
+	// Cancellable even though nothing should subscribe: a watcher that starts
+	// anyway would otherwise reconnect against the test server forever, and the
+	// failure would be a hang rather than the assertion below.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	r.watchPermsIfOffered(ctx, "C9:1", e, capsWith(true))
+	time.Sleep(20 * time.Millisecond)
+	if n := d.streamCount(); n != 0 {
+		t.Errorf("opened %d prompt streams in a channel with approvals off", n)
+	}
+
+	if err := r.HandlePress(context.Background(), pressIn(e, "C9", "pr1")); err == nil {
+		t.Error("a press in a channel with approvals off was answered")
+	}
+	if n := len(d.posts()); n != 0 {
+		t.Errorf("a press in a channel with approvals off reached the daemon %d time(s)", n)
+	}
+}
+
+// The other direction, and the reason the approval client's construction is a
+// process-wide question: approvals off by default and on in one channel.
+func TestAChannelCanTurnApprovalsOnWhereTheDefaultIsOff(t *testing.T) {
+	d := newPermsDaemon(t, bashPrompt)
+	r, _, _ := permsRouter(t, d)
+	// The client stays — one connection to one daemon — and the default goes
+	// off, which is exactly what runServe builds for a file like this.
+	r.setApprovals(r.approvals, false)
+	r.setChannels(map[string]channelSettings{"C9": {approvals: true}})
+
+	// Nothing in the channel the file said nothing about.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	quiet := liveEntryIn(r, "C1:1", "C1")
+	r.watchPermsIfOffered(ctx, "C1:1", quiet, capsWith(true))
+	time.Sleep(20 * time.Millisecond)
+	if n := d.streamCount(); n != 0 {
+		t.Fatalf("opened %d prompt streams where the default is off", n)
+	}
+
+	// And a watcher in the one channel that asked for it.
+	loud := liveEntryIn(r, "C9:1", "C9")
+	r.watchPermsIfOffered(ctx, "C9:1", loud, capsWith(true))
+	waitFor(t, func() bool { return d.streamCount() == 1 },
+		"the channel that turned approvals on was never subscribed to")
+}
+
+// pressIn is askedPress for a conversation in a named channel.
+func pressIn(e *sessionEntry, channel, promptID string) chat.Press {
+	conv := channel + ":1"
+	e.claimAsk(promptID, "q")
+	return chat.Press{
+		Conversation: conv,
+		Channel:      channel,
+		Caller:       "presser@example.com",
+		DecisionID:   ref(promptID),
+		Option:       "allow-once",
+		Message:      chat.MessageRef{Conversation: conv, ID: "ts1"},
+	}
 }

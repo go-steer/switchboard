@@ -30,17 +30,28 @@ import (
 // a nil client leaves every session's prompts where they were, waiting on a
 // console nobody in the thread is sitting at.
 //
+// on is the posture for a channel the config file said nothing about, and is
+// separate from the client because the two stopped coinciding at #71: a run
+// whose file enables approvals in one channel and nowhere else needs the client
+// built and the default left off. A nil client still wins over any channel's
+// yes — there is nothing to relay through.
+//
 // A setter rather than a NewRouter parameter for the same reason showUsage is
 // one — it is an operator decision made once at startup, before the adapter
 // begins dispatching, and every test that does not care about permissions
 // should not have to name it.
-func (r *Router) setApprovals(c *approval.Client) { r.approvals = c }
+func (r *Router) setApprovals(c *approval.Client, on bool) {
+	r.approvals = c
+	r.defaults.approvals = on
+}
 
-// setApprovers narrows who may answer a permission prompt. The zero policy is
-// the open one, so a router nobody calls this on behaves as it did before the
-// setting existed — which is also what the default preserves for a deployment
-// upgrading into it.
-func (r *Router) setApprovers(p approverPolicy) { r.approvers = p }
+// setApprovers narrows who may answer a permission prompt in a channel the
+// config file said nothing about. The zero policy is the open one, so a router
+// nobody calls this on behaves as it did before the setting existed — which is
+// also what the default preserves for a deployment upgrading into it. A channel
+// with an approver list of its own replaces this rather than adding to it; see
+// setChannels.
+func (r *Router) setApprovers(p approverPolicy) { r.defaults.approvers = p }
 
 // watchPermsIfOffered starts this session's permission watcher, at most once.
 //
@@ -59,7 +70,7 @@ func (r *Router) setApprovers(p approverPolicy) { r.approvers = p }
 // pending, so a watcher that attaches after the gate has stopped a call still
 // receives it.
 func (r *Router) watchPermsIfOffered(ctx context.Context, conv string, e *sessionEntry, c daemon.Capabilities) {
-	if r.approvals == nil || !c.Offers(daemon.FeaturePermsStream) {
+	if r.approvals == nil || !r.settingsFor(e.channel).approvals || !c.Offers(daemon.FeaturePermsStream) {
 		return
 	}
 	if !e.claimPermsWatch() {
@@ -367,7 +378,12 @@ func (p approverPolicy) allows(caller string) bool {
 // approverJunk is the punctuation that means an entry was never one identity.
 // A space is the comma somebody forgot, a semicolon is the separator another
 // tool uses, and angle brackets are a mail client's display-name form.
-const approverJunk = " \t<>;"
+//
+// A comma is in here for the config file's sake (#71). The flag splits on it
+// before anything gets this far, so no entry from that path can carry one; a
+// JSON array element can, and "ana@x.com,ben@x.com" is a habit imported from
+// the flag that would otherwise load as one approver nobody can ever be.
+const approverJunk = " \t<>;,"
 
 // parseApprovers validates an --approvers value against the identity the
 // gateway will actually assert.
@@ -385,9 +401,19 @@ const approverJunk = " \t<>;"
 // place that mismatch is visible, so it is refused here rather than discovered
 // from a thread.
 func parseApprovers(s string, mode chat.CallerMode) (approverPolicy, error) {
+	return parseApproverList(strings.Split(s, ","), mode)
+}
+
+// parseApproverList is parseApprovers over entries somebody else has already
+// separated — a config file's JSON array (#71), where the separation is the
+// syntax rather than a comma inside one string. Every rule below applies to
+// both spellings, including the one about a space being a forgotten comma: an
+// array element with a space in it is a display name or two identities in one
+// string, neither of which will ever match.
+func parseApproverList(fields []string, mode chat.CallerMode) (approverPolicy, error) {
 	allowed := make(map[string]bool)
 	channel := false
-	for _, f := range strings.Split(s, ",") {
+	for _, f := range fields {
 		f = strings.ToLower(strings.TrimSpace(f))
 		switch {
 		case f == "":
@@ -475,7 +501,12 @@ func clampRunes(s string, n int) string {
 // the body — so this cannot attribute an approval to somebody who did not give
 // it, even if the press arrived claiming otherwise.
 func (r *Router) HandlePress(ctx context.Context, p chat.Press) error {
-	if r.approvals == nil {
+	// Resolved from the press's own channel rather than from the session's, and
+	// before the prompt is located, for the same reason the approver check below
+	// is: a channel this gateway does not relay prompts into gets one answer, and
+	// it is not one that reveals whether a prompt exists.
+	settings := r.settingsFor(p.Channel)
+	if r.approvals == nil || !settings.approvals {
 		return errors.New("permission prompts are not enabled on this gateway")
 	}
 	d := approval.Decision(p.Option)
@@ -485,7 +516,7 @@ func (r *Router) HandlePress(ctx context.Context, p chat.Press) error {
 		// wrong guess is an approval.
 		return fmt.Errorf("press on %s carried an answer that is not a decision: %q", p.Conversation, p.Option)
 	}
-	if !r.approvers.allows(p.Caller) {
+	if !settings.approvers.allows(p.Caller) {
 		// Refused here, before the prompt is even located: a press switchboard
 		// will not relay should not get to learn whether the question is still
 		// live, or which session this thread is on. Not silent, though, and the
