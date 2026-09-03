@@ -6,6 +6,63 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [v0.3.0] — 2026-09-03
+
+A release about answering back. v0.1.0 and v0.2.0 were one-directional: a room
+watched a turn happen and could start another one. Two things here let the room
+act on a turn in flight, and a third lets an operator describe the room itself.
+
+**A blocked tool call becomes a question in the thread** (#40). A permission
+prompt used to park a turn until whoever started it noticed a console; it now
+reaches the people already in the conversation, with buttons, and the answer
+releases the call. **Off by default, and turning it on is a real grant** —
+anyone who can post in a conversation can answer its prompts, and some of those
+answers outlive the request that raised them. Because that is a grant rather
+than a rendering choice, it is announced on every start, like the outbound-only
+banner. `--approvers` (#65) narrows who may answer to a named list, and the
+banner says which posture is in force.
+
+**Every setting now has one home** (#71). Twenty-three flags had grown nine
+environment alternatives one at a time, so a Deployment set some settings under
+`args:` and others under `env:` with no rule explaining which; `--config` reads
+them all from JSON, with precedence **explicit flag > `$SWITCHBOARD_*` > file >
+built-in default**. But the reason the file exists is the two things a flag
+cannot do at all: hold structure — `ingress_allow` and `googlechat_commands`
+stop being a list and a map flattened into one string — and scope a setting to a
+channel. A `channels` block keyed by the platform's channel ID scopes
+`approvals`, `approvers`, `progress_mode` and `show_usage`, which is what #65
+wanted and could not express, since a flag has nowhere to put the channel. A
+config file is the artifact designed to be checked in, so a key that reads like
+a credential or a value that looks like a live one stops the run; unknown keys,
+a missing `--config` target, and a channel key that is not the shape of a
+channel ID are all startup errors, on the rule that a setting which silently
+fails to apply is a security bug — the version of it that matters being a
+narrowed approver list quietly becoming an open one.
+
+The `deploy/` manifests moved onto that file: each overlay carries a
+`config.json` that a `configMapGenerator` turns into a content-hashed ConfigMap,
+and the container's argv is `--config` alone, because any setting left in
+`args:` would outrank the file and an operator's ConfigMap edit would do nothing.
+
+Two things carry over unchanged. **Google Chat still runs over Pub/Sub**, with
+no card clicks (#28) — though the blame is now correctly assigned: that is the
+**add-on** framework's limit rather than Pub/Sub's, and #29 still tracks the
+HTTP interaction endpoint that would deliver them (#69). That bounds the
+feature above: **approvals are answerable on Slack only.** A Chat room is
+posted the same question with its options listed as prose — written once in
+`chat.DecisionText` so a platform that cannot collect an answer still shows a
+person one they can act on by other means — but no press can reach the gateway,
+so the turn stays blocked until it is answered somewhere else. And **long-turn
+progress still defaults to `indicator`**.
+
+Upgrading from v0.2.0 needs no configuration change: every flag still exists and
+still outranks the file, so an existing invocation keeps working untouched. What
+changed shape is the shipped manifests — applying `deploy/overlays/slack` or
+`deploy/overlays/googlechat` now creates a ConfigMap and a one-argument
+container. Consumers should pin `v0.3.0` rather than a pseudo-version;
+`switchboard version` reports it, whether the binary came from
+`go install …@v0.3.0` or from `ghcr.io/go-steer/switchboard:v0.3.0`.
+
 ### Added
 - Gateway config file (#71): `-c` / `--config` (or `$SWITCHBOARD_CONFIG`) reads
   every setting from JSON, with precedence **explicit flag > `$SWITCHBOARD_*` >
