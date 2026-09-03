@@ -550,6 +550,16 @@ func isBlockRejection(err error) bool {
 // if the email is unavailable it falls back to the user ID so a turn is
 // still attributed (the daemon may then reject an unknown caller, which
 // is surfaced upstream rather than silently dropped here).
+//
+// A failed lookup is not cached. The fallback it produces is now an input to
+// an authorization decision — an approver list is keyed by this string — and a
+// cached fallback is a permanent one: a single 429 on the first press of the
+// day would map an approver onto their user ID for the life of the process and
+// refuse every answer they gave afterwards, with nothing to read but one
+// users.info line from hours earlier. Re-asking costs one call per turn while
+// the API is unhappy, which is the cheaper failure by a wide margin. A lookup
+// that succeeded and simply had no email to give is a fact about the user
+// rather than a blip, so that one is cached.
 func (a *Adapter) resolveCaller(ctx context.Context, userID string) string {
 	if a.mode == CallerID {
 		return userID
@@ -561,10 +571,13 @@ func (a *Adapter) resolveCaller(ctx context.Context, userID string) string {
 	}
 	a.mu.Unlock()
 
+	u, err := a.api.GetUserInfoContext(ctx, userID)
+	if err != nil {
+		a.logf("slack: users.info %s: %v (falling back to user ID, not cached)", userID, err)
+		return userID
+	}
 	caller := userID
-	if u, err := a.api.GetUserInfoContext(ctx, userID); err != nil {
-		a.logf("slack: users.info %s: %v (falling back to user ID)", userID, err)
-	} else if email := u.Profile.Email; email != "" {
+	if email := u.Profile.Email; email != "" {
 		caller = email
 	} else {
 		a.logf("slack: user %s has no email (need users:read.email?); using user ID", userID)

@@ -125,6 +125,47 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     pending prompts. A prompt that is no longer pending is not reported as a
     failure: someone else answered first, or it timed out, and the question is
     settled either way.
+- `--approvers`: who may answer one of those prompts (#65). It defaults to the
+  literal `channel` — anyone who can post in the conversation, which is what
+  `--approvals` already meant, so upgrading changes nothing. Naming that default
+  is the point of it: the open posture becomes a value an operator can read back
+  out of the process args instead of a door left open by omission. Pass a
+  comma-separated list of the identities switchboard asserts — emails, or
+  platform IDs under `--caller-id id`, matched without regard to case — to
+  narrow it, and the startup banner reports how many were named rather than who.
+  - `channel` is a defensible default and not a missing check. Presses arrive
+    over a connection the platform authenticated, from somebody the platform
+    rendered the buttons to, so membership is access control already enforced
+    upstream — no membership call needed to rely on it. What switchboard cannot
+    see is how wide the room is: a public channel is the whole workspace, and a
+    Slack Connect channel reaches outside the org. That is the deployment that
+    wants a list.
+  - The gate runs before the prompt is located, so a press this gateway will not
+    relay does not learn whether the question is still live or which session the
+    thread holds. The refusal is posted rather than swallowed — a press that
+    vanishes reads as one that worked — and it names no approver back, since
+    reading the list out to whoever presses hardest turns a refusal into a
+    directory. The buttons stay up: somebody else in the room may be allowed.
+  - A list nobody could match is refused at startup instead of discovered from a
+    thread. It is the failure that matters here, because it is invisible: an
+    entry the gateway will never assert is just an approver who never presses, so
+    the run starts, announces its approvers and then refuses every one of them.
+    So the list is checked against the caller mode the same run selected — emails
+    under `--caller-id "id"` and platform IDs under `email` are both refused — as
+    are a display name, a semicolon or a space where a comma belongs, and a list
+    that names nobody. `channel` cannot be combined with names, because the two
+    ways of reading that disagree about everything that matters.
+  - `SWITCHBOARD_APPROVERS` set to the empty string is refused rather than read
+    as unset. Every other setting here treats empty as absent, which is right for
+    a default and wrong for this one: an unset ConfigMap key renders as `""`, and
+    resolving that to `channel` would widen the grant at the moment somebody was
+    trying to narrow it.
+  - `--approvers` with `--approvals` off warns and does nothing, and there is no
+    value meaning "nobody" — leaving `--approvals` off is already that.
+  - Slack only for now, and by circumstance rather than by design: the gate is on
+    a press, and the add-on framework routes no click trigger to a Chat app, so
+    none arrives to gate (#28, #29). It lives in the router rather than an
+    adapter, so it covers Chat the day presses do.
 - `pkg/approval`: a client for the agent backend's permission broker, the first
   half of turning a blocked tool call into a question someone in a chat thread
   can answer (#40). It streams pending prompts from
@@ -256,6 +297,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   working at conversion is worse than one that waits for the ingress that will
   outlive it. `docs/DESIGN.md` §3.3, `README.md`, `docs/googlechat-setup.md`,
   and the `googlechat` package docs.
+- A failed Slack `users.info` lookup is no longer cached as the caller's
+  identity (#65). It falls back to the raw user ID so a turn is still
+  attributed, and caching that was fine while the string only reached an audit
+  line — but `--approvers` is keyed by it, so one rate-limit response on
+  somebody's first press of the day would have mapped them onto `U0123ABC` for
+  the life of the process and refused every approval they gave afterwards, with
+  one `users.info` line from hours earlier as the only clue and a restart as the
+  only cure. Now re-asked next time, which costs a call per turn while the API
+  is unhappy and nothing at all when it is not; a lookup that succeeded and had
+  no email to give is a fact about the user rather than a blip, so that one is
+  still cached.
 - Adding the app to a Google Chat space by @mentioning it was answered with
   silence (#55) — the first thing anyone installing it does, and indistinguishable
   from the missing Pub/Sub grant the setup doc warns about. Chat splits that one

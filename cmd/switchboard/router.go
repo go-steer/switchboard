@@ -409,6 +409,12 @@ type Router struct {
 	// see setApprovals. Set once at startup, before dispatch begins, like
 	// showUsage.
 	approvals *approval.Client
+
+	// approvers is who may answer one of those prompts. The zero value lets
+	// anyone who can post in the conversation answer, which is the shipped
+	// default — see approverPolicy for why that is a posture rather than an
+	// omission. Set once at startup alongside approvals.
+	approvers approverPolicy
 }
 
 // sessionEntry is a conversation's session plus the state to create it

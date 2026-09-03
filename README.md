@@ -396,18 +396,72 @@ all — the process was restarted and no longer knows what it asked, the platfor
 did not say which message was pressed, or the edit failed — it is posted beside
 it instead. A press always ends in something to read.
 
-**It is off by default, and turning it on is a real grant.** Anyone who can post
-in the conversation can answer its prompts, and some of those answers outlive
-the request: `allow-always` persists across restarts and applies to the whole
-agent backend, not the thread it was pressed in. Decide it per deployment, with
-the channel's membership in mind. It is ignored under `--outbound-only`, which
-warns — there is no turn to unblock.
+**It is off by default, and turning it on is a real grant.** By default anyone
+who can post in the conversation can answer its prompts, and some of those
+answers outlive the request: `allow-always` persists across restarts and applies
+to the whole agent backend, not the thread it was pressed in. It is ignored under
+`--outbound-only`, which warns — there is no turn to unblock.
 
 Because it is a grant, it is announced on every start:
 
 ```
 2026-08-31T09:00:00.000Z switchboard: approvals: permission prompts go to the conversation, and anyone who can post there can answer them
 ```
+
+#### Who may answer
+
+`--approvers` decides that, and it defaults to `channel` — anyone who can post
+in the conversation, which is the line the banner above is reporting.
+
+That default is a posture rather than an oversight. Channel membership is access
+control the platform already enforces: a press only ever arrives over an
+authenticated connection, from somebody the platform rendered the buttons to, so
+a curated private channel is a perfectly good approver set and switchboard needs
+no membership call to rely on it. What it cannot see is how wide the room is — a
+public channel is the whole workspace, and a Slack Connect channel reaches
+outside the org entirely.
+
+Name the people instead when the room is wider than the grant deserves:
+
+```sh
+--approvers "ana@example.com,ben@example.com"   # or $SWITCHBOARD_APPROVERS
+```
+
+The identities are the ones switchboard asserts — emails by default, platform
+IDs under `--caller-id id` — matched without regard to case. A press from anyone
+else is refused before it reaches the agent, logged, and answered in the thread;
+the buttons stay up, because somebody else in the room may be allowed to answer:
+
+```
+⛔ **Not an approver** — that answer wasn't sent. Someone on this gateway's approver list has to answer it.
+```
+
+Startup then reports the count rather than the names, because a log line is the
+wrong place to publish who can approve production changes:
+
+```
+2026-08-31T09:00:00.000Z switchboard: approvals: permission prompts go to the conversation, and 2 named approver(s) may answer them
+```
+
+A list is checked at startup against the identity this run will actually assert,
+and a run whose list cannot match is refused rather than started: emails under
+`--caller-id id`, a display name, a semicolon where a comma belongs, or
+`SWITCHBOARD_APPROVERS` set to nothing at all. Each of those otherwise starts
+cleanly, announces its approvers, and then refuses every one of them — a total
+approval outage whose only symptom is the notice above.
+
+**This is a Slack control today.** The gate is on a press, and no press reaches
+this gateway from Chat: the add-on framework routes no click trigger, so Chat
+posts the question as prose with the answers listed and a Chat-only deployment
+has nothing for `--approvers` to narrow yet (see *Workspace add-on mode* above,
+and [#29](https://github.com/go-steer/switchboard/issues/29) for the HTTP
+interaction endpoint that changes it). The gate is in the router rather than the
+adapter, so it covers Chat the moment presses arrive.
+
+This is a gateway-side gate on a surface switchboard invented, not a
+re-implementation of the backend's authorization: core-agent still decides what
+the caller may do once the answer reaches it. There is no `--approvers` value
+meaning "nobody" — leaving `--approvals` off already does that.
 
 Six answers exist, and switchboard offers the ones that mean what they say for
 the prompt in front of you:

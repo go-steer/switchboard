@@ -147,8 +147,12 @@ func runServe(args []string) (err error) {
 			"discloses spend to everyone in the conversation")
 	approvals := fs.Bool("approvals", false,
 		"relay the agent's permission prompts into the conversation as buttons, and send back "+
-			"what someone presses; off by default because anyone who can post in a conversation "+
-			"can then answer its prompts, and some of those answers outlive the request")
+			"what someone presses; off by default because it is a grant — see --approvers for "+
+			"who it goes to, and some of those answers outlive the request")
+	approvers := fs.String("approvers", envOr(envApprovers, approversChannel),
+		"who may answer a permission prompt (--approvals): \"channel\" for anyone who can post "+
+			"in the conversation, or a comma-separated list of the identities switchboard "+
+			"asserts (emails, or platform IDs under --caller-id \"id\")")
 	googleProject := fs.String("google-project", envOr("SWITCHBOARD_GOOGLE_PROJECT", ""),
 		"GCP project hosting the Google Chat Pub/Sub subscription (--platform googlechat)")
 	googleSub := fs.String("google-subscription", envOr("SWITCHBOARD_GOOGLE_SUBSCRIPTION", ""),
@@ -239,6 +243,20 @@ func runServe(args []string) (err error) {
 	callerMode, err := parseCallerMode(*callerID)
 	if err != nil {
 		return err
+	}
+
+	// After the caller mode, because an approver list is only meaningful against
+	// the identity this gateway will assert — see parseApprovers.
+	if v, ok := os.LookupEnv(envApprovers); ok && strings.TrimSpace(v) == "" {
+		// envOr reads an empty value as unset, which is right for a cosmetic
+		// default and wrong for this one: an unset ConfigMap key renders as the
+		// empty string, and quietly resolving that to "channel" would widen the
+		// grant at the moment somebody was trying to set it.
+		return fmt.Errorf("%s is set but empty: pass %q to let anyone in the conversation answer", envApprovers, approversChannel)
+	}
+	policy, err := parseApprovers(*approvers, callerMode)
+	if err != nil {
+		return fmt.Errorf("invalid --approvers %q: %w", *approvers, err)
 	}
 
 	progress, err := parseProgressMode(*progressMode)
@@ -352,17 +370,27 @@ func runServe(args []string) (err error) {
 		router = NewRouter(dc, adapter, progress, m, logf)
 		router.setShowUsage(*showUsage)
 		router.setApprovals(ac)
+		router.setApprovers(policy)
 	}
 	if *approvals {
-		if !inbound {
+		switch {
+		case !inbound:
 			logf("warning: --approvals answers prompts raised by an agent turn, and an outbound-only run has none")
-		} else {
+		case policy.open():
 			// Said on every start, like the outbound-only banner, because this
 			// one is a grant: from here on, anyone who can post in a
 			// conversation can answer that session's permission prompts, and
 			// some of those answers outlive the request.
 			logf("approvals: permission prompts go to the conversation, and anyone who can post there can answer them")
+		default:
+			// The narrowed posture is announced too, and by count rather than
+			// by name: the names are already in the process args for anyone
+			// entitled to read them, and a log line is the wrong place to
+			// publish a list of who can approve production changes.
+			logf("approvals: permission prompts go to the conversation, and %d named approver(s) may answer them", len(policy.allowed))
 		}
+	} else if !policy.open() {
+		logf("warning: --approvers names who may answer permission prompts, and --approvals is off")
 	}
 	if *showUsage {
 		switch {

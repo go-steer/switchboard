@@ -29,6 +29,14 @@ never here.
 - **No credential logic here:** per-caller credential resolution is core-agent's
   job (W0), inside the daemon MCP outbound path. Switchboard only *asserts* the
   caller via `X-Asserted-Caller`.
+  - The line this draws is *credential resolution*, not every use of identity.
+    `--approvers` (#65) refuses to relay a press from someone who is not an
+    approver, and that is not an exception: the buttons are a surface
+    switchboard invented, the grant they create is switchboard's, and
+    `HandlePress` already refuses presses it cannot place. What stays out of
+    here is deciding what a caller may *do* once the daemon has them — that
+    remains core-agent's, which is free to refuse the same press again and
+    should.
 - **Contract client is thin:** `pkg/daemon` speaks only the four shipped verbs
   (create / inject / wake / SSE). It introspects no auth and lists no sessions.
 - **Provider seam:** platform specifics stay behind `pkg/chat.Adapter`. Adding a

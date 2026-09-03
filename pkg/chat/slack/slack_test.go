@@ -229,3 +229,76 @@ func TestParseSlashCommand(t *testing.T) {
 		}
 	}
 }
+
+// TestAFailedCallerLookupIsNotCachedForever checks a transient users.info
+// failure does not pin a user to their raw ID for the life of the process.
+//
+// The fallback is now an input to an authorization decision — an --approvers
+// list is keyed by this string — so caching it would mean one 429 on somebody's
+// first press of the day refuses every approval they give afterwards, with
+// nothing to read but a users.info line from hours earlier and no recovery
+// short of a restart.
+func TestAFailedCallerLookupIsNotCachedForever(t *testing.T) {
+	var calls int
+	mux := http.NewServeMux()
+	mux.HandleFunc("/users.info", func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		w.Header().Set("Content-Type", "application/json")
+		if calls == 1 {
+			fmt.Fprint(w, `{"ok":false,"error":"ratelimited"}`)
+			return
+		}
+		fmt.Fprint(w, `{"ok":true,"user":{"id":"U9","profile":{"email":"ana@example.com"}}}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	a, err := New(Config{BotToken: "xoxb-x"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	a.api = slack.New("xoxb-x", slack.OptionAPIURL(srv.URL+"/"))
+
+	if got := a.resolveCaller(context.Background(), "U9"); got != "U9" {
+		t.Fatalf("a failed lookup resolved to %q, want the user ID as the fallback", got)
+	}
+	if got := a.resolveCaller(context.Background(), "U9"); got != "ana@example.com" {
+		t.Fatalf("the next lookup resolved to %q, want the email; the failure was cached", got)
+	}
+	// And the success is cached, so this is not a call per turn forever.
+	if got := a.resolveCaller(context.Background(), "U9"); got != "ana@example.com" {
+		t.Fatalf("resolveCaller = %q, want the email", got)
+	}
+	if calls != 2 {
+		t.Errorf("users.info was called %d times, want 2 — the resolved email was not cached", calls)
+	}
+}
+
+// A user with no email is a fact about the user rather than a blip, so that one
+// is cached: re-asking every turn would buy nothing.
+func TestACallerWithNoEmailIsResolvedOnce(t *testing.T) {
+	var calls int
+	mux := http.NewServeMux()
+	mux.HandleFunc("/users.info", func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"ok":true,"user":{"id":"U9","profile":{"email":""}}}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	a, err := New(Config{BotToken: "xoxb-x"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	a.api = slack.New("xoxb-x", slack.OptionAPIURL(srv.URL+"/"))
+
+	for i := 0; i < 3; i++ {
+		if got := a.resolveCaller(context.Background(), "U9"); got != "U9" {
+			t.Fatalf("resolveCaller = %q, want the user ID", got)
+		}
+	}
+	if calls != 1 {
+		t.Errorf("users.info was called %d times, want 1", calls)
+	}
+}
