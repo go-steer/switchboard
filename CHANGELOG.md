@@ -6,6 +6,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- `internal/version.Version` is `v0.4.0-dev`, so a build off main no longer
+  claims to be the release that just shipped (#43). Same window
+  `verify-version-fallback` keeps short after every tag.
+- Documented image tags carry no `v`. `release-images.yml` builds them with
+  metadata-action's `{{version}}`, which strips it — the registry holds `0.3.0`,
+  `0.3`, `0`, `latest` — but the v0.3.0 notes, `deploy/README.md`, the README's
+  cosign example and the workflow's own header comment all wrote `vX.Y.Z`, which
+  is a pull that 404s. The Go module path keeps the `v` and is unchanged; only
+  the image tag drops it, which is what made the two easy to conflate.
+
 ## [v0.3.0] — 2026-09-03
 
 A release about answering back. v0.1.0 and v0.2.0 were one-directional: a room
@@ -61,7 +72,8 @@ changed shape is the shipped manifests — applying `deploy/overlays/slack` or
 `deploy/overlays/googlechat` now creates a ConfigMap and a one-argument
 container. Consumers should pin `v0.3.0` rather than a pseudo-version;
 `switchboard version` reports it, whether the binary came from
-`go install …@v0.3.0` or from `ghcr.io/go-steer/switchboard:v0.3.0`.
+`go install …@v0.3.0` or from `ghcr.io/go-steer/switchboard:0.3.0` — the module
+version keeps the `v` and the image tag does not.
 
 ### Added
 - Gateway config file (#71): `-c` / `--config` (or `$SWITCHBOARD_CONFIG`) reads
