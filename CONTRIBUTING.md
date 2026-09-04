@@ -42,6 +42,32 @@ one repo should recognize the other.
 Every new package ships with unit tests. A new feature without a test
 is not done; a bug fix without a regression test lets the bug come back.
 
+## Cutting a release
+
+Pushing the tag is the whole release. `.github/workflows/release-images.yml`
+builds and signs the image, then publishes the GitHub Release from the tag's own
+`CHANGELOG.md` section — v0.2.0 and v0.3.0 were tagged with no release because
+that last step used to be done by hand.
+
+1. Roll `## [Unreleased]` up into `## [vX.Y.Z] — YYYY-MM-DD`, opening the
+   section with a few paragraphs of prose: what the release is *about*, what
+   carries over unchanged, and what upgrading costs. That prose is the release
+   notes, so write it for someone deciding whether to pin the version.
+2. Merge, then tag the merge commit and push it: `git tag -s vX.Y.Z && git push
+   origin vX.Y.Z`. A tag with no matching `CHANGELOG.md` section fails the
+   release job rather than publishing an empty body.
+3. Bump `internal/version.Version` to the next `vX.Y+1.0-dev` on `main` right
+   away — `verify-version-fallback` goes red against the new tag and will fail
+   every open PR until it is done.
+
+Notes you want to write by hand instead: create the release as a **draft**
+before pushing the tag. An existing release — draft included — is left untouched
+by the workflow. Republishing an older tag is the `workflow_dispatch` entrypoint
+with the tag input.
+
+Image tags carry no `v` (`ghcr.io/go-steer/switchboard:0.3.0`); the Go module
+version keeps it (`…/cmd/switchboard@v0.3.0`).
+
 ## License
 
 By contributing you agree your contributions are licensed under the
