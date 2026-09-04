@@ -482,11 +482,15 @@ func TestCapabilitiesWarningNamesOnlyWhatIsAbsent(t *testing.T) {
 		ident:  []string{"core-agent/0.9.2", "1.5.0"},
 		silent: true,
 	}, {
-		// Losing these two is what #34 and the usage footer are built on.
+		// Losing these is what #34, the usage footer and #42's backlog are
+		// built on. The inbox pair is the quietest of them: without it a
+		// thread whose second message arrives before the first has answered
+		// silently goes back to losing a placeholder, which is a symptom
+		// nobody would connect to a capabilities frame unaided.
 		name: "a daemon with no accounting and no failure report",
 		frame: `{"protocol_version":"1.5.0","server":"core-agent/0.9.2",` +
 			`"event_types":["stream-chunk","tool-call","status-update"]}`,
-		missing: []string{daemon.EventUsage, daemon.EventTurnComplete, daemon.EventTurnError},
+		missing: []string{daemon.EventUsage, daemon.EventTurnComplete, daemon.EventTurnError, daemon.EventInbox},
 	}, {
 		// The loudest absence there is: no stream-chunk means no answers.
 		name: "a daemon that will not stream the answer",

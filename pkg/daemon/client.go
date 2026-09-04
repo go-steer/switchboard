@@ -197,12 +197,17 @@ const EventAgent = "agent"
 //
 // EventStatusUpdate and EventCapabilities describe the session rather than a
 // turn's output: what the daemon is doing right now, and what it can do at all.
+// EventInbox is the one event describing a message's life *before* it becomes
+// a turn: queued when it lands on the inbox, dequeued when a turn takes it up.
+// It is the only way to know a session has work waiting behind the turn it is
+// running — see InboxChange.
 const (
 	EventUsage        = "usage-update"
 	EventTurnComplete = "turn-complete"
 	EventTurnError    = "turn-error"
 	EventStatusUpdate = "status-update"
 	EventCapabilities = "capabilities"
+	EventInbox        = "inbox"
 )
 
 // The advertised names for the traffic that arrives on EventAgent. Nothing
@@ -495,6 +500,76 @@ func StatusUpdated(data string) (s SessionStatus, ok bool) {
 		return SessionStatus{}, false
 	}
 	return SessionStatus{TurnState: f.TurnState}, true
+}
+
+// Inbox states, mirroring the daemon's event-stream spec §2.4. The spec
+// reserves room for more (it names "injected" as a candidate), so an unknown
+// state must be ignored rather than read as one of these two.
+const (
+	InboxQueued   = "queued"
+	InboxDequeued = "dequeued"
+)
+
+// InboxChange is one message's transition on the session's inbox: queued when
+// it arrives, dequeued when the turn that will answer it takes it up.
+//
+// The pair is what tells a caller that a session has work waiting behind the
+// turn it is currently running. Nothing else on the stream does: a turn's
+// events say nothing about what is queued behind it, and the daemon's inbox
+// coalesces, so counting turns against messages does not work either — several
+// queued messages drain into one turn and produce a single turn-complete.
+//
+// PromptID is a set member, not a counter, and that is what makes this usable
+// across a reconnect. Inbox events carry no seq, so they cannot be deduplicated
+// the way agent frames are, and a replayed one is simply seen twice: adding an
+// id already present is a no-op, and so is removing one already gone. A count
+// incremented per event would desynchronise on exactly the reconnect it most
+// needs to survive.
+//
+// What replay cannot repair is a *lost* event — a dequeued emitted during an
+// outage is gone, and the id it would have retired stays in the set. Callers
+// need an independent way back to a known-empty state; the daemon reporting
+// itself idle is one, since an idle session has by definition drained.
+type InboxChange struct {
+	// State is InboxQueued, InboxDequeued, or a value this build does not know.
+	State string
+	// PromptID is the inbox id of the message, assigned at queue time and
+	// echoed on the inject response that queued it.
+	//
+	// It does NOT correlate with the prompt_id on turn-complete, whatever the
+	// daemon's own documentation says: core-agent mints the inbox id in
+	// inbox.push and then mints an unrelated one at turn start for the terminal
+	// frame (pkg/agent/agent.go, `promptID := newPromptID()`). Filed upstream.
+	// Until that is fixed, the only sound reading of an id here is "the same
+	// message I saw queued", never "the turn that will answer it".
+	PromptID string
+}
+
+// Queued and Dequeued report the transition, false for the other state and for
+// one this build does not know.
+func (c InboxChange) Queued() bool   { return c.State == InboxQueued }
+func (c InboxChange) Dequeued() bool { return c.State == InboxDequeued }
+
+// inboxFrame is the JSON payload of an EventInbox event. queued_at is carried
+// too and deliberately not modeled: nothing reads it, and the wall-clock a
+// message landed at is not something a gateway should start trusting.
+type inboxFrame struct {
+	State    string `json:"state"`
+	PromptID string `json:"prompt_id"`
+}
+
+// InboxChanged parses an EventInbox payload. ok is false on a parse failure or
+// a frame missing either field — an inbox event that does not name a message,
+// or does not say what became of it, cannot move a set.
+func InboxChanged(data string) (c InboxChange, ok bool) {
+	var f inboxFrame
+	if err := json.Unmarshal([]byte(data), &f); err != nil {
+		return InboxChange{}, false
+	}
+	if f.State == "" || f.PromptID == "" {
+		return InboxChange{}, false
+	}
+	return InboxChange{State: f.State, PromptID: f.PromptID}, true
 }
 
 // Capabilities is the frame the daemon opens every stream with: what it is,

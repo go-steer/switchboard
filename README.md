@@ -282,10 +282,28 @@ turn has spoken, its boundary deletes the placeholder rather than freezing it:
 the freeze exists so a silent turn leaves some trace, and a turn with text above
 it already has one.
 
-One case still stops the clock early: a second question asked before the first
-has answered. The new turn takes over the single placeholder and the old one
-goes quiet. No answer is lost, only the clock. Fixing it needs a per-turn
-message identity the relay is not given (#42).
+A second question asked before the first has answered used to stop the clock the
+same way, and for the same reason: one placeholder per conversation, so the
+first answer retired the message the second turn was counting on. Switchboard
+now watches the daemon's `inbox` events — `queued` when a message lands,
+`dequeued` when a turn picks it up — and an answer with something still queued
+behind it re-anchors the placeholder rather than retiring it, exactly as
+narration does. Picking the queued message up restarts the clock on the
+placeholder the previous turn left behind.
+
+This needs a daemon that advertises `inbox`; without it the older behaviour
+applies and the second turn runs without a clock. The events carry no `seq`, so
+one lost in a stream outage cannot be replayed — a `dequeued` that never arrives
+would leave switchboard believing a message is queued forever. The daemon
+reporting the session idle is what resynchronises it: an idle session has
+drained its inbox by definition.
+
+What is still not fixed is attributing an answer to a *particular* one of
+several turns. Switchboard can tell that another turn is owed but not which turn
+any given answer belongs to, because the daemon's `turn-complete` names a
+prompt id minted at turn start rather than the one it returned from `inject`
+(go-steer/core-agent#943). In a thread running two overlapping turns the usage
+footers can therefore land on the wrong answer (#42).
 
 #### What `stream` shows
 
