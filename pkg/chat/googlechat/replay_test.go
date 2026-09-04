@@ -162,7 +162,6 @@ func replay(t *testing.T, payload []byte) replayResult {
 		msg:   m,
 		cards: CardsStatus,
 		cmds:  map[int64]string{1: "progress"},
-		logf:  func(string, ...any) {},
 	}
 	a.dispatch(context.Background(), h, &pubsub.Message{Data: payload})
 

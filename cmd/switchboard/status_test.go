@@ -25,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-steer/switchboard/internal/logging"
 	"github.com/go-steer/switchboard/pkg/chat"
 	"github.com/go-steer/switchboard/pkg/daemon"
 )
@@ -47,22 +48,37 @@ func entryFor(t *testing.T, r *Router) *sessionEntry {
 // would see.
 type logSink struct {
 	mu    sync.Mutex
-	lines []string
+	lines []logLine
 }
 
-func (l *logSink) logf(format string, args ...any) {
+type logLine struct {
+	level logging.Level
+	text  string
+}
+
+func (l *logSink) logf(lv logging.Level, format string, args ...any) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.lines = append(l.lines, fmt.Sprintf(format, args...))
+	l.lines = append(l.lines, logLine{level: lv, text: fmt.Sprintf(format, args...)})
 }
 
 // matching returns the collected lines containing sub.
 func (l *logSink) matching(sub string) []string {
+	var out []string
+	for _, line := range l.at(sub) {
+		out = append(out, line.text)
+	}
+	return out
+}
+
+// at is matching with the level kept, for the assertions that are about how a
+// line was classified rather than what it said.
+func (l *logSink) at(sub string) []logLine {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	var out []string
+	var out []logLine
 	for _, line := range l.lines {
-		if strings.Contains(line, sub) {
+		if strings.Contains(line.text, sub) {
 			out = append(out, line)
 		}
 	}
@@ -280,14 +296,24 @@ func TestCapabilitiesReportsWhatTheDaemonWillNotSend(t *testing.T) {
 	waitFor(t, func() bool { return len(sink.matching("does not advertise")) == 1 },
 		"the daemon's missing events were never reported")
 
-	ident := sink.matching("connected to")
+	ident := sink.at("connected to")
 	if len(ident) != 1 {
 		t.Fatalf("want one identity line, got %v", ident)
 	}
 	for _, want := range []string{"core-agent/0.4.0", "1.1.0"} {
-		if !strings.Contains(ident[0], want) {
-			t.Errorf("identity line = %q, want it to name %q", ident[0], want)
+		if !strings.Contains(ident[0].text, want) {
+			t.Errorf("identity line = %q, want it to name %q", ident[0].text, want)
 		}
+	}
+	// The pair is the point of the levels (#49): a daemon identifying itself is
+	// the run working, and a daemon that will not send the events switchboard
+	// reads is a deployment running degraded. One line apart in the same
+	// stream, and nothing but the level tells them apart.
+	if ident[0].level != logging.LevelInfo {
+		t.Errorf("identity line logged at %v, want INFO", ident[0].level)
+	}
+	if got := sink.at("does not advertise")[0].level; got != logging.LevelWarn {
+		t.Errorf("the missing-events line logged at %v, want WARN", got)
 	}
 
 	warn := sink.matching("does not advertise")[0]

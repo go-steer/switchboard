@@ -72,8 +72,8 @@ type Config struct {
 	// as the fallback; on an invalid_blocks rejection the send retries with
 	// text only. Default (false) posts flat mrkdwn.
 	RichBlocks bool
-	// Logf is an optional structured-ish logger; nil discards.
-	Logf func(format string, args ...any)
+	// Logf is where the adapter logs; the zero value discards.
+	Logf chat.Logf
 }
 
 // Adapter satisfies chat.Adapter.
@@ -85,7 +85,7 @@ type Adapter struct {
 	sm         *socketmode.Client
 	mode       CallerMode
 	richBlocks bool
-	logf       func(string, ...any)
+	logf       chat.Logf
 
 	// botUserID is this bot's own user ID, resolved at Run start and
 	// used to ignore our own posts (loop guard).
@@ -106,10 +106,6 @@ func New(cfg Config) (*Adapter, error) {
 	if mode == "" {
 		mode = CallerEmail
 	}
-	logf := cfg.Logf
-	if logf == nil {
-		logf = func(string, ...any) {}
-	}
 	// The app-level token is a Socket Mode credential and nothing else, so an
 	// egress-only client is built without it and never opens a socket. Egress
 	// authenticates with the bot token either way.
@@ -127,7 +123,7 @@ func New(cfg Config) (*Adapter, error) {
 		sm:         sm,
 		mode:       mode,
 		richBlocks: cfg.RichBlocks,
-		logf:       logf,
+		logf:       cfg.Logf,
 		callerByID: make(map[string]string),
 	}, nil
 }
@@ -146,7 +142,7 @@ func (a *Adapter) Run(ctx context.Context, h chat.Handler) error {
 		return fmt.Errorf("slack: auth test: %w", err)
 	} else {
 		a.botUserID = auth.UserID
-		a.logf("slack: connected as %s (%s)", auth.User, auth.UserID)
+		a.logf.Infof("slack: connected as %s (%s)", auth.User, auth.UserID)
 	}
 
 	// socketmode.Client.RunContext blocks reading the socket; run it in a
@@ -171,11 +167,11 @@ func (a *Adapter) Run(ctx context.Context, h chat.Handler) error {
 func (a *Adapter) dispatch(ctx context.Context, h chat.Handler, evt socketmode.Event) {
 	switch evt.Type {
 	case socketmode.EventTypeConnecting:
-		a.logf("slack: connecting")
+		a.logf.Infof("slack: connecting")
 	case socketmode.EventTypeConnected:
-		a.logf("slack: socket connected")
+		a.logf.Infof("slack: socket connected")
 	case socketmode.EventTypeConnectionError:
-		a.logf("slack: connection error: %v", evt.Data)
+		a.logf.Warnf("slack: connection error: %v", evt.Data)
 	case socketmode.EventTypeEventsAPI:
 		api, ok := evt.Data.(slackevents.EventsAPIEvent)
 		if !ok {
@@ -220,7 +216,11 @@ func (a *Adapter) dispatch(ctx context.Context, h chat.Handler, evt socketmode.E
 func (a *Adapter) handleInteractive(ctx context.Context, h chat.Handler, req *socketmode.Request, cb slack.InteractionCallback) {
 	if req != nil {
 		if err := a.sm.Ack(*req); err != nil {
-			a.logf("slack: ack interaction: %v", err)
+			// WARN where the slash command's ack below is ERROR, and the
+			// difference is what the ack carries. This one is empty: the press
+			// is handed on regardless, so a lost ack costs a spinner. The slash
+			// command's ack *is* the reply, and losing it loses the answer.
+			a.logf.Warnf("slack: ack interaction: %v", err)
 		}
 	}
 	press, ok := pressFrom(cb)
@@ -233,7 +233,7 @@ func (a *Adapter) handleInteractive(ctx context.Context, h chat.Handler, req *so
 		// whole point of the press is that a *person* answered.
 		press.Caller = a.resolveCaller(ctx, cb.User.ID)
 		if err := h.HandlePress(ctx, press); err != nil {
-			a.logf("slack: press %s on %s: %v", press.Option, press.Conversation, err)
+			a.logf.Errorf("slack: press %s on %s: %v", press.Option, press.Conversation, err)
 		}
 	}()
 }
@@ -248,12 +248,12 @@ func (a *Adapter) handleSlashCommand(ctx context.Context, h chat.Handler, req *s
 	cmd.Caller = a.resolveCaller(ctx, sc.UserID)
 	ack, err := h.HandleCommand(ctx, cmd)
 	if err != nil {
-		a.logf("slack: slash command %q: %v", cmd.Name, err)
+		a.logf.Errorf("slack: slash command %q: %v", cmd.Name, err)
 		ack = "Sorry, that command failed."
 	}
 	if req != nil {
 		if aerr := a.sm.Ack(*req, map[string]any{"response_type": "ephemeral", "text": ack}); aerr != nil {
-			a.logf("slack: ack slash command: %v", aerr)
+			a.logf.Errorf("slack: ack slash command: %v", aerr)
 		}
 	}
 }
@@ -289,7 +289,7 @@ func (a *Adapter) handleMention(ctx context.Context, h chat.Handler, ev *slackev
 			Text:         text,
 		}
 		if err := h.Handle(ctx, msg); err != nil {
-			a.logf("slack: handle %s: %v", conv, err)
+			a.logf.Errorf("slack: handle %s: %v", conv, err)
 		}
 	}()
 }
@@ -302,11 +302,11 @@ func (a *Adapter) runMentionCommand(ctx context.Context, h chat.Handler, cmd cha
 	cmd.Caller = a.resolveCaller(ctx, userID)
 	ack, err := h.HandleCommand(ctx, cmd)
 	if err != nil {
-		a.logf("slack: mention command %q: %v", cmd.Name, err)
+		a.logf.Errorf("slack: mention command %q: %v", cmd.Name, err)
 		return
 	}
 	if _, err := a.Send(ctx, chat.Reply{Conversation: conv, Text: ack}); err != nil {
-		a.logf("slack: command ack %s: %v", conv, err)
+		a.logf.Errorf("slack: command ack %s: %v", conv, err)
 	}
 }
 
@@ -350,7 +350,7 @@ func (a *Adapter) Send(ctx context.Context, r chat.Reply) (chat.MessageRef, erro
 		if !isBlockRejection(err) {
 			return chat.MessageRef{}, fmt.Errorf("slack: post decision to %s: %w", r.Conversation, platformErr(err))
 		}
-		a.logf("slack: decision blocks rejected for %s (%v); retrying as text", r.Conversation, err)
+		a.logf.Warnf("slack: decision blocks rejected for %s (%v); retrying as text", r.Conversation, err)
 	}
 
 	if a.richBlocks {
@@ -370,7 +370,7 @@ func (a *Adapter) Send(ctx context.Context, r chat.Reply) (chat.MessageRef, erro
 			if !isBlockRejection(err) {
 				return chat.MessageRef{}, fmt.Errorf("slack: post blocks to %s: %w", r.Conversation, platformErr(err))
 			}
-			a.logf("slack: blocks rejected for %s (%v); retrying as text", r.Conversation, err)
+			a.logf.Warnf("slack: blocks rejected for %s (%v); retrying as text", r.Conversation, err)
 		}
 	}
 
@@ -437,7 +437,7 @@ func (a *Adapter) Update(ctx context.Context, ref chat.MessageRef, r chat.Reply)
 			if !isBlockRejection(err) {
 				return fmt.Errorf("slack: update blocks in %s: %w", ref.Conversation, platformErr(err))
 			}
-			a.logf("slack: blocks rejected updating %s (%v); retrying as text", ref.Conversation, err)
+			a.logf.Warnf("slack: blocks rejected updating %s (%v); retrying as text", ref.Conversation, err)
 		}
 	}
 
@@ -573,14 +573,14 @@ func (a *Adapter) resolveCaller(ctx context.Context, userID string) string {
 
 	u, err := a.api.GetUserInfoContext(ctx, userID)
 	if err != nil {
-		a.logf("slack: users.info %s: %v (falling back to user ID, not cached)", userID, err)
+		a.logf.Warnf("slack: users.info %s: %v (falling back to user ID, not cached)", userID, err)
 		return userID
 	}
 	caller := userID
 	if email := u.Profile.Email; email != "" {
 		caller = email
 	} else {
-		a.logf("slack: user %s has no email (need users:read.email?); using user ID", userID)
+		a.logf.Warnf("slack: user %s has no email (need users:read.email?); using user ID", userID)
 	}
 
 	a.mu.Lock()

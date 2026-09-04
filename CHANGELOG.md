@@ -18,10 +18,37 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   tag with no matching changelog section fails rather than publishing an empty
   body, and an existing release — a draft included — is left alone, so
   hand-written notes still win by being drafted before the tag.
+- Log lines carry a severity (#49). Text renders it in its own fixed-width
+  column between the timestamp and the program name; JSON renders it as
+  Cloud Logging's `severity`, in Cloud Logging's vocabulary (`INFO`,
+  `WARNING`, `ERROR`), so an alert policy and Error Reporting see the failures
+  without a parser in between. Records used to carry no level at all and were
+  ingested at `DEFAULT`. All ~100 call sites were classified: `ERROR` for work
+  switchboard could not do that costs a user or a turn, `WARN` for degraded but
+  still going, `INFO` for lifecycle. There is no `DEBUG` and no `--log-level`.
+- Runtime errors from the `--metrics-addr` and `--ingress-addr` listeners go
+  through switchboard's logger at `ERROR`, prefixed with the listener's name
+  (#49). `http.Server.ErrorLog` was unset, so `net/http` wrote a recovered
+  handler panic or a failed TLS handshake to stderr through the log package's
+  default logger — unstamped, and under `--log-format json` unparseable lines
+  in the middle of the stream. A multi-line record — the stack dump that comes
+  with a recovered panic, a Chat payload under `--googlechat-log-events` —
+  stays one record: `json` escapes the newlines, and `text` now writes the
+  continuation lines under a `    | ` gutter so none of them reads as a record
+  of its own.
 - Switchboard reads the daemon's `inbox` events, and warns at stream open if a
   daemon does not advertise them. They are the only description of a message's
   life before it becomes a turn, and the only way to know a session has work
   waiting behind the turn it is running.
+
+### Changed
+- Eight startup warnings dropped the `warning: ` they carried in their own
+  message text; the level says it now, once, in a place a filter can see (#49).
+  A run that greps its own logs for `warning:` should grep for `WARN` instead.
+- The `Logf` field on both adapters' `Config` takes `chat.Logf` (#49), aliased
+  to the same type the binary builds, so an adapter outside this module can
+  still supply one. Naming the level type is what supplying it requires, and
+  the renderers live under `internal/`.
 
 ### Fixed
 - A second question asked before the first has answered no longer costs the

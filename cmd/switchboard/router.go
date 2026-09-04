@@ -27,6 +27,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/go-steer/switchboard/internal/logging"
 	"github.com/go-steer/switchboard/pkg/approval"
 	"github.com/go-steer/switchboard/pkg/chat"
 	"github.com/go-steer/switchboard/pkg/daemon"
@@ -355,7 +356,7 @@ type Router struct {
 	client  *daemon.Client
 	out     sender
 	metrics *metrics
-	logf    func(string, ...any)
+	logf    logging.Logf
 
 	// defaults are the channel-scopable settings as they apply to a channel
 	// with nothing said about it, and byChannel is what a config file said
@@ -1292,11 +1293,9 @@ func (e *sessionEntry) tickRender(mode ProgressMode) (ref chat.MessageRef, text 
 }
 
 // NewRouter builds a Router. progress selects long-turn feedback (ProgressOff
-// if empty); m may be nil (metrics recording becomes a no-op); logf may be nil.
-func NewRouter(client *daemon.Client, out sender, progress ProgressMode, m *metrics, logf func(string, ...any)) *Router {
-	if logf == nil {
-		logf = func(string, ...any) {}
-	}
+// if empty); m may be nil (metrics recording becomes a no-op); logf may be the
+// zero value (logging becomes a no-op).
+func NewRouter(client *daemon.Client, out sender, progress ProgressMode, m *metrics, logf logging.Logf) *Router {
 	if progress == "" {
 		progress = ProgressOff
 	}
@@ -1375,7 +1374,7 @@ func (r *Router) progressFor(channel string) ProgressMode {
 // scrolled away (#71).
 func (r *Router) setProgress(channel string, mode ProgressMode) {
 	if cs, ok := r.byChannel[channel]; ok && cs.progress != mode {
-		r.logf("progress: channel %s overridden to %q, config file says %q", channel, mode, cs.progress)
+		r.logf.Warnf("progress: channel %s overridden to %q, config file says %q", channel, mode, cs.progress)
 	}
 	r.omu.Lock()
 	r.overrides[channel] = mode
@@ -1501,14 +1500,20 @@ func (r *Router) Handle(ctx context.Context, msg chat.Message) (err error) {
 			// so, and drop the binding with the entry: the next message here
 			// opens a session of its own, which is the right thing to do and
 			// the wrong thing to do silently.
-			r.logf("handle %s: bound session %s is gone from the daemon: %v",
+			//
+			// ERROR, not WARN, though the thread recovers on the next message:
+			// this one did not, and the rubric is about the turn. It also has
+			// to agree with the adapter, which logs Handle's returned error at
+			// ERROR and cannot know this case was already accounted for — two
+			// levels for one event is worse than the stricter of the two.
+			r.logf.Errorf("handle %s: bound session %s is gone from the daemon: %v",
 				msg.Conversation, sessionRef(entry.sess), err)
 			// Only the turn that actually dropped the entry says so. Several
 			// messages can be in flight in the same thread, and each would
 			// otherwise post its own copy of the same notice.
 			if r.discard(msg.Conversation, entry, true) {
 				if sendErr := r.surfaceNotice(ctx, msg.Conversation, bindLostNotice(entry.sess)); sendErr != nil {
-					r.logf("handle %s: surface lost binding: %v", msg.Conversation, sendErr)
+					r.logf.Errorf("handle %s: surface lost binding: %v", msg.Conversation, sendErr)
 				}
 			}
 			return err
@@ -1543,7 +1548,7 @@ func (r *Router) surfaceError(ctx context.Context, conv string, err error) {
 		text = errNoticeTransient
 	}
 	if sendErr := r.surfaceNotice(ctx, conv, text); sendErr != nil {
-		r.logf("handle %s: surface error: %v (original: %v)", conv, sendErr, err)
+		r.logf.Errorf("handle %s: surface error: %v (original: %v)", conv, sendErr, err)
 	}
 }
 
@@ -1660,7 +1665,7 @@ func (r *Router) failTurn(ctx context.Context, e *sessionEntry, conv, kind, noti
 	}
 	r.metrics.recordTurnFailed(kind)
 	if _, err := r.out.Send(ctx, chat.Reply{Conversation: conv, Text: notice, Kind: chat.KindNotice}); err != nil {
-		r.logf("relay %s: surface turn failure (%s): %v", conv, kind, err)
+		r.logf.Errorf("relay %s: surface turn failure (%s): %v", conv, kind, err)
 		return
 	}
 	if queued {
@@ -1720,9 +1725,9 @@ func (r *Router) noteCapabilities(ctx context.Context, conv string, e *sessionEn
 	if version == "" {
 		version = "an unstated protocol version"
 	}
-	r.logf("relay %s: connected to %s speaking %s", conv, server, version)
+	r.logf.Infof("relay %s: connected to %s speaking %s", conv, server, version)
 	if missing := c.Missing(reliedOnEvents...); len(missing) > 0 {
-		r.logf("relay %s: daemon does not advertise %s; the features reading those events "+
+		r.logf.Warnf("relay %s: daemon does not advertise %s; the features reading those events "+
 			"will stay silent", conv, strings.Join(missing, ", "))
 	}
 }
@@ -1744,13 +1749,13 @@ func (r *Router) startProgress(ctx context.Context, e *sessionEntry, conv string
 	ref, err := r.out.Send(ctx, chat.Reply{Conversation: conv, Text: workingText, Kind: chat.KindProgress})
 	r.metrics.recordReply(err)
 	if err != nil {
-		r.logf("progress %s: post: %v", conv, err)
+		r.logf.Warnf("progress %s: post: %v", conv, err)
 		return
 	}
 	stale, stop := e.beginTurn(ref, start)
 	if stale.ID != "" {
 		if derr := r.out.Delete(ctx, stale); derr != nil {
-			r.logf("progress %s: clear stale: %v", conv, derr)
+			r.logf.Warnf("progress %s: clear stale: %v", conv, derr)
 		}
 	}
 	if r.tickInterval > 0 {
@@ -1796,7 +1801,7 @@ func (r *Router) tick(ctx context.Context, e *sessionEntry, conv string, start t
 			// which reads as never having been heard; a stopped clock at least
 			// says how far the turn got. The next turn in the thread clears it
 			// as stale.
-			r.logf("progress %s: no turn boundary after %s; stopping the clock", conv, formatElapsed(time.Since(start)))
+			r.logf.Warnf("progress %s: no turn boundary after %s; stopping the clock", conv, formatElapsed(time.Since(start)))
 			return
 		case <-timer.C:
 		}
@@ -1805,7 +1810,7 @@ func (r *Router) tick(ctx context.Context, e *sessionEntry, conv string, start t
 			return // the turn ended between the tick firing and this read
 		}
 		if err := r.out.Update(ctx, ref, chat.Reply{Conversation: conv, Text: text, Kind: chat.KindProgress}); err != nil {
-			r.logf("progress %s: tick: %v", conv, err)
+			r.logf.Warnf("progress %s: tick: %v", conv, err)
 			interval = min(interval*2, progressTickMaxBackoff)
 		} else {
 			interval = r.tickInterval
@@ -1881,7 +1886,7 @@ func (r *Router) armTurnBackstop(ctx context.Context, e *sessionEntry, conv stri
 		if !e.endTurnIf(turn) {
 			return // the turn ended on its own, or a later one replaced it
 		}
-		r.logf("relay %s: no turn boundary after %s; giving the turn up", conv, formatElapsed(maxAge))
+		r.logf.Warnf("relay %s: no turn boundary after %s; giving the turn up", conv, formatElapsed(maxAge))
 		e.stopTicker()
 	}()
 }
@@ -1913,7 +1918,7 @@ func (r *Router) resumeProgress(ctx context.Context, e *sessionEntry, conv strin
 func (r *Router) clearProgress(ctx context.Context, e *sessionEntry, conv string) {
 	if ref := e.takeProgress(); ref.ID != "" {
 		if err := r.out.Delete(ctx, ref); err != nil {
-			r.logf("progress %s: clear: %v", conv, err)
+			r.logf.Warnf("progress %s: clear: %v", conv, err)
 		}
 	}
 }
@@ -1979,7 +1984,7 @@ func (r *Router) deliverText(ctx context.Context, e *sessionEntry, conv, text st
 	r.metrics.recordReply(err)
 	if err != nil {
 		// A failed post should not tear down the stream; log and keep relaying.
-		r.logf("relay %s: send: %v", conv, err)
+		r.logf.Errorf("relay %s: send: %v", conv, err)
 	}
 	if final {
 		return
@@ -2024,19 +2029,19 @@ func (r *Router) reanchorProgress(ctx context.Context, e *sessionEntry, conv str
 	fresh, err := r.out.Send(ctx, chat.Reply{Conversation: conv, Text: text, Kind: chat.KindProgress})
 	r.metrics.recordReply(err)
 	if err != nil {
-		r.logf("progress %s: re-anchor: %v", conv, err)
+		r.logf.Warnf("progress %s: re-anchor: %v", conv, err)
 		return // the old one is still live and still ticking
 	}
 	if !e.replaceProgress(old, fresh) {
 		// A later turn claimed the slot while this was in the air. Ours is
 		// nobody's, so take it back out rather than leave an orphan ticking.
 		if derr := r.out.Delete(ctx, fresh); derr != nil {
-			r.logf("progress %s: drop orphaned re-anchor: %v", conv, derr)
+			r.logf.Warnf("progress %s: drop orphaned re-anchor: %v", conv, derr)
 		}
 		return
 	}
 	if derr := r.out.Delete(ctx, old); derr != nil {
-		r.logf("progress %s: clear re-anchored: %v", conv, derr)
+		r.logf.Warnf("progress %s: clear re-anchored: %v", conv, derr)
 	}
 }
 
@@ -2054,7 +2059,7 @@ func (r *Router) postActivity(ctx context.Context, e *sessionEntry, conv string,
 	if mode == ProgressStatus {
 		if ref, text, ok := e.noteActivity(toolNames(calls)); ok {
 			if err := r.out.Update(ctx, ref, chat.Reply{Conversation: conv, Text: text, Kind: chat.KindProgress}); err != nil {
-				r.logf("relay %s: status activity: %v", conv, err)
+				r.logf.Warnf("relay %s: status activity: %v", conv, err)
 			}
 			return
 		}
@@ -2067,7 +2072,7 @@ func (r *Router) postActivity(ctx context.Context, e *sessionEntry, conv string,
 	ref, err := r.out.Send(ctx, chat.Reply{Conversation: conv, Text: activityText(calls, nil, detail), Kind: chat.KindActivity})
 	r.metrics.recordReply(err)
 	if err != nil {
-		r.logf("relay %s: activity: %v", conv, err)
+		r.logf.Warnf("relay %s: activity: %v", conv, err)
 		return
 	}
 	if detail {
@@ -2092,7 +2097,7 @@ func (r *Router) postToolResults(ctx context.Context, e *sessionEntry, conv stri
 			// thing and carries this verdict in — an edit that failed heals on
 			// the next one. Un-filing them would lose the verdict for good:
 			// that later render would draw this call as still running.
-			r.logf("relay %s: tool result: %v", conv, err)
+			r.logf.Warnf("relay %s: tool result: %v", conv, err)
 		}
 	}
 }
@@ -2137,7 +2142,7 @@ func (r *Router) session(ctx context.Context, conv, channel, caller string) (*se
 		r.metrics.sessionOpened()
 		r.startRelay(ctx, conv, e, "")
 		close(e.ready)
-		r.logf("session %s: adopted %s from seq %d", conv, sessionRef(b.sess), since)
+		r.logf.Infof("session %s: adopted %s from seq %d", conv, sessionRef(b.sess), since)
 		return e, nil
 	}
 
@@ -2176,7 +2181,7 @@ func (r *Router) session(ctx context.Context, conv, channel, caller string) (*se
 func (r *Router) adoptFrom(ctx context.Context, conv string, b binding) int64 {
 	head, err := r.client.HeadSeq(ctx, b.sess, "")
 	if err != nil {
-		r.logf("session %s: adopting %s: could not read the head (%v); resuming from the bind at seq %d",
+		r.logf.Warnf("session %s: adopting %s: could not read the head (%v); resuming from the bind at seq %d",
 			conv, sessionRef(b.sess), err, b.since)
 		return b.since
 	}
@@ -2292,7 +2297,7 @@ func (r *Router) relay(ctx context.Context, conv string, e *sessionEntry, owner 
 					// Not necessarily malformed: TurnCompleted also reports
 					// !ok for a frame naming neither a model nor a latency,
 					// which costs the footer a field and nothing else.
-					r.logf("relay %s: turn-complete carried nothing readable: %s", conv, ev.Data)
+					r.logf.Warnf("relay %s: turn-complete carried nothing readable: %s", conv, ev.Data)
 				}
 				// The daemon's own turn boundary, and the only one that
 				// arrives when a turn ends without an answer to deliver.
@@ -2318,10 +2323,10 @@ func (r *Router) relay(ctx context.Context, conv string, e *sessionEntry, owner 
 			case daemon.EventTurnError:
 				te, ok := daemon.TurnFailed(ev.Data)
 				if !ok {
-					r.logf("relay %s: unreadable turn-error: %s", conv, ev.Data)
+					r.logf.Warnf("relay %s: unreadable turn-error: %s", conv, ev.Data)
 					return nil
 				}
-				r.logf("relay %s: turn failed: kind=%s code=%s retryable=%t: %s",
+				r.logf.Errorf("relay %s: turn failed: kind=%s code=%s retryable=%t: %s",
 					conv, te.Kind, te.Code, te.Retryable, te.Message)
 				// The turn is over and produced no answer, so nothing will
 				// ever carry what it spent; drop it rather than let it land on
@@ -2346,7 +2351,7 @@ func (r *Router) relay(ctx context.Context, conv string, e *sessionEntry, owner 
 				// the events feeding it are not being understood.
 				c, ok := daemon.InboxChanged(ev.Data)
 				if !ok {
-					r.logf("relay %s: unreadable inbox event: %s", conv, ev.Data)
+					r.logf.Warnf("relay %s: unreadable inbox event: %s", conv, ev.Data)
 					return nil
 				}
 				e.noteInbox(c)
@@ -2364,7 +2369,7 @@ func (r *Router) relay(ctx context.Context, conv string, e *sessionEntry, owner 
 			case daemon.EventCapabilities:
 				c, ok := daemon.StreamOpened(ev.Data)
 				if !ok {
-					r.logf("relay %s: unreadable capabilities frame: %s", conv, ev.Data)
+					r.logf.Warnf("relay %s: unreadable capabilities frame: %s", conv, ev.Data)
 					return nil
 				}
 				r.noteCapabilities(ctx, conv, e, c)
@@ -2372,7 +2377,7 @@ func (r *Router) relay(ctx context.Context, conv string, e *sessionEntry, owner 
 			case daemon.EventStatusUpdate:
 				st, ok := daemon.StatusUpdated(ev.Data)
 				if !ok {
-					r.logf("relay %s: unreadable status-update: %s", conv, ev.Data)
+					r.logf.Warnf("relay %s: unreadable status-update: %s", conv, ev.Data)
 					return nil
 				}
 				switch {
@@ -2393,7 +2398,7 @@ func (r *Router) relay(ctx context.Context, conv string, e *sessionEntry, owner 
 					// caller is its own feature. Logged because the alternative is
 					// an operator watching a turn that will never move with no way
 					// to learn why.
-					r.logf("relay %s: daemon is waiting on a human (%s); the turn is parked",
+					r.logf.Warnf("relay %s: daemon is waiting on a human (%s); the turn is parked",
 						conv, st.TurnState)
 				case st.Idle():
 					// An idle daemon has drained its inbox, so anything still
@@ -2514,13 +2519,13 @@ func (r *Router) relay(ctx context.Context, conv string, e *sessionEntry, owner 
 		// Only bound sessions: one switchboard opened itself cannot outlive the
 		// entry that holds it.
 		if e.adopted && isMissingSession(err) {
-			r.logf("relay %s: bound session %s is gone from the daemon: %v", conv, sessionRef(e.sess), err)
+			r.logf.Warnf("relay %s: bound session %s is gone from the daemon: %v", conv, sessionRef(e.sess), err)
 			if r.discard(conv, e, true) {
 				// On a context of its own: discard has just cancelled ctx,
 				// which is this goroutine's, and the notice is the point.
 				notify, cancel := context.WithTimeout(context.WithoutCancel(ctx), platformTimeout)
 				if sendErr := r.surfaceNotice(notify, conv, bindStreamLostNotice(e.sess)); sendErr != nil {
-					r.logf("relay %s: surface lost binding: %v", conv, sendErr)
+					r.logf.Errorf("relay %s: surface lost binding: %v", conv, sendErr)
 				}
 				cancel()
 			}
@@ -2538,14 +2543,14 @@ func (r *Router) relay(ctx context.Context, conv string, e *sessionEntry, owner 
 		// the meantime are unrecoverable — they carry no seq, so the resume
 		// replays the answer without them. See deliverText.
 		e.streamGen.Add(1)
-		r.logf("relay %s: stream ended (%v); resuming from seq %d in %s", conv, err, e.seq.Load(), backoff)
+		r.logf.Warnf("relay %s: stream ended (%v); resuming from seq %d in %s", conv, err, e.seq.Load(), backoff)
 		// A stream that has carried nothing past the grace period, with a turn
 		// still waiting on it, is the one failure the daemon cannot announce —
 		// it is the daemon that went away. Reconnecting continues regardless;
 		// this only stops the thread waiting in silence, and fires once because
 		// failTurn ends the turn.
 		if down := time.Since(lastAlive); down > r.streamGrace && e.turnInFlight() {
-			r.logf("relay %s: no stream for %s with a turn in flight; telling the thread", conv, formatElapsed(down))
+			r.logf.Errorf("relay %s: no stream for %s with a turn in flight; telling the thread", conv, formatElapsed(down))
 			r.failTurn(ctx, e, conv, kindStreamLost, errNoticeStreamLost)
 		}
 		select {

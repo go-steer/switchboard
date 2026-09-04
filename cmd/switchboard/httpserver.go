@@ -21,6 +21,8 @@ import (
 	"net"
 	"net/http"
 	"time"
+
+	"github.com/go-steer/switchboard/internal/logging"
 )
 
 // shutdownGrace is how long in-flight requests get to finish after ctx is
@@ -37,9 +39,14 @@ const shutdownGrace = platformTimeout + 5*time.Second
 // Binding is synchronous: a port already in use returns before the goroutine
 // starts, which is what lets serve turn a bind failure into a non-zero exit
 // rather than running on without a surface a deployment depends on.
-func serveHTTP(ctx context.Context, name, addr string, h http.Handler) error {
+func serveHTTP(ctx context.Context, name, addr string, h http.Handler, logf logging.Logf) error {
 	server := &http.Server{
 		Handler: h,
+		// Left unset, net/http writes its runtime errors straight to stderr
+		// through the log package's default logger — unstamped, and under
+		// --log-format json not JSON at all. Named like the listener's own
+		// failures so both read the same in the stream (#49).
+		ErrorLog: logf.StdLogger(logging.LevelError, name+" server: "),
 		// Every phase of a request is bounded, so no client can park a
 		// goroutine by trickling one: headers, then the body (which the ingress
 		// also caps by size), then the handler itself. WriteTimeout must stay

@@ -126,8 +126,8 @@ type Config struct {
 	// hand-written test fixtures cannot verify. Off by default — the payload
 	// carries the message text and the sender's resource name.
 	LogEvents bool
-	// Logf is an optional structured-ish logger; nil discards.
-	Logf func(format string, args ...any)
+	// Logf is where the adapter logs; the zero value discards.
+	Logf chat.Logf
 }
 
 // Adapter satisfies chat.Adapter.
@@ -142,7 +142,7 @@ type Adapter struct {
 	caller    chat.CallerMode
 	cmds      map[int64]string
 	logEvents bool
-	logf      func(string, ...any)
+	logf      chat.Logf
 }
 
 // New validates the config and builds an Adapter, constructing the Pub/Sub
@@ -167,10 +167,6 @@ func New(cfg Config) (*Adapter, error) {
 	}
 	if _, ok := chat.ParseCallerMode(string(caller)); !ok {
 		return nil, fmt.Errorf("googlechat: invalid caller mode %q (want email or id)", cfg.CallerMode)
-	}
-	logf := cfg.Logf
-	if logf == nil {
-		logf = func(string, ...any) {}
 	}
 	ctx := context.Background()
 	// No subscription, no Pub/Sub client: an outbound-only deployment should
@@ -197,7 +193,7 @@ func New(cfg Config) (*Adapter, error) {
 		caller:    caller,
 		cmds:      cfg.Commands,
 		logEvents: cfg.LogEvents,
-		logf:      logf,
+		logf:      cfg.Logf,
 	}, nil
 }
 
@@ -214,7 +210,7 @@ func (a *Adapter) Run(ctx context.Context, h chat.Handler) error {
 	if a.ps == nil {
 		return fmt.Errorf("googlechat: no subscription configured: %w", chat.ErrNoInbound)
 	}
-	a.logf("googlechat: subscribing to %s", a.sub)
+	a.logf.Infof("googlechat: subscribing to %s", a.sub)
 	sub := a.ps.Subscription(a.sub)
 	return sub.Receive(ctx, func(ctx context.Context, m *pubsub.Message) {
 		a.dispatch(ctx, h, m)
@@ -232,11 +228,11 @@ func (a *Adapter) dispatch(ctx context.Context, h chat.Handler, m *pubsub.Messag
 	// One line, one payload, compacted: the log is meant to be sliced straight
 	// into testdata/events as a decoder fixture.
 	if a.logEvents {
-		a.logf("googlechat: event %s", compactJSON(m.Data))
+		a.logf.Infof("googlechat: event %s", compactJSON(m.Data))
 	}
 	in, err := decodeEvent(m.Data)
 	if err != nil {
-		a.logf("googlechat: %v", err)
+		a.logf.Errorf("googlechat: %v", err)
 		return
 	}
 	in.caller = a.callerOf(in)
@@ -250,7 +246,7 @@ func (a *Adapter) dispatch(ctx context.Context, h chat.Handler, m *pubsub.Messag
 			Text:         in.text,
 		}
 		if err := h.Handle(ctx, msg); err != nil {
-			a.logf("googlechat: handle %s: %v", conv, err)
+			a.logf.Errorf("googlechat: handle %s: %v", conv, err)
 		}
 	case kindCommand:
 		a.runCommand(ctx, h, conv, a.commandOf(in))
@@ -302,14 +298,14 @@ func (a *Adapter) commandOf(in inbound) chat.Command {
 func (a *Adapter) runCommand(ctx context.Context, h chat.Handler, conv string, cmd chat.Command) {
 	ack, err := h.HandleCommand(ctx, cmd)
 	if err != nil {
-		a.logf("googlechat: command %q: %v", cmd.Name, err)
+		a.logf.Errorf("googlechat: command %q: %v", cmd.Name, err)
 		return
 	}
 	if ack == "" {
 		return
 	}
 	if _, err := a.post(ctx, conv, a.ackCardFor(ack), toChatText(ack)); err != nil {
-		a.logf("googlechat: command ack %s: %v", conv, err)
+		a.logf.Errorf("googlechat: command ack %s: %v", conv, err)
 	}
 }
 
@@ -334,7 +330,7 @@ func (a *Adapter) runButton(ctx context.Context, h chat.Handler, in inbound, con
 	}
 	ack, err := h.HandleCommand(ctx, cmd)
 	if err != nil {
-		a.logf("googlechat: button %q: %v", cmd.Name, err)
+		a.logf.Errorf("googlechat: button %q: %v", cmd.Name, err)
 		return
 	}
 	if ack == "" {
@@ -345,12 +341,12 @@ func (a *Adapter) runButton(ctx context.Context, h chat.Handler, in inbound, con
 	// fresh reply in the thread.
 	if in.messageName == "" {
 		if _, err := a.post(ctx, conv, a.ackCardFor(ack), toChatText(ack)); err != nil {
-			a.logf("googlechat: button ack %s: %v", conv, err)
+			a.logf.Errorf("googlechat: button ack %s: %v", conv, err)
 		}
 		return
 	}
 	if err := a.rewrite(ctx, in.messageName, a.ackCardFor(ack), toChatText(ack)); err != nil {
-		a.logf("googlechat: button ack %s: %v", in.messageName, err)
+		a.logf.Errorf("googlechat: button ack %s: %v", in.messageName, err)
 	}
 }
 
@@ -363,7 +359,10 @@ func (a *Adapter) welcome(ctx context.Context, h chat.Handler, conv string) {
 		card = welcomeCard(choices)
 	}
 	if _, err := a.post(ctx, conv, card, toChatText(welcomeTextFor(choices))); err != nil {
-		a.logf("googlechat: welcome %s: %v", conv, err)
+		// WARN where every other failed post in this file is ERROR: nobody
+		// asked for this one and no turn is waiting on it. A space that misses
+		// its greeting is a space where the first mention explains itself.
+		a.logf.Warnf("googlechat: welcome %s: %v", conv, err)
 	}
 }
 
@@ -442,7 +441,7 @@ func (a *Adapter) post(ctx context.Context, conv string, card *chatv1.GoogleApps
 		if !isCardRejection(err) {
 			return chat.MessageRef{}, fmt.Errorf("googlechat: post card to %s: %w", conv, platformErr(err))
 		}
-		a.logf("googlechat: card rejected for %s (%v); retrying as text", conv, err)
+		a.logf.Warnf("googlechat: card rejected for %s (%v); retrying as text", conv, err)
 	}
 	if text == "" {
 		return chat.MessageRef{}, nil
@@ -502,7 +501,7 @@ func (a *Adapter) rewrite(ctx context.Context, name string, card *chatv1.GoogleA
 		if !isCardRejection(err) {
 			return fmt.Errorf("googlechat: update %s: %w", name, platformErr(err))
 		}
-		a.logf("googlechat: card rejected updating %s (%v); retrying as text", name, err)
+		a.logf.Warnf("googlechat: card rejected updating %s (%v); retrying as text", name, err)
 	}
 	if err := a.msg.patch(ctx, name, &chatv1.Message{Text: text}, patchMask); err != nil {
 		return fmt.Errorf("googlechat: update %s: %w", name, platformErr(err))

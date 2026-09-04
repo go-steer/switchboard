@@ -407,7 +407,7 @@ func TestATurnLeftOpenWithNoTickerIsStillGivenUp(t *testing.T) {
 		return true // and then the turn simply never ends
 	})
 	fake := &fakeSender{replies: make(chan chat.Reply, 8)}
-	r := NewRouter(dc, fake, ProgressStream, nil, func(string, ...any) {})
+	r := NewRouter(dc, fake, ProgressStream, nil, nil)
 	r.minBackoff, r.maxBackoff = 5*time.Millisecond, 10*time.Millisecond
 	r.streamGrace = time.Hour
 	r.tickInterval = 0
@@ -542,7 +542,7 @@ func rewindTurn(e *sessionEntry, d time.Duration) {
 // long enough that no test here trips the lost-stream notice.
 func narrationRouter(t *testing.T, dc *daemon.Client, out sender, tick time.Duration) (*Router, context.Context) {
 	t.Helper()
-	r := NewRouter(dc, out, ProgressIndicator, nil, func(string, ...any) {})
+	r := NewRouter(dc, out, ProgressIndicator, nil, nil)
 	r.minBackoff, r.maxBackoff = 5*time.Millisecond, 10*time.Millisecond
 	r.streamGrace = time.Hour
 	r.tickInterval = tick

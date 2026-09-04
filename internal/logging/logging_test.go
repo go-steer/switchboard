@@ -53,10 +53,10 @@ func TestParseFormat(t *testing.T) {
 func TestTextRendersAStampedLine(t *testing.T) {
 	var buf bytes.Buffer
 	logf := newClock(&buf, Text, "switchboard", fixed(at))
-	logf("relay %s: stream ended (%v)", "C1:T2", "EOF")
+	logf.Warnf("relay %s: stream ended (%v)", "C1:T2", "EOF")
 
 	// The zone the clock is in must not reach the output: 21:30 IST is 16:00Z.
-	const want = "2026-08-19T16:00:00.123Z switchboard: relay C1:T2: stream ended (EOF)\n"
+	const want = "2026-08-19T16:00:00.123Z WARN  switchboard: relay C1:T2: stream ended (EOF)\n"
 	if got := buf.String(); got != want {
 		t.Errorf("text line:\n got %q\nwant %q", got, want)
 	}
@@ -68,7 +68,7 @@ func TestTextStampIsFixedWidth(t *testing.T) {
 	var buf bytes.Buffer
 	whole := time.Date(2026, 8, 19, 16, 0, 0, 0, time.UTC)
 	logf := newClock(&buf, Text, "switchboard", fixed(whole))
-	logf("connected")
+	logf.Infof("connected")
 
 	stampOf := func(line string) string { return strings.SplitN(line, " ", 2)[0] }
 	got, other := stampOf(buf.String()), stampOf("2026-08-19T16:00:00.123Z ")
@@ -83,8 +83,8 @@ func TestTextStampIsFixedWidth(t *testing.T) {
 func TestJSONRendersOneObjectPerLine(t *testing.T) {
 	var buf bytes.Buffer
 	logf := newClock(&buf, JSON, "switchboard", fixed(at))
-	logf("bridging %s -> %s", "slack", "http://127.0.0.1:7777")
-	logf("shutting down")
+	logf.Infof("bridging %s -> %s", "slack", "http://127.0.0.1:7777")
+	logf.Infof("shutting down")
 
 	lines := strings.Split(strings.TrimSuffix(buf.String(), "\n"), "\n")
 	if len(lines) != 2 {
@@ -102,28 +102,163 @@ func TestJSONRendersOneObjectPerLine(t *testing.T) {
 	}
 }
 
-func TestJSONCarriesNoSeverity(t *testing.T) {
-	// Not an oversight: no call site distinguishes a connect notice from a
-	// send failure, so every record arrives at the same level, and labelling
-	// them all INFO would mislabel the failures. Cloud Logging assigns
-	// DEFAULT to a record with no severity, which is the honest reading
-	// until #49 step 2 gives the call sites a level to carry.
+func TestJSONCarriesCloudLoggingSeverity(t *testing.T) {
+	// The field name and the vocabulary are both Cloud Logging's. A record
+	// that spelled the key "level", or the value slog's "WARN", would be
+	// ingested at DEFAULT with the level sitting inert in the payload — no
+	// alert policy and no Error Reporting group.
+	for _, tc := range []struct {
+		name string
+		log  func(Logf)
+		want string
+	}{
+		{"info", func(l Logf) { l.Infof("connected") }, "INFO"},
+		{"warn", func(l Logf) { l.Warnf("relay %s: reconnecting", "C1:T2") }, "WARNING"},
+		{"error", func(l Logf) { l.Errorf("handle %s: surface error: %v", "C1:T2", "500") }, "ERROR"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			tc.log(newClock(&buf, JSON, "switchboard", fixed(at)))
+
+			var rec map[string]any
+			if err := json.Unmarshal(buf.Bytes(), &rec); err != nil {
+				t.Fatalf("not JSON: %v", err)
+			}
+			if got := rec["severity"]; got != tc.want {
+				t.Errorf(`"severity" = %v, want %q`, got, tc.want)
+			}
+			for _, k := range []string{"level", "msg"} {
+				if v, ok := rec[k]; ok {
+					t.Errorf("record carries slog's %q = %v; Cloud Logging reads neither", k, v)
+				}
+			}
+			if len(rec) != 3 {
+				t.Errorf("record has %d keys (%v), want time, severity and message", len(rec), rec)
+			}
+		})
+	}
+}
+
+func TestTextRendersTheLevelInItsOwnColumn(t *testing.T) {
+	// Fixed width, so the message column lines up down a terminal, and its own
+	// field rather than a "warning: " the message carries — which is what lets
+	// `grep ERROR` mean something.
 	var buf bytes.Buffer
-	logf := newClock(&buf, JSON, "switchboard", fixed(at))
-	logf("handle %s: surface error: %v", "C1:T2", "500")
+	var got []string
+	logf := newClock(&buf, Text, "switchboard", fixed(at))
+	for _, log := range []func(){
+		func() { logf.Infof("connected") },
+		func() { logf.Warnf("connected") },
+		func() { logf.Errorf("connected") },
+	} {
+		buf.Reset()
+		log()
+		got = append(got, buf.String())
+	}
+
+	want := []string{
+		"2026-08-19T16:00:00.123Z INFO  switchboard: connected\n",
+		"2026-08-19T16:00:00.123Z WARN  switchboard: connected\n",
+		"2026-08-19T16:00:00.123Z ERROR switchboard: connected\n",
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("line %d:\n got %q\nwant %q", i, got[i], want[i])
+		}
+	}
+	if a, b := strings.Index(got[0], "switchboard"), strings.Index(got[2], "switchboard"); a != b {
+		t.Errorf("INFO and ERROR lines put the message at columns %d and %d", a, b)
+	}
+}
+
+func TestStdLoggerWritesOneRecordPerLine(t *testing.T) {
+	// http.Server.ErrorLog is the caller. Left unset, its runtime errors go to
+	// the log package's default logger — stderr, unstamped, and under
+	// --log-format json not JSON, in the middle of a stream a collector is
+	// parsing.
+	var buf bytes.Buffer
+	l := newClock(&buf, JSON, "switchboard", fixed(at)).StdLogger(LevelError, "ingress server: ")
+	// What net/http actually hands it: a trailing newline of its own, and text
+	// that is free to contain a percent sign.
+	l.Print("http: superfluous response.WriteHeader call from h (100% done)\n")
 
 	var rec map[string]any
 	if err := json.Unmarshal(buf.Bytes(), &rec); err != nil {
-		t.Fatalf("not JSON: %v", err)
+		t.Fatalf("not JSON: %v (%q)", err, buf.String())
 	}
-	for _, k := range []string{"level", "severity", "msg"} {
-		if v, ok := rec[k]; ok {
-			t.Errorf("record carries %q = %v; want it absent", k, v)
+	want := "ingress server: http: superfluous response.WriteHeader call from h (100% done)"
+	if got := rec["message"]; got != want {
+		t.Errorf(`"message" = %v, want %q`, got, want)
+	}
+	if got := rec["severity"]; got != "ERROR" {
+		t.Errorf(`"severity" = %v, want "ERROR"`, got)
+	}
+	if n := bytes.Count(buf.Bytes(), []byte("\n")); n != 1 {
+		t.Errorf("one Print produced %d lines:\n%s", n, buf.String())
+	}
+}
+
+// The loudest thing net/http writes to ErrorLog is the recovered-panic path,
+// which formats the message and a whole runtime.Stack dump into one Print. It
+// has to stay one record — Error Reporting groups on the stack, and twenty
+// records would be twenty groups — and in text the dump's lines have to be
+// marked as continuations, or they read as records with no stamp and no level
+// and every grep that counts levels counts them wrong.
+func TestAStackDumpStaysOneRecord(t *testing.T) {
+	const panicPrint = "http: panic serving 127.0.0.1:39944: boom\n" +
+		"goroutine 18 [running]:\n" +
+		"net/http.(*conn).serve.func1()\n" +
+		"\t/usr/local/go/src/net/http/server.go:1898 +0xbe\n"
+
+	t.Run("json", func(t *testing.T) {
+		var buf bytes.Buffer
+		newClock(&buf, JSON, "switchboard", fixed(at)).
+			StdLogger(LevelError, "metrics server: ").Print(panicPrint)
+		if n := bytes.Count(buf.Bytes(), []byte("\n")); n != 1 {
+			t.Fatalf("a stack dump produced %d JSON records, want 1:\n%s", n, buf.String())
 		}
-	}
-	if len(rec) != 2 {
-		t.Errorf("record has %d keys (%v), want just time and message", len(rec), rec)
-	}
+		var rec map[string]any
+		if err := json.Unmarshal(buf.Bytes(), &rec); err != nil {
+			t.Fatalf("not JSON: %v (%q)", err, buf.String())
+		}
+		msg, _ := rec["message"].(string)
+		if !strings.Contains(msg, "server.go:1898") {
+			t.Errorf(`"message" lost the stack: %q`, msg)
+		}
+	})
+
+	t.Run("text", func(t *testing.T) {
+		var buf bytes.Buffer
+		newClock(&buf, Text, "switchboard", fixed(at)).
+			StdLogger(LevelError, "metrics server: ").Print(panicPrint)
+		lines := strings.Split(strings.TrimSuffix(buf.String(), "\n"), "\n")
+		if len(lines) != 4 {
+			t.Fatalf("got %d lines, want 4:\n%s", len(lines), buf.String())
+		}
+		if !strings.HasPrefix(lines[0], at.UTC().Format(stamp)+" ERROR switchboard: metrics server: ") {
+			t.Errorf("head line = %q, want the stamped record", lines[0])
+		}
+		for i, l := range lines[1:] {
+			if !strings.HasPrefix(l, continued) {
+				t.Errorf("continuation %d = %q, want it marked with %q — unmarked it reads as a record of its own", i, l, continued)
+			}
+			if strings.Contains(l, "ERROR") {
+				t.Errorf("continuation %d = %q carries a level, so a grep for ERROR counts it twice", i, l)
+			}
+		}
+	})
+}
+
+func TestTheZeroLogfDiscards(t *testing.T) {
+	// A component with no logger wired holds the zero value, which is what
+	// retired the four copies of "if cfg.Logf == nil, substitute a discard".
+	var l Logf
+	l.Infof("connected")
+	l.Warnf("relay %s: reconnecting", "C1:T2")
+	l.Errorf("handle %s: %v", "C1:T2", "500")
+	// Including through the shim, which is handed to an http.Server whether or
+	// not the process was given a logger.
+	l.StdLogger(LevelError, "ingress server: ").Print("accept tcp: too many open files")
 }
 
 func TestJSONOmitsTheProgramPrefix(t *testing.T) {
@@ -133,7 +268,7 @@ func TestJSONOmitsTheProgramPrefix(t *testing.T) {
 	// somewhere no query can strip it back off.
 	var buf bytes.Buffer
 	logf := newClock(&buf, JSON, "switchboard", fixed(at))
-	logf("connected")
+	logf.Infof("connected")
 
 	var rec map[string]any
 	if err := json.Unmarshal(buf.Bytes(), &rec); err != nil {
@@ -152,7 +287,7 @@ func TestJSONEscapesTheMessage(t *testing.T) {
 	payload := `{"message":{"text":"say \"hi\"\nthen stop"},"space":{"name":"spaces/AAA"}}`
 	var buf bytes.Buffer
 	logf := newClock(&buf, JSON, "switchboard", fixed(at))
-	logf("googlechat: event %s", payload)
+	logf.Infof("googlechat: event %s", payload)
 
 	if n := bytes.Count(bytes.TrimSuffix(buf.Bytes(), []byte("\n")), []byte("\n")); n != 0 {
 		t.Errorf("a newline in the message broke the record across %d lines:\n%s", n+1, buf.String())
@@ -212,7 +347,7 @@ func TestEachLineIsOneWrite(t *testing.T) {
 				wg.Add(1)
 				go func() {
 					defer wg.Done()
-					logf("relay C%d: send: %v", i, "timeout")
+					logf.Errorf("relay C%d: send: %v", i, "timeout")
 				}()
 			}
 			wg.Wait()
@@ -235,8 +370,8 @@ func TestEachLineIsOneWrite(t *testing.T) {
 func TestNewWritesToTheGivenWriter(t *testing.T) {
 	// New is the exported door; everything above drives newClock.
 	var buf bytes.Buffer
-	New(&buf, Text, "switchboard")("connected")
-	if got := buf.String(); !strings.HasSuffix(got, " switchboard: connected\n") {
+	New(&buf, Text, "switchboard").Infof("connected")
+	if got := buf.String(); !strings.HasSuffix(got, "INFO  switchboard: connected\n") {
 		t.Errorf("New wrote %q", got)
 	}
 }
@@ -245,8 +380,8 @@ func TestUnknownFormatRendersAsText(t *testing.T) {
 	// ParseFormat is what rejects a bad --log-format; if one ever reaches the
 	// constructor anyway, the readable rendering is the safer default.
 	var buf bytes.Buffer
-	newClock(&buf, Format("logfmt"), "switchboard", fixed(at))("connected")
-	if got, want := buf.String(), "2026-08-19T16:00:00.123Z switchboard: connected\n"; got != want {
+	newClock(&buf, Format("logfmt"), "switchboard", fixed(at)).Infof("connected")
+	if got, want := buf.String(), "2026-08-19T16:00:00.123Z INFO  switchboard: connected\n"; got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}
 }

@@ -16,4 +16,9 @@
 # Presubmit: go vet ./... — same as CI.
 set -euo pipefail
 cd "$(dirname "$0")/../../.."
-exec go vet ./...
+
+# -printf.funcs names the logging hook's methods so vet checks their format
+# strings. It cannot infer them: Logf.Infof forwards to a call on a func value
+# rather than to a known print function, so without this a missing or spurious
+# argument at any of ~100 call sites compiles and passes silently (#49).
+exec go vet -printf.funcs=Infof,Warnf,Errorf ./...

@@ -35,6 +35,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-steer/switchboard/internal/logging"
 	"github.com/go-steer/switchboard/pkg/chat"
 	"github.com/go-steer/switchboard/pkg/daemon"
 )
@@ -122,7 +123,8 @@ func TestIntegrationRealDaemonRoundTrip(t *testing.T) {
 		t.Fatalf("daemon.New: %v", err)
 	}
 	fake := &fakeSender{replies: make(chan chat.Reply, 4)}
-	router := NewRouter(dc, fake, ProgressOff, nil, t.Logf)
+	router := NewRouter(dc, fake, ProgressOff, nil,
+		func(_ logging.Level, f string, a ...any) { t.Logf(f, a...) })
 
 	msg := chat.Message{Conversation: "C0:100.1", Caller: callerMail, Text: "ping from integration"}
 	if err := router.Handle(ctx, msg); err != nil {

@@ -151,7 +151,7 @@ func progressID(e *sessionEntry) string {
 // stream to observe it.
 func tickRouter(t *testing.T, mode ProgressMode, interval time.Duration, out sender) (*Router, *sessionEntry, context.Context) {
 	t.Helper()
-	r := NewRouter(nil, out, mode, nil, func(string, ...any) {})
+	r := NewRouter(nil, out, mode, nil, nil)
 	r.tickInterval = interval
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)

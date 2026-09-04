@@ -267,7 +267,7 @@ func (r *Router) CommitBind(conv string, sess daemon.Session, since int64) {
 	defer r.mu.Unlock()
 	delete(r.reserving, sessionRef(sess))
 	if e, ok := r.sessions[conv]; ok && !runningSession(e, sess) {
-		r.logf("bind %s: not bound to %s: the conversation acquired a session first",
+		r.logf.Warnf("bind %s: not bound to %s: the conversation acquired a session first",
 			conv, sessionRef(sess))
 		return
 	}
@@ -282,7 +282,7 @@ func (r *Router) CommitBind(conv string, sess daemon.Session, since int64) {
 		// would strand that session's caller — its thread would answer to
 		// someone else — and this post has already gone out either way, so the
 		// honest outcome is an unbound message and a line saying so.
-		r.logf("bind %s: not bound to %s: the thread already belongs to %s",
+		r.logf.Warnf("bind %s: not bound to %s: the thread already belongs to %s",
 			conv, sessionRef(sess), sessionRef(old.sess))
 		return
 	}
@@ -290,7 +290,7 @@ func (r *Router) CommitBind(conv string, sess daemon.Session, since int64) {
 	r.metrics.bindRecorded()
 	r.bindings[conv] = binding{sess: sess, since: since}
 	r.boundTo[sessionRef(sess)] = conv
-	r.logf("bind %s -> session %s from seq %d", conv, sessionRef(sess), since)
+	r.logf.Infof("bind %s -> session %s from seq %d", conv, sessionRef(sess), since)
 	r.evictBindings()
 }
 
@@ -312,7 +312,7 @@ func (r *Router) evictBindings() {
 		delete(r.bindings, oldest)
 		delete(r.boundTo, sessionRef(b.sess))
 		r.metrics.bindDropped()
-		r.logf("bind %s: evicted (over %d bindings); a reply there will start a fresh session",
+		r.logf.Warnf("bind %s: evicted (over %d bindings); a reply there will start a fresh session",
 			oldest, maxBindings)
 	}
 }

@@ -30,6 +30,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
+	"github.com/go-steer/switchboard/internal/logging"
 	"github.com/go-steer/switchboard/pkg/chat"
 )
 
@@ -96,7 +97,6 @@ func newTestIngress(t *testing.T, out sender, allow ...string) *ingress {
 		Allow:   allow,
 		Out:     out,
 		Metrics: newMetrics(),
-		Logf:    func(string, ...any) {},
 	})
 	if err != nil {
 		t.Fatalf("newIngress: %v", err)
@@ -385,7 +385,7 @@ func TestIngressLogsAreNotForgeable(t *testing.T) {
 	i, err := newIngress(ingressConfig{
 		Token: ingressToken,
 		Out:   &stubSender{},
-		Logf:  func(f string, a ...any) { lines = append(lines, fmt.Sprintf(f, a...)) },
+		Logf:  func(_ logging.Level, f string, a ...any) { lines = append(lines, fmt.Sprintf(f, a...)) },
 	})
 	if err != nil {
 		t.Fatalf("newIngress: %v", err)
@@ -399,6 +399,52 @@ func TestIngressLogsAreNotForgeable(t *testing.T) {
 	}
 	if strings.Contains(lines[0], "\n") {
 		t.Errorf("log line carries a newline from the request: %q", lines[0])
+	}
+}
+
+// TestIngressLogLevelFollowsTheStatus pins the split the error path makes
+// (#49). A 4xx is a caller being refused, which is the ingress working; a 5xx
+// is switchboard failing, and is the line worth paging on.
+//
+// 501 is the case that does not follow the digit. It means this deployment's
+// platform cannot do what was asked — append on a channel with no TextFitter,
+// anything answering chat.ErrUnsupported — which is permanent and is the
+// caller's problem, so an escalation client that keeps asking would otherwise
+// open an Error Reporting group per request against a healthy deployment.
+func TestIngressLogLevelFollowsTheStatus(t *testing.T) {
+	const ok = `{"conversation":"C0","text":"x"}`
+	cases := []struct {
+		name    string
+		sendErr error
+		body    string
+		status  int
+		want    logging.Level
+	}{
+		{"a malformed body is the caller's", nil, `{`, http.StatusBadRequest, logging.LevelWarn},
+		{"a platform that failed is ours", errors.New("slack: 503"), ok, http.StatusBadGateway, logging.LevelError},
+		{"a platform that cannot is the caller's", chat.ErrUnsupported, ok, http.StatusNotImplemented, logging.LevelWarn},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var got []logging.Level
+			i, err := newIngress(ingressConfig{
+				Token: ingressToken,
+				Out:   &stubSender{sendErr: tc.sendErr},
+				Logf:  func(lv logging.Level, _ string, _ ...any) { got = append(got, lv) },
+			})
+			if err != nil {
+				t.Fatalf("newIngress: %v", err)
+			}
+			if w := do(t, i, http.MethodPost, tc.body); w.Code != tc.status {
+				t.Fatalf("POST = %d %s, want %d", w.Code, w.Body, tc.status)
+			}
+			if len(got) != 1 {
+				t.Fatalf("logged %d lines, want 1", len(got))
+			}
+			if got[0] != tc.want {
+				t.Errorf("%d logged at %v, want %v", tc.status, got[0], tc.want)
+			}
+		})
 	}
 }
 
@@ -600,7 +646,6 @@ func TestIngressRecordsMetrics(t *testing.T) {
 		Token:   ingressToken,
 		Out:     &stubSender{},
 		Metrics: m,
-		Logf:    func(string, ...any) {},
 	})
 	if err != nil {
 		t.Fatalf("newIngress: %v", err)
@@ -643,8 +688,12 @@ func TestNewIngressValidation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newIngress: %v", err)
 	}
-	if i.logf == nil {
-		t.Error("nil Logf was not defaulted")
+	// No Logf wired, and the error path logs: the zero hook has to discard
+	// rather than panic, which is what retired the constructor's guard (#49).
+	rec := httptest.NewRecorder()
+	i.handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, ingressPath, nil))
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("unauthenticated POST = %d, want %d", rec.Code, http.StatusUnauthorized)
 	}
 }
 
