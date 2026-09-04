@@ -36,6 +36,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 
@@ -212,8 +213,15 @@ type addonCommandMetadata struct {
 	AppCommandType string    `json:"appCommandType"`
 }
 
-// commandID is an int64 that unmarshals from a JSON number or a quoted one.
+// commandID is an int64 that unmarshals from a JSON number, a quoted one, or
+// the proto-JSON float spelling of a whole number.
 type commandID int64
+
+// maxInt64f is one past math.MaxInt64 as a float64. math.MaxInt64 itself is
+// not representable — converting it rounds *up* to this value — so the range
+// guard below has to be exclusive against this rather than inclusive against
+// a constant that silently is this.
+const maxInt64f = float64(1 << 63)
 
 // UnmarshalJSON never fails. An ID this code cannot read leaves the zero
 // value, which maps to no configured command and gets ignored — losing one
@@ -223,6 +231,21 @@ func (c *commandID) UnmarshalJSON(b []byte) error {
 	s := strings.TrimSpace(strings.Trim(strings.TrimSpace(string(b)), `"`))
 	if n, err := strconv.ParseInt(s, 10, 64); err == nil {
 		*c = commandID(n)
+		return nil
+	}
+	// The HTTP ingress delivers proto-JSON, which spells a whole number as a
+	// float — "appCommandId": 100.0 where Pub/Sub sends 100 (docs/DESIGN.md
+	// §3.4). ParseInt rejects that spelling, and because this function is
+	// deliberately silent the ID would become 0 and the command would be
+	// dropped: over Pub/Sub that tolerance loses one malformed command, over
+	// HTTP it would lose *every* command, with nothing in the logs.
+	//
+	// Only an exactly-integral value in range is taken. 1.5 is not an ID that
+	// was spelled differently, it is not an ID; and 1e20 is not one this type
+	// can hold. Both keep decoding to 0, as before.
+	if f, err := strconv.ParseFloat(s, 64); err == nil &&
+		f == math.Trunc(f) && f >= -maxInt64f && f < maxInt64f {
+		*c = commandID(int64(f))
 	}
 	return nil
 }

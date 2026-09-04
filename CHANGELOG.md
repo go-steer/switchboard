@@ -25,6 +25,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   ints — which today's `commandID` decoder rejects into a silent zero, so an
   HTTP deployment would drop every command while the fixtures stayed green.
 
+### Fixed
+- The Google Chat decoder reads a command ID spelled as a whole-number float
+  (`"appCommandId": 100.0`), which is how proto-JSON — and so the HTTP ingress
+  #29 is building towards — serializes the integer Pub/Sub delivers as `100`.
+  `strconv.ParseInt` rejects that spelling, and the decoder deliberately never
+  errors, so the ID became `0`, matched no configured command, and the command
+  was dropped with nothing in the logs. No behaviour changes today, because
+  there is no HTTP ingress yet to deliver that spelling; this is the trap
+  removed before the transport that springs it lands. A value that is not
+  actually an integer (`1.5`) or does not fit (`1e20`) still decodes to `0`.
+
+### Changed
+- The Google Chat adapter's event handling is split from its Pub/Sub envelope:
+  `dispatch` now owns only the ack, and `handleEvent` takes the raw payload. No
+  behaviour change — groundwork for the second ingress (#29), whose equivalent
+  of "always ack" is "always answer 200".
+
 ## [v0.4.0] — 2026-09-04
 
 A release about what switchboard says while it works. No new surface, no new

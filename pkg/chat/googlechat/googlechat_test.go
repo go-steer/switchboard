@@ -724,6 +724,45 @@ func TestDispatchRoutesCommandToHandleCommand(t *testing.T) {
 	}
 }
 
+// TestHandleEventNeedsNoTransportEnvelope drives the shared event path with raw
+// bytes, the way the HTTP ingress will (docs/DESIGN.md §3.4). Every other test
+// here goes in through dispatch and a *pubsub.Message; this one exists so the
+// seam the second ingress attaches to keeps working without one, and so that
+// folding it back into dispatch shows up as a failure rather than as a merge
+// that still compiles.
+//
+// It also pins the proto-JSON number spelling end to end: over HTTP the same
+// command arrives as 1.0 rather than 1, and a decoder that reads only integers
+// turns that into no command at all, silently (see TestDecodeProtoJSONCommandID).
+func TestHandleEventNeedsNoTransportEnvelope(t *testing.T) {
+	f := &fakeMessenger{}
+	h := &fakeHandler{ack: "progress mode set to stream"}
+	a := newTestAdapter(f)
+	a.cmds = map[int64]string{2: "progress"}
+
+	payload := []byte(`{
+		"chat": {
+			"user": {"name": "users/5"},
+			"space": {"name": "spaces/AAA"},
+			"appCommandPayload": {
+				"appCommandMetadata": {"appCommandId": 2.0, "appCommandType": "SLASH_COMMAND"},
+				"message": {"argumentText": "stream", "thread": {"name": "spaces/AAA/threads/T1"}}
+			}
+		}
+	}`)
+	a.handleEvent(context.Background(), h, payload)
+
+	if len(h.cmds) != 1 {
+		t.Fatalf("want 1 command, got %d", len(h.cmds))
+	}
+	if h.cmds[0].Name != "progress" || strings.Join(h.cmds[0].Args, ",") != "stream" {
+		t.Fatalf("unexpected command %+v", h.cmds[0])
+	}
+	if len(f.creates) != 1 || f.creates[0].thread != "spaces/AAA/threads/T1" {
+		t.Fatalf("ack should post into the invoking thread, got %+v", f.creates)
+	}
+}
+
 // TestDispatchMapsConfiguredCommandID: Chat identifies a command by the numeric
 // ID configured in the console, so a dedicated /progress command carries its
 // argument alone and the verb comes from the mapping.
