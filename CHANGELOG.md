@@ -18,8 +18,43 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   tag with no matching changelog section fails rather than publishing an empty
   body, and an existing release — a draft included — is left alone, so
   hand-written notes still win by being drafted before the tag.
+- Switchboard reads the daemon's `inbox` events, and warns at stream open if a
+  daemon does not advertise them. They are the only description of a message's
+  life before it becomes a turn, and the only way to know a session has work
+  waiting behind the turn it is running.
 
 ### Fixed
+- A second question asked before the first has answered no longer costs the
+  second turn its progress placeholder and clock (#42). One placeholder is kept
+  per conversation, so the first answer used to delete the message the second
+  turn was counting on; an answer with something still queued behind it now
+  re-anchors the placeholder below itself instead of retiring it, and the turn
+  that picks the queued message up restarts its clock. The other two ways out
+  of a turn are covered as well: a turn that narrated before finishing, and one
+  that died on a `turn-error`, both freeze the placeholder for the queued turn
+  rather than deleting it — the failure notice goes in below it and the
+  placeholder moves back to the bottom. Needs a daemon advertising `inbox`;
+  without one the previous behaviour applies unchanged.
+- A stale backlog resynchronises on any idle daemon, not only one this
+  connection watched start a turn. An `inbox` `dequeued` lost to a stream
+  outage is never replayed — those events carry no `seq` — and the resync it
+  needs used to be gated on a flag that the ordinary `turn-complete` path
+  clears and a fresh connection never sets, so the lost id could strand a
+  frozen placeholder under every answer for the life of the session.
+- A follow-up message no longer discards the accounting of the turn already
+  running, so the first answer keeps its usage footer instead of posting bare
+  and having its spend folded into the follow-up's footer (#42). That covers
+  the window after `turn-complete` too, where the turn is over but the answer
+  carrying its figures has not arrived; conversely a turn that dies on the
+  daemon's idle boundary now drops its figures the way a `turn-error` already
+  did, so they are not billed to whatever answers next.
+
+  Not fixed, and now the whole of what is left on #42: which turn an answer
+  belongs to. `turn-complete` names a prompt id minted at turn start rather
+  than the one `inject` returned (go-steer/core-agent#943), so switchboard can
+  tell that another turn is owed but not which turn a given answer settles. In
+  a thread running two overlapping turns a usage footer can still land on the
+  wrong answer.
 - `internal/version.Version` is `v0.4.0-dev`, so a build off main no longer
   claims to be the release that just shipped (#43). Same window
   `verify-version-fallback` keeps short after every tag.

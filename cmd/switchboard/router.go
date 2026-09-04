@@ -601,6 +601,26 @@ type sessionEntry struct {
 	step      int
 	tickStop  chan struct{}
 
+	// bmu guards backlog, the messages the daemon has told us are sitting on
+	// this session's inbox and have not yet been taken up by a turn. Keyed by
+	// the daemon's prompt id, filled from `inbox`/queued and emptied by
+	// `inbox`/dequeued — a set rather than a count, so a reconnect replaying
+	// either event changes nothing (daemon.InboxChange).
+	//
+	// It answers one question, in deliverText: when a turn's answer arrives, is
+	// there another turn still owed in this thread? That is the second half of
+	// #42. The progress placeholder is a single slot, so an answer that retires
+	// it while a later turn is still running leaves that turn with no
+	// placeholder and no clock; knowing the backlog is non-empty is what turns
+	// that retire into a re-anchor.
+	//
+	// Deliberately not keyed to the messages *switchboard* injected. Anything on
+	// this session's inbox produces a turn in this thread — an agent-initiated
+	// message (#38), a second gateway, an operator at the daemon's own console —
+	// and every one of them is a turn whose placeholder must survive.
+	bmu     sync.Mutex
+	backlog map[string]struct{}
+
 	// amu guards notices, the tool-activity notices this session has posted and
 	// not yet seen every result for. A result names the call it answers, so the
 	// notice that announced that call can be edited in place to tick it off —
@@ -741,6 +761,22 @@ func (e *sessionEntry) takeUsage() (u *chat.Usage, settled bool) {
 	}, true
 }
 
+// awaitingAnswer reports whether a turn's boundary has been banked and the text
+// it belongs to has not arrived yet. takeUsage is what clears it, so this is
+// exactly the window between the daemon's turn-complete and the agent frame
+// carrying that turn's answer.
+//
+// It is short — the two frames arrive back to back — but it is a window in
+// which the entry looks idle to everything that asks turnInFlight, because
+// turn-complete has already called endTurn. Anything that would discard the
+// turn's accounting or resynchronise on "the session is quiet" has to know the
+// difference between quiet and one frame from done.
+func (e *sessionEntry) awaitingAnswer() bool {
+	e.umu.Lock()
+	defer e.umu.Unlock()
+	return e.settled
+}
+
 // beginTurnInFlight marks a turn as running and clears the previous turn's
 // claim on the failure notice. Called *before* the inject request, not after
 // it: the relay goroutine is already dispatching, and a turn can fail and emit
@@ -793,6 +829,49 @@ func (e *sessionEntry) endTurnIf(turn int64) bool {
 // watchedWhole reports whether the turn in flight has been on one connection
 // for its whole life, and so whether "no turn-complete yet" can be believed.
 func (e *sessionEntry) watchedWhole() bool { return e.turnGen.Load() == e.streamGen.Load() }
+
+// noteInbox folds one inbox transition into the backlog: a queued message joins
+// it, a dequeued one leaves. Both are idempotent, which is what lets a replayed
+// event after a reconnect be applied rather than filtered — see
+// daemon.InboxChange. A state this build does not know moves nothing: the spec
+// reserves room for more, and guessing which way an unknown one points is how a
+// set like this drifts.
+func (e *sessionEntry) noteInbox(c daemon.InboxChange) {
+	e.bmu.Lock()
+	defer e.bmu.Unlock()
+	switch {
+	case c.Queued():
+		if e.backlog == nil {
+			e.backlog = make(map[string]struct{})
+		}
+		e.backlog[c.PromptID] = struct{}{}
+	case c.Dequeued():
+		delete(e.backlog, c.PromptID)
+	}
+}
+
+// clearBacklog forgets everything the backlog holds, for a moment the daemon
+// has said outright that nothing is waiting.
+//
+// This is the set's only way back from a lost event. A dequeued emitted during
+// a stream outage never arrives — inbox events carry no seq, so the resume does
+// not replay them — and the id it would have retired would otherwise sit in the
+// backlog for the life of the session, making every answer after it look like
+// one with another turn behind it. An idle session has by definition drained
+// its inbox and is running nothing, so that is the fact to resynchronise on.
+func (e *sessionEntry) clearBacklog() {
+	e.bmu.Lock()
+	defer e.bmu.Unlock()
+	clear(e.backlog)
+}
+
+// backlogged reports whether the daemon has work on this session's inbox that
+// no turn has taken up yet.
+func (e *sessionEntry) backlogged() bool {
+	e.bmu.Lock()
+	defer e.bmu.Unlock()
+	return len(e.backlog) > 0
+}
 
 // endTurn concludes the turn in flight, reporting whether this call is the one
 // that did it. Nobody is waiting on the daemon once this returns, so a stream
@@ -950,6 +1029,34 @@ func (e *sessionEntry) stopTicker() {
 	if stop != nil {
 		close(stop)
 	}
+}
+
+// resumeTurnClock re-dates a stranded placeholder to now and hands back a stop
+// channel for a fresh ticker, so the message left over from the turn that just
+// ended becomes the one timing the turn just starting.
+//
+// The stranded state is #42's second case in the moment between its two turns:
+// a placeholder still in the thread (the answer declined to retire it, because
+// something was queued behind it) with no ticker left (the boundary that ended
+// the answering turn stopped it). Without this the next turn inherits a frozen
+// clock — better than the nothing it used to inherit, and still not a clock.
+//
+// ok is false in the two cases that must not be disturbed: no placeholder to
+// re-date, and a placeholder whose turn is still being timed. The second is the
+// ordinary path — every turn switchboard injects is dequeued while its own
+// ticker runs — and re-dating there would throw away startProgress's deliberate
+// choice to count from the message arriving rather than from the daemon picking
+// it up.
+func (e *sessionEntry) resumeTurnClock(start time.Time) (stop chan struct{}, ok bool) {
+	e.pmu.Lock()
+	defer e.pmu.Unlock()
+	if e.progressMsg.ID == "" || e.tickStop != nil {
+		return nil, false
+	}
+	stop = make(chan struct{})
+	e.tickStop = stop
+	e.turnStart, e.tools, e.step = start, nil, 0
+	return stop, true
 }
 
 // beginTurn adopts ref as the turn's progress message, dated from start, and
@@ -1352,7 +1459,26 @@ func (r *Router) Handle(ctx context.Context, msg chat.Message) (err error) {
 	}
 	// A new turn starts from no accounting: anything left banked belongs to a
 	// turn that ended without an answer to carry it.
-	entry.resetUsage()
+	//
+	// Unless a turn is still running, which is the footer half of #42's second
+	// case. A second message in a thread whose first is still working would
+	// otherwise discard the accounting of a turn that is about to answer, so
+	// the first answer posts bare and the second's footer covers both. The
+	// bank belongs to the turn in flight; this message's turn has not started.
+	//
+	// The cost of the guard is a turn wrongly believed to be running — one
+	// killed in a way that emitted no frame — holding its partial figures until
+	// its backstop fires, where before they were dropped by the next message.
+	// Over-attributing one footer is the same trade noteTotals already makes,
+	// and the alternative is losing a footer every time someone follows up.
+	//
+	// awaitingAnswer covers the rest of the window. turn-complete calls endTurn
+	// before the agent frame carrying that turn's text, so for the moment
+	// between the two the entry reads as idle while the figures it is holding
+	// are the ones that answer is about to print.
+	if !entry.turnInFlight() && !entry.awaitingAnswer() {
+		entry.resetUsage()
+	}
 	// Post the progress message before injecting: inject starts the turn, so a
 	// fast reply would otherwise beat the placeholder into the thread and strand
 	// it there ("Working…" below the answer, with nothing left to clear it). A
@@ -1513,15 +1639,35 @@ func clampNotice(s string) string {
 // downstream still treating the turn as live. Note that it is not gated on the
 // turn *being* live: a turn that already delivered text can still fail at its
 // boundary, and that failure is worth reporting.
+//
+// A message queued behind the failed turn keeps the placeholder, the same trade
+// deliverText makes for an answer with a backlog behind it (#42). A turn that
+// died is still a turn the next one has to follow, and the alternative is the
+// queued turn running with no clock at all. Only the clock is stopped — this
+// path has no turn-complete behind it to have stopped it already — and the
+// notice is posted underneath, after which the placeholder is moved back to the
+// bottom so the queued turn's clock is where a reader is looking.
 func (r *Router) failTurn(ctx context.Context, e *sessionEntry, conv, kind, notice string) {
 	if !e.claimFailureNotice() {
 		return
 	}
 	e.endTurn()
-	r.clearProgress(ctx, e, conv)
+	queued := e.backlogged()
+	if queued {
+		e.stopTicker()
+	} else {
+		r.clearProgress(ctx, e, conv)
+	}
 	r.metrics.recordTurnFailed(kind)
 	if _, err := r.out.Send(ctx, chat.Reply{Conversation: conv, Text: notice, Kind: chat.KindNotice}); err != nil {
 		r.logf("relay %s: surface turn failure (%s): %v", conv, kind, err)
+		return
+	}
+	if queued {
+		// Nothing was posted below the placeholder unless the Send above
+		// succeeded, and re-anchoring against nothing spends two API calls to
+		// change nothing — or leaves a duplicate if the delete half fails.
+		r.reanchorProgress(ctx, e, conv)
 	}
 }
 
@@ -1543,6 +1689,7 @@ var reliedOnEvents = []string{
 	daemon.EventUsage,
 	daemon.EventTurnComplete,
 	daemon.EventTurnError,
+	daemon.EventInbox,
 }
 
 // noteCapabilities records what the daemon said about itself when it opened the
@@ -1682,10 +1829,20 @@ func (r *Router) tick(ctx context.Context, e *sessionEntry, conv string, start t
 // No-op for a turn that never spoke, which is every turn in the common case:
 // turn-complete arrives before the answer, so the flag is still clear and the
 // placeholder survives to be retired by the answer a moment later.
+// No-op too when a message is queued behind this turn. The placeholder is one
+// slot for the whole conversation and the queued turn is about to want it, so
+// deleting it here hands that turn a thread with no clock — #42's second case,
+// reached one step earlier than through deliverText. The clock is already
+// stopped by the boundary that got here, so what stays in the thread is a
+// frozen elapsed time, which the dequeued event re-dates and restarts.
 func (r *Router) retireSpokenPlaceholder(ctx context.Context, e *sessionEntry, conv string) {
-	if e.takeSpoke() {
-		r.clearProgress(ctx, e, conv)
+	if !e.takeSpoke() {
+		return
 	}
+	if e.backlogged() {
+		return
+	}
+	r.clearProgress(ctx, e, conv)
 }
 
 // armTurnBackstop starts the one thing standing between a turn that spoke and
@@ -1729,6 +1886,27 @@ func (r *Router) armTurnBackstop(ctx context.Context, e *sessionEntry, conv stri
 	}()
 }
 
+// resumeProgress hands a stranded placeholder to the turn that has just picked
+// up a queued message: the clock restarts from now, and the entry goes back to
+// waiting on the daemon.
+//
+// beginTurnInFlight and not a bare inFlight store, because this really is a new
+// turn and every per-turn claim on the entry has to move with it — the
+// stream-lost notice, the spoke flag the boundary reads, the backstop, and the
+// turn stamp late tool notices are matched against. The one thing it does not
+// do is post: the message is already in the thread, put there for the turn
+// before this one and kept because this one was coming.
+func (r *Router) resumeProgress(ctx context.Context, e *sessionEntry, conv string) {
+	stop, ok := e.resumeTurnClock(time.Now())
+	if !ok {
+		return
+	}
+	e.beginTurnInFlight()
+	if r.tickInterval > 0 {
+		go r.tick(ctx, e, conv, time.Now(), stop)
+	}
+}
+
 // clearProgress deletes and forgets the entry's outstanding progress message,
 // if any. Called before a reply is relayed so the transient message gives way
 // to the answer. No-op when none is outstanding.
@@ -1768,13 +1946,31 @@ func (r *Router) clearProgress(ctx context.Context, e *sessionEntry, conv string
 // before #42.
 func (r *Router) deliverText(ctx context.Context, e *sessionEntry, conv, text string) {
 	usage, settled := e.takeUsage()
-	final := settled || !e.signalsEnd.Load() || !e.watchedWhole()
+	// Two questions, and #42 is what happens when they are answered as one.
+	//
+	// ended is about the turn: has this text concluded it, or is the turn still
+	// running and this only something it said on the way? That is the first
+	// case, and the paragraphs above are its reasoning.
+	//
+	// final is about the thread: is this its last word for now? A turn can be
+	// genuinely over — turn-complete banked, answer in hand — while a message
+	// queued behind it waits for a turn of its own. The progress placeholder is
+	// one slot for the whole conversation, so retiring it on an answer that has
+	// a later turn behind it hands that turn a thread with no placeholder and
+	// no clock. That is the second case. Backlogged text keeps the placeholder,
+	// re-anchoring it below the answer exactly as narration does.
+	ended := settled || !e.signalsEnd.Load() || !e.watchedWhole()
+	final := ended && !e.backlogged()
+	if ended {
+		// The counter is about turns, not placeholders: a completed turn was
+		// delivered to the thread whether or not another is queued behind it.
+		r.metrics.recordTurnRelayed()
+	}
 	if final {
-		// An answer concludes the turn: whatever the stream does next, nobody
-		// is left waiting on it.
+		// An answer with nothing behind it concludes the wait: whatever the
+		// stream does next, nobody is left waiting on it.
 		e.endTurn()
 		r.clearProgress(ctx, e, conv)
-		r.metrics.recordTurnRelayed()
 	}
 	if !r.settingsFor(e.channel).showUsage {
 		usage = nil
@@ -2141,6 +2337,30 @@ func (r *Router) relay(ctx context.Context, conv string, e *sessionEntry, owner 
 				streaming = false
 				r.failTurn(ctx, e, conv, te.Kind, turnErrorNotice(te))
 				return nil
+			case daemon.EventInbox:
+				// Not a turn boundary and not something the thread is told
+				// about: the backlog exists only so an answer can tell whether
+				// it is this thread's last word (see deliverText). Unreadable
+				// frames are logged rather than ignored — the set going stale
+				// is what strands a placeholder, so it is worth knowing that
+				// the events feeding it are not being understood.
+				c, ok := daemon.InboxChanged(ev.Data)
+				if !ok {
+					r.logf("relay %s: unreadable inbox event: %s", conv, ev.Data)
+					return nil
+				}
+				e.noteInbox(c)
+				if c.Dequeued() {
+					// A turn has just taken this message up. In the ordinary
+					// case that is the turn switchboard injected moments ago,
+					// already being timed, and this does nothing. The case it
+					// is here for is the one #42's second half leaves behind:
+					// a placeholder kept alive past the previous turn's answer
+					// for exactly this turn, with a clock stopped by the
+					// boundary that ended that answer.
+					r.resumeProgress(ctx, e, conv)
+				}
+				return nil
 			case daemon.EventCapabilities:
 				c, ok := daemon.StreamOpened(ev.Data)
 				if !ok {
@@ -2175,8 +2395,40 @@ func (r *Router) relay(ctx context.Context, conv string, e *sessionEntry, owner 
 					// to learn why.
 					r.logf("relay %s: daemon is waiting on a human (%s); the turn is parked",
 						conv, st.TurnState)
-				case st.Idle() && streaming:
+				case st.Idle():
+					// An idle daemon has drained its inbox, so anything still
+					// in the backlog is the residue of a dequeued lost to a
+					// stream outage. See sessionEntry.clearBacklog.
+					//
+					// Above the streaming gate, and deliberately: the moment the
+					// set can actually be stale is the reconnect, and the first
+					// frame a fresh connection sees is a snapshot of a session
+					// that is already idle — streaming was never set on this
+					// connection, so gating the resync on it would skip the only
+					// case it exists for and leave a lost dequeued stranding a
+					// frozen placeholder for the life of the entry.
+					//
+					// Not while an answer is owed, though. turn-complete lands
+					// before the text it belongs to and endTurn has already run
+					// by then, so the daemon can read as idle in between;
+					// clearing there would drop the queued id that the answer is
+					// about to check and post it as the thread's last word.
+					owed := e.awaitingAnswer()
+					if !owed {
+						e.clearBacklog()
+					}
+					if !streaming {
+						return nil
+					}
 					streaming = false
+					// Nothing carried what this turn spent — an answer would have
+					// taken the bank on its way out — so drop it rather than let
+					// it land on the next reply. Same reasoning as turn-error,
+					// and skipped in the same window as the resync above, where
+					// the figures belong to an answer still in flight.
+					if !owed {
+						e.resetUsage()
+					}
 					// The daemon's turn cleanup emits this on both exit paths of
 					// a turn that started, where turn-complete fires only when
 					// the turn succeeded and turn-error only when it failed in a
