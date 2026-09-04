@@ -217,20 +217,34 @@ func (a *Adapter) Run(ctx context.Context, h chat.Handler) error {
 	})
 }
 
-// dispatch translates one Pub/Sub message into a turn, a gateway command, a
-// button click, or a welcome, and hands it to the router. It always acks: a
-// message we cannot act on (a lifecycle event, a bot sender, a malformed
-// payload) must not be redelivered forever, and a daemon failure is logged
-// rather than retried (a retry would re-inject and could duplicate the turn),
-// mirroring the Slack adapter.
+// dispatch hands one Pub/Sub message's payload to the shared event path and
+// always acks: a message we cannot act on (a lifecycle event, a bot sender, a
+// malformed payload) must not be redelivered forever, and a daemon failure is
+// logged rather than retried (a retry would re-inject and could duplicate the
+// turn), mirroring the Slack adapter.
+//
+// The ack is the whole of what is Pub/Sub-specific about receiving an event,
+// which is why it is the only thing left here: everything below handleEvent is
+// shared with the HTTP ingress, whose equivalent of "always ack" is always
+// answering 200 (docs/DESIGN.md §3.4).
 func (a *Adapter) dispatch(ctx context.Context, h chat.Handler, m *pubsub.Message) {
 	defer m.Ack()
+	a.handleEvent(ctx, h, m.Data)
+}
+
+// handleEvent translates one raw Chat event payload into a turn, a gateway
+// command, a button click, or a welcome, and hands it to the router. It takes
+// the bytes rather than a transport envelope because both dialects and both
+// ingresses converge here — decodeEvent already normalizes the add-on and
+// legacy shapes into one inbound, and the transport adds nothing the router
+// needs to know about.
+func (a *Adapter) handleEvent(ctx context.Context, h chat.Handler, data []byte) {
 	// One line, one payload, compacted: the log is meant to be sliced straight
 	// into testdata/events as a decoder fixture.
 	if a.logEvents {
-		a.logf.Infof("googlechat: event %s", compactJSON(m.Data))
+		a.logf.Infof("googlechat: event %s", compactJSON(data))
 	}
-	in, err := decodeEvent(m.Data)
+	in, err := decodeEvent(data)
 	if err != nil {
 		a.logf.Errorf("googlechat: %v", err)
 		return

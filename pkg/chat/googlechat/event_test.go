@@ -510,6 +510,34 @@ func TestDecodeBadCommandID(t *testing.T) {
 	}
 }
 
+// TestDecodeProtoJSONCommandID covers the number spelling the HTTP ingress
+// delivers. Pub/Sub sends "appCommandId": 1 and the HTTP path sends 1.0 — the
+// same console-assigned ID, serialized as proto-JSON — so a decoder that reads
+// only integers would drop every command over that transport while every
+// captured Pub/Sub fixture in testdata/events kept passing (docs/DESIGN.md
+// §3.4). The payloads here are constructed from that serialization difference
+// rather than captured, because switchboard has no HTTP ingress to capture
+// from yet; the live fixture is owed once #29 lands.
+func TestDecodeProtoJSONCommandID(t *testing.T) {
+	tests := []struct {
+		id   string
+		want int64
+	}{
+		{`3.0`, 3},
+		{`"3.0"`, 3},
+		{`3.00000`, 3},
+		{`1.0E2`, 100},
+		{`-2.0`, -2},
+	}
+	for _, tt := range tests {
+		payload := `{"chat": {"space": {"name": "spaces/A"},
+			"appCommandPayload": {"appCommandMetadata": {"appCommandId": ` + tt.id + `}}}}`
+		if in := mustDecode(t, payload); in.cmdID != tt.want {
+			t.Fatalf("appCommandId %s: cmdID = %d, want %d", tt.id, in.cmdID, tt.want)
+		}
+	}
+}
+
 func assertInbound(t *testing.T, got, want inbound) {
 	t.Helper()
 	if got.kind != want.kind || got.space != want.space || got.thread != want.thread ||
