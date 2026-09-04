@@ -308,7 +308,10 @@ In the Google Cloud console, under the Chat API's **Configuration** page:
 
 1. App name, avatar, description.
 2. **Connection settings → Cloud Pub/Sub**, topic
-   `projects/PROJECT_ID/topics/switchboard-chat-events`.
+   `projects/PROJECT_ID/topics/switchboard-chat-events`. The alternative is
+   *HTTP endpoint URL* — see [The HTTP ingress](#the-http-ingress); it is one
+   radio button, so an app cannot be reached both ways at once, and the switch
+   takes effect for everyone the moment it is saved.
 3. Enable **Receive 1:1 messages** and **Join spaces and group conversations**.
 4. Add app commands. Each gets a numeric ID you choose — Chat identifies a
    command by that ID and never by name, so it has to match
@@ -354,7 +357,7 @@ Two Chat-specific notes on top of that page:
 
 Switchboard pulls from Pub/Sub, so it needs no inbound network path — a laptop
 behind NAT can serve a real Chat app. That property is the whole reason the
-add-on is served over Pub/Sub rather than HTTP.
+add-on is served over Pub/Sub by default.
 
 ```sh
 export SWITCHBOARD_DAEMON_TOKEN=…   # the one dev/demo/daemon printed
@@ -365,6 +368,83 @@ export SWITCHBOARD_DAEMON_TOKEN=…   # the one dev/demo/daemon printed
   --googlechat-log-events \
   --daemon-url http://127.0.0.1:7777
 ```
+
+### The HTTP ingress
+
+Everything above receives over Pub/Sub. The other transport is an endpoint Chat
+posts events to, which is what dialogs and card clicks need and what
+[#29](https://github.com/go-steer/switchboard/issues/29) is about. Switchboard
+renders no buttons yet, so on today's build this is the same conversation over a
+different wire — worth setting up now only if you are working on that issue or
+you want the endpoint proved out before the clicks land.
+
+It costs the property the paragraph above is about. Chat has to reach the
+process, so a laptop behind NAT no longer works without a tunnel, and the URL is
+public to everyone else too. Four things are needed:
+
+1. **A publicly reachable HTTPS URL** ending in `/chat` — the path is fixed,
+   because it is half of the audience every inbound token is checked against and
+   a value that can drift between the console and the process fails as an
+   authentication error while looking like a delivery one. For a local run,
+   anything that terminates TLS and forwards works (`cloudflared tunnel`, `ngrok
+   http 8081`); in-cluster it is a Service plus whatever your Ingress uses for
+   certificates.
+2. **The console pointed at it**: Configuration → *Connection settings* → **HTTP
+   endpoint URL**, `https://<host>/chat`. This replaces the Pub/Sub topic rather
+   than adding to it.
+3. **The add-on's service-account email**, from the *Service account email*
+   field on that same page — the one [The Chat service
+   identity](#the-chat-service-identity) tells you to check is populated. It is
+   normally `service-<PROJECT_NUMBER>@gcp-sa-gsuiteaddons.iam.gserviceaccount.com`.
+4. **The flags**:
+
+```sh
+export SWITCHBOARD_DAEMON_TOKEN=…
+/tmp/switchboard serve --platform googlechat \
+  --googlechat-ingress http \
+  --googlechat-listen :8081 \
+  --googlechat-service-account service-PROJECT_NUMBER@gcp-sa-gsuiteaddons.iam.gserviceaccount.com \
+  --googlechat-commands 1=progress \
+  --googlechat-log-events \
+  --daemon-url http://127.0.0.1:7777
+# 2026-09-04T10:00:00.000Z INFO  googlechat: serving the interaction endpoint on :8081/chat
+# 2026-09-04T10:00:00.000Z INFO  googlechat: HTTP ingress, accepting events authenticated as service-…
+```
+
+No `--google-project` or `--google-subscription`: this ingress receives no
+Pub/Sub, and passing a subscription alongside it is a startup error rather than
+an ignored setting.
+
+`--googlechat-endpoint-url` pins the audience. Leave it unset and each token is
+checked against the URL its own request names, which is right whenever the
+`Host` switchboard sees is the one Chat dialled. Set it — to the exact
+`https://<host>/chat` in the console — when something in front rewrites `Host`,
+which most tunnels do. This is the first thing to try when the endpoint is
+clearly being reached and every request is still rejected: the log line names
+the audience it checked against, and comparing that to the console URL is the
+whole diagnosis.
+
+```
+ERROR googlechat: ingress: rejected a request: no valid ID token for audience
+      https://internal.svc/chat: header: idtoken: audience provided does not match
+      aud claim in the JWT
+```
+
+Two behaviours to expect while testing:
+
+- **Every request is answered `200 {}`, immediately.** The turn runs behind the
+  response, because Chat gives the endpoint about 30 seconds and a turn is
+  routinely longer; the answer arrives in the thread over the REST API, exactly
+  as it does under Pub/Sub. So a `200` means "accepted", not "answered", and an
+  event switchboard cannot act on gets one too — a retry would be a duplicate
+  turn, not a second chance.
+- **A rejected request is a `401` and an ERROR line**, and nothing about it
+  reaches the daemon. Verification runs before the payload is looked at, so a
+  forged event cannot become a turn under whatever identity it claims.
+
+Everything after this point — commands, cards, progress modes, the demo script
+— behaves identically on both transports. The decoder normalizes the two
+dialects and the two ingresses away before anything downstream sees an event.
 
 ### Outbound ingress
 

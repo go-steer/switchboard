@@ -721,6 +721,29 @@ Responses use the add-on envelope —
 not the legacy `actionResponse` with `cardsV2`. `RenderActions` is specifically
 the dialog lifecycle, and switchboard renders no dialogs.
 
+**What shipped, and three things the build settled.** The transport is in
+(`pkg/chat/googlechat/http.go`): the mode flag, the listener, the verification
+above, and a `200 {}` written before the turn runs. Buttons are not — that is
+the rest of #29, and the paragraph above is still its design.
+
+The turn *does* run after the response here, which is the opposite of "anything
+that must happen happens before the write" — deliberately, and only because
+switchboard ships as a Kubernetes Deployment (`deploy/`) where a post-response goroutine is
+scheduled normally. It is the one design decision above that a Cloud Run
+deployment would have to revisit, so it is written into the code at the point
+that assumes it rather than left for someone to rediscover.
+
+The path is fixed at `/chat` rather than configurable, because it is half of the
+audience: a path that can differ between the console and the process turns one
+typo into an authentication error on every request, diagnosed as a delivery
+failure. And the endpoint answers `200` even to an event it cannot act on, which
+is the same reasoning as `dispatch`'s unconditional ack — a non-2xx buys a
+redelivery, and a redelivered message event is a duplicate turn rather than a
+second chance. Shutdown is where the two ingresses genuinely differ: Pub/Sub's
+`Receive` returns once its handlers do, while a turn here has already outlived
+its request, so the server drains the in-flight ones under a bounded grace and
+says so if it gives up.
+
 ### 3.5 Configuration, and why it grew a file
 
 Flags were enough while every setting was a scalar the whole process shared.

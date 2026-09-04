@@ -181,6 +181,21 @@ func runServe(args []string) (err error) {
 	googleCommands := fs.String("googlechat-commands", "",
 		"comma-separated Chat app-command ID to gateway verb mappings (e.g. \"1=progress,2=help\"), "+
 			"matching the command IDs configured in the Chat API console")
+	googleIngress := fs.String("googlechat-ingress", string(googlechat.IngressPubSub),
+		"how Google Chat events arrive: \"pubsub\" (pull from a subscription, no inbound "+
+			"surface) or \"http\" (serve an endpoint Chat posts to, which is what card "+
+			"clicks need)")
+	googleListen := fs.String("googlechat-listen", "",
+		"listener address (host:port) for the Chat interaction endpoint "+
+			"(--googlechat-ingress http)")
+	googleEndpointURL := fs.String("googlechat-endpoint-url", "",
+		"public URL of the Chat interaction endpoint, pinning the audience every inbound "+
+			"ID token is checked against; empty derives it per request, which is wrong only "+
+			"when a proxy rewrites Host")
+	googleChatSA := fs.String("googlechat-service-account", "",
+		"service-account email inbound Chat requests must authenticate as, normally "+
+			"service-<project number>@gcp-sa-gsuiteaddons.iam.gserviceaccount.com; required "+
+			"with --googlechat-ingress http, and there is no unpinned mode")
 	metricsAddr := fs.String("metrics-addr", "",
 		"Prometheus /metrics + /healthz listener address (host:port); empty = disabled")
 	ingressAddr := fs.String("ingress-addr", "",
@@ -236,6 +251,10 @@ func runServe(args []string) (err error) {
 	res.str("google-subscription", "SWITCHBOARD_GOOGLE_SUBSCRIPTION", cfg.GoogleSub, googleSub)
 	res.str("googlechat-cards", "SWITCHBOARD_GOOGLECHAT_CARDS", cfg.GoogleCards, googleCards)
 	res.boolean("googlechat-log-events", "", cfg.GoogleLogEvents, googleLogEvents)
+	res.str("googlechat-ingress", "SWITCHBOARD_GOOGLECHAT_INGRESS", cfg.GoogleIngress, googleIngress)
+	res.str("googlechat-listen", "SWITCHBOARD_GOOGLECHAT_LISTEN", cfg.GoogleListen, googleListen)
+	res.str("googlechat-endpoint-url", "SWITCHBOARD_GOOGLECHAT_ENDPOINT_URL", cfg.GoogleEndpointURL, googleEndpointURL)
+	res.str("googlechat-service-account", "SWITCHBOARD_GOOGLECHAT_SERVICE_ACCOUNT", cfg.GoogleChatSA, googleChatSA)
 	res.str("metrics-addr", "SWITCHBOARD_METRICS_ADDR", cfg.MetricsAddr, metricsAddr)
 	res.str("ingress-addr", "SWITCHBOARD_INGRESS_ADDR", cfg.IngressAddr, ingressAddr)
 	res.str("ingress-token-env", "", cfg.IngressTokenEnv, ingressTokenEnv)
@@ -442,33 +461,66 @@ func runServe(args []string) (err error) {
 			return fmt.Errorf("slack adapter: %w (set $%s)", err, *botTokenEnv)
 		}
 	case "googlechat":
+		ingressMode, ok := googlechat.ParseIngressMode(*googleIngress)
+		if !ok {
+			return fmt.Errorf("invalid --googlechat-ingress %q (want \"pubsub\" or \"http\")", *googleIngress)
+		}
 		project, sub := *googleProject, *googleSub
+		listen := *googleListen
 		switch {
-		case *outboundOnly && (project != "" || sub != ""):
+		case *outboundOnly && (project != "" || sub != "" || listen != ""):
 			// The env vars are named alongside the flags because they are where
 			// a Deployment usually sets these, and an operator told only about
 			// flags they never passed would go looking in the wrong place.
-			logf.Warnf("--outbound-only, so --google-project/--google-subscription " +
-				"($SWITCHBOARD_GOOGLE_PROJECT/$SWITCHBOARD_GOOGLE_SUBSCRIPTION) are " +
-				"ignored and no Pub/Sub client is built")
-			project, sub = "", ""
-		case !*outboundOnly && sub == "":
+			logf.Warnf("--outbound-only, so --google-project/--google-subscription/--googlechat-listen " +
+				"($SWITCHBOARD_GOOGLE_PROJECT/$SWITCHBOARD_GOOGLE_SUBSCRIPTION/$SWITCHBOARD_GOOGLECHAT_LISTEN) " +
+				"are ignored: nothing is received, so neither transport is built")
+			project, sub, listen = "", "", ""
+			ingressMode = googlechat.IngressPubSub
+		case !*outboundOnly && ingressMode == googlechat.IngressHTTP && listen == "":
+			return errors.New("no --googlechat-listen (--googlechat-ingress http serves an endpoint, " +
+				"so it needs an address to serve it on, " +
+				"or pass --outbound-only if this deployment only posts)")
+		case !*outboundOnly && ingressMode == googlechat.IngressHTTP && *googleChatSA == "":
+			// Refused here as well as in the adapter, because the adapter's
+			// message names a Config field and an operator is holding flags.
+			return errors.New("no --googlechat-service-account (the Chat interaction endpoint is " +
+				"public, so every request is checked against the address this add-on's traffic is " +
+				"signed by; the Chat API configuration page names it, and there is no unpinned mode)")
+		case !*outboundOnly && ingressMode == googlechat.IngressPubSub && sub == "":
 			return errors.New("no --google-subscription (set it together with --google-project, " +
+				"pass --googlechat-ingress http to receive over HTTP instead, " +
 				"or pass --outbound-only if this deployment only posts)")
 		}
 		adapter, err = googlechat.New(googlechat.Config{
-			ProjectID:      project,
-			SubscriptionID: sub,
-			Cards:          cardMode,
-			CallerMode:     callerMode,
-			Commands:       appCommands,
-			LogEvents:      *googleLogEvents,
-			Logf:           logf,
+			ProjectID:          project,
+			SubscriptionID:     sub,
+			Ingress:            ingressMode,
+			ListenAddr:         listen,
+			EndpointURL:        *googleEndpointURL,
+			ChatServiceAccount: *googleChatSA,
+			Cards:              cardMode,
+			CallerMode:         callerMode,
+			Commands:           appCommands,
+			LogEvents:          *googleLogEvents,
+			Logf:               logf,
 		})
 		if err != nil {
 			// No flag hint: this also carries ADC failures, which naming the
 			// subscription flags would misattribute.
 			return fmt.Errorf("googlechat adapter: %w", err)
+		}
+		if ingressMode == googlechat.IngressHTTP {
+			// Announced like the approvals grant and the outbound-only banner,
+			// because it is the same kind of fact: this run has an inbound
+			// surface the Pub/Sub posture does not, and which requests it will
+			// act on is now a property of a token check rather than of IAM.
+			logf.Infof("googlechat: HTTP ingress, accepting events authenticated as %s", *googleChatSA)
+			if *googleEndpointURL == "" {
+				logf.Warnf("no --googlechat-endpoint-url, so each inbound token is checked against " +
+					"the URL its own request names; pin it if anything in front of switchboard " +
+					"rewrites Host")
+			}
 		}
 	default:
 		return fmt.Errorf("invalid --platform %q (want \"slack\" or \"googlechat\")", *platform)

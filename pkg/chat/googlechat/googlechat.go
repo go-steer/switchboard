@@ -15,10 +15,14 @@
 // Package googlechat implements chat.Adapter over Google Chat, as a Google
 // Workspace add-on that extends Chat.
 //
-// Ingress is Pub/Sub — the add-on is configured to publish events to a topic
-// and switchboard pulls them from a subscription, so (like Slack Socket Mode)
-// no public webhook is exposed, matching the distroless posture. In exchange
-// the gateway stays a pull-only client with no inbound surface.
+// Ingress is a deployment choice between two transports, made with Config's
+// Ingress field and defaulting to Pub/Sub.
+//
+// Pub/Sub is the default because it exposes no inbound surface: the add-on
+// publishes events to a topic and switchboard pulls them from a subscription,
+// so (like Slack Socket Mode) there is no public webhook, matching the
+// distroless posture, and authorization is the subscription's IAM rather than
+// anything this package has to check.
 //
 // What that costs is everything needing a synchronous HTTP response, which
 // rules out dialogs. Callback buttons are a separate limit, not a consequence of
@@ -31,10 +35,17 @@
 // than Pub/Sub's — legacy Chat-API apps do receive clicks over the same
 // transport, known from operating Chat rather than measured here — but the
 // add-on framework is the one Google is migrating to and the one this gateway
-// targets, so buttons wait for the HTTP ingress in #29 rather than for a console
-// downgrade (docs/DESIGN.md §3.3). Cards here are therefore output, and a
-// setting is changed by typing the command. The click path is written and tested
-// for that ingress.
+// targets (docs/DESIGN.md §3.3).
+//
+// The HTTP ingress is what buys those clicks back (#29): Chat posts each event
+// to an endpoint this process serves. It is opt-in because it is a public
+// attack surface, and a deployment that wants no buttons should not be paying
+// for one. Every request is verified against a Google-signed ID token pinned to
+// this add-on's own service account before anything reads the payload — see
+// http.go, and docs/DESIGN.md §3.4 for why each half of that check is load
+// bearing. Only the transport differs: both ingresses converge on handleEvent,
+// and nothing below it learns which one a turn arrived on, the same way nothing
+// learns which dialect it arrived in.
 //
 // Egress is the Google Chat REST API (spaces.messages create/patch/delete),
 // which lets every long-turn progress mode work: the placeholder can be edited
@@ -60,6 +71,7 @@ import (
 	"cloud.google.com/go/pubsub"
 	chatv1 "google.golang.org/api/chat/v1"
 	"google.golang.org/api/googleapi"
+	"google.golang.org/api/idtoken"
 	"google.golang.org/api/option"
 
 	"github.com/go-steer/switchboard/pkg/chat"
@@ -120,6 +132,25 @@ type Config struct {
 	// the verb from the first word the invoker typed, which is what a single
 	// catch-all "/switchboard progress stream" command needs.
 	Commands map[int64]string
+	// Ingress selects how events arrive. The zero value means IngressPubSub,
+	// which exposes no inbound surface; IngressHTTP serves an endpoint Chat
+	// posts to, which is what a card click needs (#29).
+	Ingress IngressMode
+	// ListenAddr is the host:port the HTTP ingress binds (IngressHTTP only).
+	ListenAddr string
+	// EndpointURL pins the audience every inbound ID token is checked against.
+	// Empty derives it from each request, which is what the token carries —
+	// set it when a proxy rewrites Host, since then the request no longer
+	// names the URL Chat actually called.
+	EndpointURL string
+	// ChatServiceAccount is the service-account email inbound ID tokens must
+	// carry, normally
+	// service-<project number>@gcp-sa-gsuiteaddons.iam.gserviceaccount.com.
+	// Required for IngressHTTP and unused otherwise. There is no unpinned
+	// mode: every add-on's token is signed by an address of this shape derived
+	// from its own project number, so a check that accepts the shape accepts
+	// every add-on on the platform.
+	ChatServiceAccount string
 	// LogEvents logs every inbound Pub/Sub payload verbatim. It exists to
 	// capture real Chat traffic as decoder fixtures (see
 	// docs/googlechat-setup.md): what Google actually sends is the one thing
@@ -137,6 +168,9 @@ var _ chat.Adapter = (*Adapter)(nil)
 type Adapter struct {
 	ps        *pubsub.Client
 	sub       string
+	ingress   IngressMode
+	listen    string
+	verify    verifier
 	msg       messenger
 	cards     CardMode
 	caller    chat.CallerMode
@@ -151,10 +185,27 @@ type Adapter struct {
 // context because the clients are long-lived and outlive any single serve
 // context.
 func New(cfg Config) (*Adapter, error) {
+	ingress, ok := ParseIngressMode(string(cfg.Ingress))
+	if !ok {
+		return nil, fmt.Errorf("googlechat: invalid ingress %q (want pubsub or http)", cfg.Ingress)
+	}
 	switch {
-	case cfg.ProjectID == "" && cfg.SubscriptionID != "":
+	case ingress == IngressHTTP && cfg.SubscriptionID != "":
+		// Not silently ignored: a deployment naming both has one of them
+		// wrong, and guessing which would send the operator looking at the
+		// half that was doing what they asked.
+		return nil, errors.New("googlechat: SubscriptionID is for the pubsub ingress; the http ingress receives no Pub/Sub")
+	case ingress == IngressHTTP && cfg.ListenAddr == "":
+		return nil, errors.New("googlechat: ListenAddr is required by the http ingress")
+	case ingress == IngressHTTP && cfg.ChatServiceAccount == "":
+		// Refusing to start is the point. This endpoint is public, and
+		// without the expected caller the token check degrades to "some
+		// Workspace add-on somewhere", which is not a check.
+		return nil, errors.New("googlechat: ChatServiceAccount is required by the http ingress; " +
+			"it is the only thing distinguishing this add-on's traffic from any other add-on's")
+	case ingress == IngressPubSub && cfg.ProjectID == "" && cfg.SubscriptionID != "":
 		return nil, errors.New("googlechat: ProjectID is required to receive")
-	case cfg.ProjectID != "" && cfg.SubscriptionID == "":
+	case ingress == IngressPubSub && cfg.ProjectID != "" && cfg.SubscriptionID == "":
 		return nil, errors.New("googlechat: SubscriptionID is required to receive")
 	}
 	cards, ok := ParseCardMode(string(cfg.Cards))
@@ -186,8 +237,15 @@ func New(cfg Config) (*Adapter, error) {
 		return nil, fmt.Errorf("googlechat: chat service: %w", err)
 	}
 	return &Adapter{
-		ps:        ps,
-		sub:       cfg.SubscriptionID,
+		ps:      ps,
+		sub:     cfg.SubscriptionID,
+		ingress: ingress,
+		listen:  cfg.ListenAddr,
+		verify: verifier{
+			audience: cfg.EndpointURL,
+			expect:   cfg.ChatServiceAccount,
+			validate: idtoken.Validate,
+		},
 		msg:       restMessenger{svc: svc},
 		cards:     cards,
 		caller:    caller,
@@ -207,6 +265,9 @@ func (a *Adapter) Name() string { return "googlechat" }
 // An adapter built without a subscription has nothing to pull from and returns
 // chat.ErrNoInbound.
 func (a *Adapter) Run(ctx context.Context, h chat.Handler) error {
+	if a.ingress == IngressHTTP {
+		return a.serveIngress(ctx, h)
+	}
 	if a.ps == nil {
 		return fmt.Errorf("googlechat: no subscription configured: %w", chat.ErrNoInbound)
 	}

@@ -30,8 +30,11 @@
 # /healthz (liveness + readiness) and /metrics (Prometheus) on the
 # containerPort declared below — the two have to agree, and they are in
 # different files now, which is the one seam this split introduces. That
-# port is the ONLY inbound surface — both chat platforms are outbound —
-# so the NetworkPolicy admits scrapers to it and nothing else. serve()
+# port is the ONLY inbound surface as configured here — both chat
+# platforms are outbound in these overlays — so the NetworkPolicy admits
+# scrapers to it and nothing else. The outbound ingress and the Chat HTTP
+# ingress each add one, and each takes a port, a rule and a Service of its
+# own; see deploy/README.md. serve()
 # still exits non-zero on any fatal error (bad token, adapter failure, or
 # a metrics bind failure), so the container also restarts on real
 # failures via restartPolicy.

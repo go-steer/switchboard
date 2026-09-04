@@ -78,6 +78,16 @@ type Config struct {
 	GoogleSub       *string `json:"google_subscription,omitempty"`
 	GoogleLogEvents *bool   `json:"googlechat_log_events,omitempty"`
 
+	// The HTTP interaction endpoint (#29). GoogleIngress picks the transport;
+	// the other three configure the endpoint and the identity its callers must
+	// prove. GoogleChatSA is an identity to check against, not a credential —
+	// it is a public service-account address — so it belongs in the file the
+	// same way a conversation allow-list does.
+	GoogleIngress     *string `json:"googlechat_ingress,omitempty"`
+	GoogleListen      *string `json:"googlechat_listen,omitempty"`
+	GoogleEndpointURL *string `json:"googlechat_endpoint_url,omitempty"`
+	GoogleChatSA      *string `json:"googlechat_service_account,omitempty"`
+
 	// The two render modes. Process-wide rather than per-channel, and not for
 	// want of wanting them scoped: they are read by the adapter when it is
 	// built, and the adapter has no way to ask the router what a channel wants.

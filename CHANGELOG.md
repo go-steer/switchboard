@@ -7,6 +7,35 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- Google Chat can receive over **HTTP** instead of Pub/Sub (#29):
+  `--googlechat-ingress http` serves `POST /chat` on `--googlechat-listen`, and
+  the Chat app's connection settings name that URL instead of a topic. Same
+  events, same decoder, same egress — nothing below the adapter can tell which
+  transport a turn arrived on. Pub/Sub stays the default, because it exposes no
+  inbound surface; this one is a public endpoint, and what it buys is everything
+  needing a synchronous response, which is the card clicks and dialogs the rest
+  of #29 will render.
+
+  Every request is verified before its payload is read: a Google-signed ID
+  token, taken from the `Authorization` header or the body's
+  `authorizationEventObject.systemIdToken` (Chat sends both, so a proxy that
+  strips the header does not break delivery), checked against this endpoint's
+  URL as the audience and against `--googlechat-service-account` as the caller.
+  That last one is required and has no unpinned mode — every Workspace add-on's
+  traffic is signed by an address of the same
+  `service-<project number>@gcp-sa-gsuiteaddons.iam.gserviceaccount.com` shape,
+  so a check that stops at "Google signed it" accepts every add-on on the
+  platform as this one. `--googlechat-endpoint-url` pins the audience for
+  deployments behind something that rewrites `Host`.
+
+  A verified request is answered `200 {}` at once and the turn runs behind it:
+  Chat allows the endpoint ~30 seconds and a turn is routinely longer, so the
+  answer arrives in the thread over REST as it always has. An event the gateway
+  cannot act on is answered `200` too, for the reason Pub/Sub events are always
+  acked — a retry would be a duplicate turn rather than a second chance.
+  Shutdown drains the turns already in flight. `deploy/README.md` covers the
+  port, the NetworkPolicy rule and the certificate this needs in-cluster;
+  `docs/googlechat-setup.md` covers the console side.
 - `docs/googlechat-setup.md` documents the Chat **service identity** step
   (`gcloud beta services identity create --service=chat.googleapis.com`).
   Enabling the Chat API is not sufficient and the omission is invisible: both

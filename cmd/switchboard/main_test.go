@@ -134,6 +134,48 @@ func TestRunServeIngressIsNotSlackOnly(t *testing.T) {
 	}
 }
 
+// TestRunServeRefusesAnUnpinnedChatEndpoint: --googlechat-ingress http puts a
+// public endpoint on the network, and the only thing separating this add-on's
+// traffic from any other Workspace add-on's is the service-account address its
+// tokens carry. A run that serves the endpoint without one would accept a
+// forged event as a turn, so it is refused at startup rather than warned about
+// — and refused here, by flag name, before the adapter refuses it by field
+// name.
+func TestRunServeRefusesAnUnpinnedChatEndpoint(t *testing.T) {
+	t.Setenv("SWITCHBOARD_DAEMON_TOKEN", "daemon-token")
+	t.Setenv("SWITCHBOARD_GOOGLE_PROJECT", "")
+	t.Setenv("SWITCHBOARD_GOOGLE_SUBSCRIPTION", "")
+	t.Setenv("SWITCHBOARD_GOOGLECHAT_SERVICE_ACCOUNT", "")
+
+	err := runServe([]string{
+		"--platform", "googlechat",
+		"--googlechat-ingress", "http",
+		"--googlechat-listen", "127.0.0.1:0",
+	})
+	if err == nil {
+		t.Fatal("runServe served the Chat endpoint with no expected caller")
+	}
+	if !strings.Contains(err.Error(), "--googlechat-service-account") {
+		t.Errorf("error = %q, want it to name the flag that is missing", err)
+	}
+}
+
+// TestRunServeRefusesAnInvalidChatIngress: a misspelled transport must not fall
+// back to the default. "htpp" silently meaning Pub/Sub is a deployment that
+// configured its console for HTTP and then waits for events that were never
+// going to arrive.
+func TestRunServeRefusesAnInvalidChatIngress(t *testing.T) {
+	t.Setenv("SWITCHBOARD_DAEMON_TOKEN", "daemon-token")
+
+	err := runServe([]string{"--platform", "googlechat", "--googlechat-ingress", "htpp"})
+	if err == nil {
+		t.Fatal("runServe accepted an unknown --googlechat-ingress")
+	}
+	if !strings.Contains(err.Error(), "--googlechat-ingress") {
+		t.Errorf("error = %q, want it to name the flag", err)
+	}
+}
+
 // TestRunServeRefusesWhenItCanNeitherReceiveNorPost: an outbound-only run is a
 // real shape (#23), but only with somewhere for the digests to come from. With
 // --outbound-only and no ingress the process would start, log a banner and sit
@@ -201,6 +243,18 @@ func TestRunServeRequiresAnInboundSourceUnlessDeclaredOutboundOnly(t *testing.T)
 				"SWITCHBOARD_GOOGLE_SUBSCRIPTION": "",
 			},
 			want: []string{"--google-subscription", "--outbound-only"},
+		},
+		{
+			// The HTTP ingress fails the same way for the other flag: it can
+			// receive only if it has an address to serve on, and a run that
+			// bound nothing is a bridge nobody can reach.
+			name: "googlechat over http",
+			args: []string{"--platform", "googlechat", "--googlechat-ingress", "http"},
+			env: map[string]string{
+				"SWITCHBOARD_GOOGLE_PROJECT":      "",
+				"SWITCHBOARD_GOOGLE_SUBSCRIPTION": "",
+			},
+			want: []string{"--googlechat-listen", "--outbound-only"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
