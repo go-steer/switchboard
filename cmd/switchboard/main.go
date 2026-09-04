@@ -85,7 +85,7 @@ func (e loggedError) Unwrap() error { return e.error }
 // printing it again. An error that is already marked — a listener's bind
 // failure, logged where it happened with the name of the listener attached — is
 // passed through untouched rather than said a second time in a vaguer form.
-func reportOnce(logf func(string, ...any), err error) error {
+func reportOnce(logf logging.Logf, err error) error {
 	if err == nil {
 		return nil
 	}
@@ -93,7 +93,7 @@ func reportOnce(logf func(string, ...any), err error) error {
 	if errors.As(err, &logged) {
 		return err
 	}
-	logf("%v", err)
+	logf.Errorf("%v", err)
 	return loggedError{err}
 }
 
@@ -268,7 +268,7 @@ func runServe(args []string) (err error) {
 
 	// Build identity first, ahead of the config checks, so an operator whose
 	// flags are rejected still learns which build rejected them.
-	logf("%s", version.String(prog))
+	logf.Infof("%s", version.String(prog))
 
 	// inbound records whether this run has an event source to consume. It is
 	// declared, not inferred from whether a credential happens to be set: a
@@ -351,9 +351,9 @@ func runServe(args []string) (err error) {
 	// written for a room the bot is not in gets noticed.
 	if cfgPath != "" {
 		if ids := channelIDs(byChannel); len(ids) > 0 {
-			logf("config: read %s, %d configured channel(s): %s", cfgPath, len(ids), strings.Join(ids, " "))
+			logf.Infof("config: read %s, %d configured channel(s): %s", cfgPath, len(ids), strings.Join(ids, " "))
 		} else {
-			logf("config: read %s, no configured channels", cfgPath)
+			logf.Infof("config: read %s, no configured channels", cfgPath)
 		}
 	}
 
@@ -422,7 +422,7 @@ func runServe(args []string) (err error) {
 			// Not an error — the run is unambiguous — but worth saying, because
 			// the token is doing nothing and somebody provisioned it expecting
 			// otherwise.
-			logf("warning: --outbound-only, so $%s is ignored and no Socket Mode connection is opened", *appTokenEnv)
+			logf.Warnf("--outbound-only, so $%s is ignored and no Socket Mode connection is opened", *appTokenEnv)
 			appToken = ""
 		case !*outboundOnly && appToken == "":
 			return fmt.Errorf("no Slack app token in $%s (set it, or pass --outbound-only "+
@@ -448,7 +448,7 @@ func runServe(args []string) (err error) {
 			// The env vars are named alongside the flags because they are where
 			// a Deployment usually sets these, and an operator told only about
 			// flags they never passed would go looking in the wrong place.
-			logf("warning: --outbound-only, so --google-project/--google-subscription " +
+			logf.Warnf("--outbound-only, so --google-project/--google-subscription " +
 				"($SWITCHBOARD_GOOGLE_PROJECT/$SWITCHBOARD_GOOGLE_SUBSCRIPTION) are " +
 				"ignored and no Pub/Sub client is built")
 			project, sub = "", ""
@@ -484,25 +484,25 @@ func runServe(args []string) (err error) {
 	if wantApprovals {
 		switch {
 		case !inbound:
-			logf("warning: approvals answer prompts raised by an agent turn, and an outbound-only run has none")
+			logf.Warnf("approvals answer prompts raised by an agent turn, and an outbound-only run has none")
 		case !*approvals:
 			// On in a channel and off by default. Worth its own line: the two
 			// branches below describe the default posture, and saying either of
 			// them here would describe a posture most conversations do not have.
-			logf("approvals: permission prompts go to the conversation in %d configured channel(s) and nowhere else",
+			logf.Infof("approvals: permission prompts go to the conversation in %d configured channel(s) and nowhere else",
 				countApprovals(byChannel))
 		case policy.open():
 			// Said on every start, like the outbound-only banner, because this
 			// one is a grant: from here on, anyone who can post in a
 			// conversation can answer that session's permission prompts, and
 			// some of those answers outlive the request.
-			logf("approvals: permission prompts go to the conversation, and anyone who can post there can answer them")
+			logf.Infof("approvals: permission prompts go to the conversation, and anyone who can post there can answer them")
 		default:
 			// The narrowed posture is announced too, and by count rather than
 			// by name: the names are already in the process args for anyone
 			// entitled to read them, and a log line is the wrong place to
 			// publish a list of who can approve production changes.
-			logf("approvals: permission prompts go to the conversation, and %d named approver(s) may answer them", len(policy.allowed))
+			logf.Infof("approvals: permission prompts go to the conversation, and %d named approver(s) may answer them", len(policy.allowed))
 		}
 		// Counted, not named, for the same reason. Reported at all because a
 		// channel list replaces the default rather than narrowing it, so a run
@@ -514,19 +514,19 @@ func runServe(args []string) (err error) {
 		// counting the approvers of a feature that cannot fire reads as a
 		// working configuration.
 		if open, named := approverSpread(byChannel); inbound && open+named > 0 {
-			logf("approvals: %d configured channel(s) let anyone answer, %d name their own approvers", open, named)
+			logf.Infof("approvals: %d configured channel(s) let anyone answer, %d name their own approvers", open, named)
 		}
 	} else if !policy.open() {
-		logf("warning: an approver list names who may answer permission prompts, and approvals are off")
+		logf.Warnf("an approver list names who may answer permission prompts, and approvals are off")
 	}
 	if *showUsage {
 		switch {
 		case !inbound:
-			logf("warning: --show-usage describes an agent turn, and an outbound-only run has none")
+			logf.Warnf("--show-usage describes an agent turn, and an outbound-only run has none")
 		case *platform == "slack" && !*richBlocks:
-			logf("warning: --show-usage needs --slack-rich-blocks; the footer will not be shown")
+			logf.Warnf("--show-usage needs --slack-rich-blocks; the footer will not be shown")
 		case *platform == "googlechat" && cardMode != googlechat.CardsRich:
-			logf("warning: --show-usage needs --googlechat-cards rich; the footer will not be shown")
+			logf.Warnf("--show-usage needs --googlechat-cards rich; the footer will not be shown")
 		}
 	}
 
@@ -555,7 +555,7 @@ func runServe(args []string) (err error) {
 			return err
 		}
 		if len(allowList) == 0 {
-			logf("warning: outbound ingress on %s may post into ANY conversation "+
+			logf.Warnf("outbound ingress on %s may post into ANY conversation "+
 				"the bot can reach; narrow it with --ingress-allow", *ingressAddr)
 		}
 	}
@@ -579,27 +579,27 @@ func runServe(args []string) (err error) {
 		go func() {
 			err := fn()
 			if err != nil {
-				logf("%s server: %v", name, err)
+				logf.Errorf("%s server: %v", name, err)
 				stop()
 			}
 			srvErrs <- err
 		}()
 	}
-	serveOptional("metrics", *metricsAddr, func() error { return serveMetrics(ctx, *metricsAddr, m) })
+	serveOptional("metrics", *metricsAddr, func() error { return serveMetrics(ctx, *metricsAddr, m, logf) })
 	serveOptional("ingress", *ingressAddr, func() error { return serveIngress(ctx, *ingressAddr, ing) })
 
 	// Through logf, not straight to stderr: these are the first lines of the
 	// run, and a JSON stream that opens with three unparseable ones is worse
 	// than no banner at all.
 	if inbound {
-		logf("bridging %s -> %s", adapter.Name(), *daemonURL)
+		logf.Infof("bridging %s -> %s", adapter.Name(), *daemonURL)
 	} else {
 		// Said plainly, because it is the difference between a quiet gateway
 		// and a broken one: nobody can talk to the agent through this process.
-		logf("outbound-only: posting to %s, receiving nothing", adapter.Name())
+		logf.Infof("outbound-only: posting to %s, receiving nothing", adapter.Name())
 	}
 	if ing != nil {
-		logf("outbound ingress on %s%s", *ingressAddr, ingressPath)
+		logf.Infof("outbound ingress on %s%s", *ingressAddr, ingressPath)
 	}
 
 	// With no event source there is nothing to run, so wait on the same ctx
@@ -622,7 +622,7 @@ func runServe(args []string) (err error) {
 	if runErr != nil && !errors.Is(runErr, context.Canceled) {
 		return runErr
 	}
-	logf("shutting down")
+	logf.Infof("shutting down")
 	return nil
 }
 

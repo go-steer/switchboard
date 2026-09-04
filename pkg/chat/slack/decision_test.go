@@ -447,7 +447,7 @@ func TestAFailedPressIsLoggedNotPropagated(t *testing.T) {
 	// resolving a caller against an unreachable API logs too, and a test that
 	// accepts any line at all would pass on that.
 	a.callerByID["U9"] = "presser@example.com"
-	a.logf = func(f string, v ...any) {
+	a.logf = func(_ chat.Level, f string, v ...any) {
 		mu.Lock()
 		defer mu.Unlock()
 		logged = append(logged, fmt.Sprintf(f, v...))

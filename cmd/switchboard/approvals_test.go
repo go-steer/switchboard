@@ -26,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-steer/switchboard/internal/logging"
 	"github.com/go-steer/switchboard/pkg/approval"
 	"github.com/go-steer/switchboard/pkg/chat"
 	"github.com/go-steer/switchboard/pkg/daemon"
@@ -180,7 +181,7 @@ func permsRouter(t *testing.T, d *permsDaemon) (*Router, *fakeSender, func() []s
 	// Deep enough that a watcher which reposts the same question on every
 	// reconnect trips the assertion rather than blocking on a full channel.
 	fake := &fakeSender{replies: make(chan chat.Reply, 64)}
-	r := NewRouter(dc, fake, ProgressOff, nil, func(f string, v ...any) {
+	r := NewRouter(dc, fake, ProgressOff, nil, func(_ logging.Level, f string, v ...any) {
 		mu.Lock()
 		defer mu.Unlock()
 		lines = append(lines, fmt.Sprintf(f, v...))

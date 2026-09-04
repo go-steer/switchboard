@@ -110,13 +110,19 @@ func (r *Router) watchPerms(ctx context.Context, conv string, e *sessionEntry) {
 		case errors.Is(err, approval.ErrNotSupported):
 			// The frame said the route was there and the route says otherwise.
 			// Permanent for this session either way, and retrying it is a loop.
-			r.logf("perms %s: session advertised permission prompts but serves none", conv)
+			//
+			// ERROR for the same reason as the case below it: this returns, so
+			// no permission prompt in this session will ever reach the thread,
+			// and a turn that asks for one waits until the daemon gives up. A
+			// capability advertised and not served is a worse fault than the
+			// honest failure below, not a milder one.
+			r.logf.Errorf("perms %s: session advertised permission prompts but serves none", conv)
 			return
 		case err != nil && !daemon.IsTransient(err):
-			r.logf("perms %s: giving up on permission prompts: %v", conv, err)
+			r.logf.Errorf("perms %s: giving up on permission prompts: %v", conv, err)
 			return
 		case err != nil:
-			r.logf("perms %s: prompt stream: %v; retrying in %s", conv, err, backoff)
+			r.logf.Warnf("perms %s: prompt stream: %v; retrying in %s", conv, err, backoff)
 		}
 		// A clean end counts too: the daemon closes this stream on shutdown and
 		// on the agent finishing, neither of which is a connection that failed.
@@ -185,10 +191,10 @@ func (r *Router) postPrompt(ctx context.Context, conv string, e *sessionEntry, p
 		// there is, and holding the claim would turn a transient posting
 		// failure into a question that is never asked.
 		e.releaseAsk(p.ID)
-		r.logf("perms %s: post prompt %s: %v", conv, p.ID, err)
+		r.logf.Errorf("perms %s: post prompt %s: %v", conv, p.ID, err)
 		return
 	}
-	r.logf("perms %s: asked about %s (%s)", conv, p.Tool, p.Kind)
+	r.logf.Infof("perms %s: asked about %s (%s)", conv, p.Tool, p.Kind)
 }
 
 // decided phrases a decision in the past tense, for the record left on the
@@ -286,7 +292,7 @@ func (r *Router) traceDecision(ctx context.Context, e *sessionEntry, p chat.Pres
 		return
 	}
 	if !errors.Is(err, chat.ErrUnsupported) {
-		r.logf("perms %s: record decision on %s: %v", p.Conversation, promptID, err)
+		r.logf.Warnf("perms %s: record decision on %s: %v", p.Conversation, promptID, err)
 	}
 	// The record could not go onto the question, so put it beside it. The claim
 	// is kept rather than given back: the only press that can still reach this
@@ -301,7 +307,7 @@ func (r *Router) traceDecision(ctx context.Context, e *sessionEntry, p chat.Pres
 // have no message to write it onto.
 func (r *Router) sayHowItEnded(ctx context.Context, conv, promptID, outcome string) {
 	if err := r.surfaceNotice(ctx, conv, outcome); err != nil {
-		r.logf("perms %s: say how %s ended: %v", conv, promptID, err)
+		r.logf.Errorf("perms %s: say how %s ended: %v", conv, promptID, err)
 	}
 }
 
@@ -522,7 +528,7 @@ func (r *Router) HandlePress(ctx context.Context, p chat.Press) error {
 		// live, or which session this thread is on. Not silent, though, and the
 		// buttons stay up — somebody else in the room may be allowed to answer,
 		// and a press that vanishes reads as one that worked.
-		r.logf("perms %s: press by %q is not an approver", p.Conversation, p.Caller)
+		r.logf.Warnf("perms %s: press by %q is not an approver", p.Conversation, p.Caller)
 		return r.surfaceNotice(ctx, p.Conversation, noticeNotApprover)
 	}
 	sess, promptID, ok := splitDecisionRef(p.DecisionID)
@@ -536,7 +542,7 @@ func (r *Router) HandlePress(ctx context.Context, p chat.Press) error {
 		// posted since to adopt the session back. The press cannot be answered
 		// and the buttons stay live, so it is told the same thing a press for a
 		// replaced session is told, for the same reason.
-		r.logf("perms %s: press has no session to answer: %v", p.Conversation, err)
+		r.logf.Warnf("perms %s: press has no session to answer: %v", p.Conversation, err)
 		return r.surfaceNotice(ctx, p.Conversation, noticeStalePress)
 	}
 	if sess != sessionRef(e.sess) {
@@ -546,7 +552,7 @@ func (r *Router) HandlePress(ctx context.Context, p chat.Press) error {
 		// with live buttons; answering it here would apply a decision — possibly
 		// a standing one — to whatever the *new* session happens to have
 		// pending under the same id.
-		r.logf("perms %s: press answers %s, which is no longer this conversation's session", p.Conversation, sess)
+		r.logf.Warnf("perms %s: press answers %s, which is no longer this conversation's session", p.Conversation, sess)
 		return r.surfaceNotice(ctx, p.Conversation, noticeStalePress)
 	}
 	ack, err := r.approvals.Respond(ctx, e.sess, p.Caller, promptID, d)
@@ -557,7 +563,7 @@ func (r *Router) HandlePress(ctx context.Context, p chat.Press) error {
 			// saying so on the question is the whole of what is owed here. If
 			// the press that settled it got there first, it has already written
 			// a better record and claimSettle declines to replace it.
-			r.logf("perms %s: %s is no longer pending", p.Conversation, promptID)
+			r.logf.Infof("perms %s: %s is no longer pending", p.Conversation, promptID)
 			r.traceDecision(ctx, e, p, promptID, noticeSettled, settledElsewhere)
 			return nil
 		}
@@ -570,7 +576,7 @@ func (r *Router) HandlePress(ctx context.Context, p chat.Press) error {
 			notice = noticeMaybeApplied
 		}
 		if nerr := r.surfaceNotice(ctx, p.Conversation, notice); nerr != nil {
-			r.logf("perms %s: surface failed press: %v", p.Conversation, nerr)
+			r.logf.Errorf("perms %s: surface failed press: %v", p.Conversation, nerr)
 		}
 		return fmt.Errorf("answer %s in %s: %w", promptID, p.Conversation, err)
 	}
@@ -590,10 +596,10 @@ func (r *Router) HandlePress(ctx context.Context, p chat.Press) error {
 		// line, because an approval trail with a hole in it is the kind of
 		// thing that is only ever noticed afterwards, and worth saying in the
 		// thread for the same reason.
-		r.logf("perms %s: %s recorded with no approver named", p.Conversation, d)
+		r.logf.Warnf("perms %s: %s recorded with no approver named", p.Conversation, d)
 		outcome = decided(d) + " — _approver not recorded_"
 	} else {
-		r.logf("perms %s: %s by %s", p.Conversation, d, approver)
+		r.logf.Infof("perms %s: %s by %s", p.Conversation, d, approver)
 	}
 	r.traceDecision(ctx, e, p, promptID, outcome, settledHere)
 	return nil

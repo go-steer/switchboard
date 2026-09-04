@@ -31,6 +31,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/go-steer/switchboard/internal/logging"
 	"github.com/go-steer/switchboard/pkg/chat"
 	"github.com/go-steer/switchboard/pkg/daemon"
 )
@@ -162,8 +163,8 @@ type ingressConfig struct {
 	Bind binder
 	// Metrics may be nil (recording becomes a no-op).
 	Metrics *metrics
-	// Logf may be nil.
-	Logf func(string, ...any)
+	// Logf is where the ingress logs; the zero value discards.
+	Logf logging.Logf
 }
 
 // binder is the router's half of a session binding, in the two steps the
@@ -183,7 +184,7 @@ type ingress struct {
 	token   string
 	allow   []string
 	metrics *metrics
-	logf    func(string, ...any)
+	logf    logging.Logf
 
 	// fits reports whether a text stays in one platform message. Nil when the
 	// egress does not implement chat.TextFitter, which disables append: with
@@ -256,17 +257,13 @@ func newIngress(cfg ingressConfig) (*ingress, error) {
 	if cfg.Out == nil {
 		return nil, errors.New("ingress: no chat egress")
 	}
-	logf := cfg.Logf
-	if logf == nil {
-		logf = func(string, ...any) {}
-	}
 	i := &ingress{
 		out:     cfg.Out,
 		bind:    cfg.Bind,
 		token:   cfg.Token,
 		allow:   slices.Clone(cfg.Allow),
 		metrics: cfg.Metrics,
-		logf:    logf,
+		logf:    cfg.Logf,
 		ops:     make(map[string]*opEntry),
 		bodies:  make(map[string]*bodyEntry),
 	}
@@ -293,7 +290,7 @@ func serveIngress(ctx context.Context, addr string, i *ingress) error {
 		<-ctx.Done()
 		return nil
 	}
-	return serveHTTP(ctx, "ingress", addr, i.handler())
+	return serveHTTP(ctx, "ingress", addr, i.handler(), i.logf)
 }
 
 // serveMessages is the one route: authorize, dispatch on the verb, and turn
@@ -313,7 +310,24 @@ func (i *ingress) serveMessages(w http.ResponseWriter, r *http.Request) {
 	// the message. Both the path and the error can quote caller-supplied text,
 	// so strip control characters on the way out — a forged log line is not a
 	// thing this should be able to write.
-	i.logf("ingress %s %s: %d %s", r.Method, logSafe(r.URL.Path), ie.status, logSafe(err.Error()))
+	//
+	// The status picks the level, because the two halves of this route are not
+	// the same event: a 4xx is a caller sending switchboard something it will
+	// not accept — bad token, unknown path, malformed body — which is worth a
+	// line but is the ingress working. A 5xx is switchboard failing to do what
+	// was asked, and is the one an operator should be paged about.
+	//
+	// 501 sits on the 4xx side of that line despite its digit. It is what the
+	// deployment's own platform cannot do — append on a channel with no
+	// TextFitter, anything answering chat.ErrUnsupported — so it is permanent,
+	// it is the same "you asked for something this cannot do" as a 400, and a
+	// client that keeps asking would otherwise open an Error Reporting group
+	// per request for a deployment that is working exactly as configured.
+	log := i.logf.Warnf
+	if ie.status >= http.StatusInternalServerError && ie.status != http.StatusNotImplemented {
+		log = i.logf.Errorf
+	}
+	log("ingress %s %s: %d %s", r.Method, logSafe(r.URL.Path), ie.status, logSafe(err.Error()))
 	writeJSON(w, ie.status, map[string]string{"error": ie.msg})
 }
 

@@ -82,7 +82,6 @@ func newBindingIngress(t *testing.T, out sender, b binder) *ingress {
 		Out:     out,
 		Bind:    b,
 		Metrics: newMetrics(),
-		Logf:    func(string, ...any) {},
 	})
 	if err != nil {
 		t.Fatalf("newIngress: %v", err)

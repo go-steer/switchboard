@@ -123,7 +123,7 @@ turn to run, so `$SWITCHBOARD_DAEMON_TOKEN` is not read. Startup says which mode
 it is in:
 
 ```
-2026-08-19T16:00:00.123Z switchboard: outbound-only: posting to slack, receiving nothing
+2026-08-19T16:00:00.123Z INFO  switchboard: outbound-only: posting to slack, receiving nothing
 ```
 
 It has to be said on purpose. An app token that is merely *missing* is a

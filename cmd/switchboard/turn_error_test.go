@@ -194,7 +194,7 @@ func errorDaemon(t *testing.T, streamEnds bool, events ...[2]string) (*daemon.Cl
 // so an outage can be exercised without a real ninety-second wait.
 func errorRouter(t *testing.T, dc *daemon.Client, out sender, grace time.Duration) (*Router, context.Context) {
 	t.Helper()
-	r := NewRouter(dc, out, ProgressIndicator, nil, func(string, ...any) {})
+	r := NewRouter(dc, out, ProgressIndicator, nil, nil)
 	r.minBackoff, r.maxBackoff = 5*time.Millisecond, 10*time.Millisecond
 	r.streamGrace = grace
 	r.tickInterval = 0 // the clock is #37's business, not this test's

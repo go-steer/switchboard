@@ -510,7 +510,7 @@ to the whole agent backend, not the thread it was pressed in. It is ignored unde
 Because it is a grant, it is announced on every start:
 
 ```
-2026-08-31T09:00:00.000Z switchboard: approvals: permission prompts go to the conversation, and anyone who can post there can answer them
+2026-08-31T09:00:00.000Z INFO  switchboard: approvals: permission prompts go to the conversation, and anyone who can post there can answer them
 ```
 
 #### Who may answer
@@ -545,7 +545,7 @@ Startup then reports the count rather than the names, because a log line is the
 wrong place to publish who can approve production changes:
 
 ```
-2026-08-31T09:00:00.000Z switchboard: approvals: permission prompts go to the conversation, and 2 named approver(s) may answer them
+2026-08-31T09:00:00.000Z INFO  switchboard: approvals: permission prompts go to the conversation, and 2 named approver(s) may answer them
 ```
 
 A config file can name approvers **per channel**, which is what the setting
@@ -567,8 +567,8 @@ post in it — so a narrowed default is not a floor. Startup says so, counted
 rather than named:
 
 ```
-2026-08-31T09:00:00.000Z switchboard: approvals: permission prompts go to the conversation, and 2 named approver(s) may answer them
-2026-08-31T09:00:00.000Z switchboard: approvals: 1 configured channel(s) let anyone answer, 3 name their own approvers
+2026-08-31T09:00:00.000Z INFO  switchboard: approvals: permission prompts go to the conversation, and 2 named approver(s) may answer them
+2026-08-31T09:00:00.000Z INFO  switchboard: approvals: 1 configured channel(s) let anyone answer, 3 name their own approvers
 ```
 
 A list is checked at startup against the identity this run will actually assert,
@@ -854,7 +854,7 @@ scope, are still required and are still what a post authenticates with.
 export SWITCHBOARD_INGRESS_TOKEN=…
 export SWITCHBOARD_SLACK_BOT_TOKEN=xoxb-…   # posting only; no xapp- token
 switchboard serve --outbound-only --ingress-addr :8080 --ingress-allow C0123ABCD
-# 2026-08-19T16:00:00.123Z switchboard: outbound-only: posting to slack, receiving nothing
+# 2026-08-19T16:00:00.123Z INFO  switchboard: outbound-only: posting to slack, receiving nothing
 ```
 
 The banner says so on every start, because a gateway nobody can talk to and a
@@ -910,29 +910,52 @@ and wire `/healthz` to the liveness + readiness probes.
 ### Logs
 
 Everything goes to stderr, one write per event, each stamped with the time it
-was written in UTC:
+was written in UTC and the severity the line was written at:
 
 ```
-2026-08-19T16:00:00.123Z switchboard: bridging slack -> http://127.0.0.1:7777
-2026-08-19T16:04:19.881Z switchboard: relay C0123:1723742400.0001: stream ended (EOF); resuming from seq 41 in 2s
+2026-08-19T16:00:00.123Z INFO  switchboard: bridging slack -> http://127.0.0.1:7777
+2026-08-19T16:04:19.881Z WARN  switchboard: relay C0123:1723742400.0001: stream ended (EOF); resuming from seq 41 in 2s
+2026-08-19T16:04:21.004Z ERROR switchboard: relay C0123:1723742400.0001: send: slack: channel_not_found
 ```
 
 `--log-format json` (or `SWITCHBOARD_LOG_FORMAT=json`) renders the same events
 one JSON object per line instead, for a collector:
 
 ```json
-{"time":"2026-08-19T16:04:19.881Z","message":"relay C0123:1723742400.0001: stream ended (EOF); resuming from seq 41 in 2s"}
+{"time":"2026-08-19T16:04:19.881Z","severity":"WARNING","message":"relay C0123:1723742400.0001: stream ended (EOF); resuming from seq 41 in 2s"}
 ```
 
 The entry text is under `message` rather than `log/slog`'s `msg`, which is
 where Cloud Logging looks for it; `time` is both slog's default key and the one
-Cloud Logging reads a timestamp from, so it is unchanged.
+Cloud Logging reads a timestamp from, so it is unchanged. `severity` is Cloud
+Logging's field and its vocabulary — `INFO`, `WARNING`, `ERROR`, where slog
+would write `level` and `WARN` — so an alert policy and Error Reporting pick
+the failures up without a parser in between.
 
-`json` is also the format to pick when a message might contain a newline — a
-Chat payload under `--googlechat-log-events`, say. The JSON encoder escapes it
-(and replaces invalid UTF-8 with U+FFFD), so the record stays on one line;
-`text` passes the message through verbatim, so such an event spans as many
-lines as it contains.
+Three levels, and nothing is filtered — every line reaches stderr:
+
+| Level | What it means |
+| --- | --- |
+| `ERROR` | switchboard could not do something, and a user or a turn is worse off: a reply that never reached the thread, a relay that gave up, a startup that failed. |
+| `WARN` | Degraded but still going: a retry, a fallback to text, a capability the daemon does not advertise, a config value that was ignored, a frame that could not be read. Also an ingress request switchboard refused — including the `501`s, which say the deployment's platform cannot do what was asked and are the caller's problem, not the operator's. |
+| `INFO` | Lifecycle and normal operation: listening, connected, bound, adopted, shutting down. |
+
+There is no `DEBUG` and no `--log-level`: a gateway's whole log fits in a
+terminal, and the quietest of the three is already the interesting one.
+
+A record can be several lines — a Chat payload under
+`--googlechat-log-events`, a daemon frame quoted back, the stack dump that
+comes with a recovered handler panic. It stays **one record** either way. The
+JSON encoder escapes the newlines (and replaces invalid UTF-8 with U+FFFD), so
+the object stays on one line; `text` writes the continuation lines under a
+`    | ` gutter, so nothing in the middle of a stack trace reads as a record of
+its own and a `grep -c ERROR` still counts records:
+
+```
+2026-08-19T16:04:21.004Z ERROR switchboard: metrics server: http: panic serving 127.0.0.1:39944: boom
+    | goroutine 18 [running]:
+    | net/http.(*conn).serve.func1()
+```
 
 A startup that fails goes through the logger too — a crash loop being when
 those lines are read. The build identity is logged before the config is
@@ -944,21 +967,20 @@ collector will see lines it cannot parse in a `json` run:
   both happen before there is a logger to say them through;
 - `--help`, the flag defaults the `flag` package prints, and the unknown-
   subcommand message;
-- `version` and `--version`, which print build identity to **stdout**;
-- panics and connection errors from the `--metrics-addr` and `--ingress-addr`
-  listeners, which `net/http` writes through its own default logger
-  ([#49](https://github.com/go-steer/switchboard/issues/49) tracks routing
-  those through this one). A listener *failing to bind* is logged normally.
+- `version` and `--version`, which print build identity to **stdout**.
 
-Two things a log line does not carry yet, both tracked in
-[#49](https://github.com/go-steer/switchboard/issues/49). There is no
-**severity**: no call site distinguishes a connect notice from a send failure,
-so rather than label every record `INFO` — which would be a lie about the
-failures — the JSON carries no severity field at all and Cloud Logging assigns
-`DEFAULT`. And the messages are **not structured**: the component and the
-conversation key are interpolated into the text, so a collector cannot filter
-on them. Both want a pass over all the call sites, which is a larger change
-than putting a time on the front.
+Runtime errors from the `--metrics-addr` and `--ingress-addr` listeners — a
+recovered handler panic, a bad TLS handshake — used to be on that list too;
+they now go through this logger at `ERROR`, prefixed with the listener's name
+(`metrics server: …`, `ingress server: …`), as does a listener *failing to
+bind*.
+
+One thing a log line still does not carry, tracked in
+[#49](https://github.com/go-steer/switchboard/issues/49): the messages are
+**not structured**. The component and the conversation key are interpolated
+into the text, so a collector can grep them but cannot filter on them. That
+wants a rewrite of every message rather than a pass over every call site, and
+it is deliberately waiting for the message set to settle.
 
 A deployment does get an ingestion timestamp from Cloud Run or a k8s collector
 regardless. That is when the line was *collected*, though, and it is absent

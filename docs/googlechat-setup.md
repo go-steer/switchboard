@@ -386,7 +386,7 @@ export GOOGLE_APPLICATION_CREDENTIALS=/path/to/chat-sa-key.json
 /tmp/switchboard serve --platform googlechat --outbound-only \
   --ingress-addr 127.0.0.1:8080 \
   --ingress-allow spaces/AAA
-# 2026-08-19T16:00:00.123Z switchboard: outbound-only: posting to googlechat, receiving nothing
+# 2026-08-19T16:00:00.123Z INFO  switchboard: outbound-only: posting to googlechat, receiving nothing
 ```
 
 The mode is declared, not inferred from the absence of a subscription: a

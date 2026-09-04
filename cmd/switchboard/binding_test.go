@@ -28,6 +28,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-steer/switchboard/internal/logging"
 	"github.com/go-steer/switchboard/pkg/chat"
 	"github.com/go-steer/switchboard/pkg/daemon"
 )
@@ -467,7 +468,7 @@ func TestCommitBindYieldsToAConversationThatGotASessionFirst(t *testing.T) {
 func TestBindingsAreBoundedAndSayWhatTheyDropped(t *testing.T) {
 	var logged strings.Builder
 	router := NewRouter(nil, &fakeSender{replies: make(chan chat.Reply, 1)}, ProgressOff, nil,
-		func(f string, a ...any) { fmt.Fprintf(&logged, f+"\n", a...) })
+		func(_ logging.Level, f string, a ...any) { fmt.Fprintf(&logged, f+"\n", a...) })
 
 	for i := range maxBindings + 1 {
 		router.CommitBind(fmt.Sprintf("C%d", i), daemon.Session{App: "core-agent", ID: fmt.Sprintf("s%d", i)}, int64(i))
@@ -709,7 +710,7 @@ func TestConcurrentTurnsInADeadBoundThreadAnnounceOnce(t *testing.T) {
 		t.Fatalf("daemon.New: %v", err)
 	}
 	fake := &fakeSender{replies: make(chan chat.Reply, 8)}
-	slow := func(string, ...any) { time.Sleep(2 * time.Millisecond) }
+	slow := func(logging.Level, string, ...any) { time.Sleep(2 * time.Millisecond) }
 	router := NewRouter(dc, fake, ProgressOff, nil, slow)
 	router.CommitBind("C0:1", mustSession(t, boundSession), 5)
 
@@ -753,7 +754,7 @@ func TestConcurrentTurnsInADeadBoundThreadAnnounceOnce(t *testing.T) {
 func TestCommitBindWillNotTakeAThreadFromAnotherSession(t *testing.T) {
 	var logged strings.Builder
 	router, _ := boundRouter(t, &boundDaemon{})
-	router.logf = func(format string, args ...any) {
+	router.logf = func(_ logging.Level, format string, args ...any) {
 		fmt.Fprintf(&logged, format+"\n", args...)
 	}
 	first, second := mustSession(t, boundSession), mustSession(t, "core-agent/incident-9")

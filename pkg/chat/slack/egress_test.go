@@ -34,7 +34,6 @@ func newTestAdapter(apiURL string) *Adapter {
 	return &Adapter{
 		api:        api,
 		mode:       CallerEmail,
-		logf:       func(string, ...any) {},
 		callerByID: make(map[string]string),
 	}
 }

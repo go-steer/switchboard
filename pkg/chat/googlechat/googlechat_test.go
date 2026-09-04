@@ -105,7 +105,7 @@ func (f *fakeMessenger) delete(_ context.Context, name string) error {
 // newTestAdapter builds an adapter with cards off — the plain-text baseline
 // most egress tests care about. Card behaviour is opted into per test.
 func newTestAdapter(m messenger) *Adapter {
-	return &Adapter{msg: m, cards: CardsOff, logf: func(string, ...any) {}}
+	return &Adapter{msg: m, cards: CardsOff}
 }
 
 func apiErr(code int) error {

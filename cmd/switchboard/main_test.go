@@ -29,6 +29,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-steer/switchboard/internal/logging"
 	"github.com/go-steer/switchboard/pkg/chat"
 	"github.com/go-steer/switchboard/pkg/chat/googlechat"
 )
@@ -252,7 +253,9 @@ func TestOutboundOnlyIgnoresTheInboundCredentialsOutLoud(t *testing.T) {
 	if !strings.Contains(err.Error(), "slack adapter") {
 		t.Fatalf("error = %q, want the run to have reached the adapter switch", err)
 	}
-	if !strings.Contains(logs, "SWITCHBOARD_SLACK_APP_TOKEN") || !strings.Contains(logs, "warning") {
+	// At WARN, not merely mentioned: the level is the field a deployment
+	// filters on, and this line used to carry its own "warning: " prefix (#49).
+	if !strings.Contains(logs, "SWITCHBOARD_SLACK_APP_TOKEN") || !strings.Contains(logs, "WARN") {
 		t.Errorf("logs did not warn that the app token is ignored:\n%s", logs)
 	}
 }
@@ -591,6 +594,20 @@ func TestStartupFailureIsLoggedOnce(t *testing.T) {
 	for i, line := range strings.Split(strings.TrimSuffix(out, "\n"), "\n") {
 		if !json.Valid([]byte(line)) {
 			t.Errorf("line %d of a json run is not JSON: %q", i, line)
+			continue
+		}
+		var rec map[string]any
+		_ = json.Unmarshal([]byte(line), &rec)
+		msg, _ := rec["message"].(string)
+		if !strings.Contains(msg, want) {
+			continue
+		}
+		// The whole point of the severity (#49): the line saying why the
+		// process will not start is the one an alert policy fires on, and
+		// Error Reporting groups a crash loop by. Everything else in this
+		// stream is the build identity at INFO.
+		if got := rec["severity"]; got != "ERROR" {
+			t.Errorf(`the startup failure logged "severity" = %v, want "ERROR"`, got)
 		}
 	}
 }
@@ -602,7 +619,7 @@ func TestStartupFailureIsLoggedOnce(t *testing.T) {
 // failures.
 func TestReportOnceLeavesAnAlreadyLoggedFailureAlone(t *testing.T) {
 	var lines []string
-	logf := func(format string, a ...any) { lines = append(lines, fmt.Sprintf(format, a...)) }
+	logf := func(_ logging.Level, format string, a ...any) { lines = append(lines, fmt.Sprintf(format, a...)) }
 	bind := errors.New("listen tcp 127.0.0.1:9090: address already in use")
 
 	if got := reportOnce(logf, nil); got != nil {

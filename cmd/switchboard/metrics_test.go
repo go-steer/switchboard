@@ -51,7 +51,7 @@ func TestMetricsRecordNilSafe(t *testing.T) {
 func TestServeMetricsDisabled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- serveMetrics(ctx, "", newMetrics()) }()
+	go func() { done <- serveMetrics(ctx, "", newMetrics(), nil) }()
 	select {
 	case err := <-done:
 		t.Fatalf("serveMetrics returned before cancel: %v", err)
@@ -77,7 +77,7 @@ func TestServeMetricsEndpoints(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- serveMetrics(ctx, addr, m) }()
+	go func() { done <- serveMetrics(ctx, addr, m, nil) }()
 
 	base := "http://" + addr
 	waitReady(t, base+"/healthz")
@@ -115,7 +115,7 @@ func TestServeMetricsBindError(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	if err := serveMetrics(ctx, ln.Addr().String(), newMetrics()); err == nil {
+	if err := serveMetrics(ctx, ln.Addr().String(), newMetrics(), nil); err == nil {
 		t.Fatal("serveMetrics on a busy port returned nil, want error")
 	}
 }
