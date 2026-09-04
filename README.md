@@ -57,12 +57,14 @@ and Google Chat side by side against one daemon.
 
 ### Google Chat
 
-Select the platform with `--platform googlechat`. Ingress is **Pub/Sub** (the
-Chat app is configured to publish events to a topic; switchboard pulls them from
-a subscription, so no public webhook is exposed), and egress is the Chat REST
-API. Credentials come from **Application Default Credentials** — workload
-identity in-cluster, or `GOOGLE_APPLICATION_CREDENTIALS` locally — and must
-grant Pub/Sub subscribe on the subscription and the Chat bot scope.
+Select the platform with `--platform googlechat`. Ingress defaults to **Pub/Sub**
+(the Chat app is configured to publish events to a topic; switchboard pulls them
+from a subscription, so no public webhook is exposed) and can be switched to an
+**HTTP endpoint** switchboard serves — see [HTTP ingress](#http-ingress).
+Egress is the Chat REST API either way. Credentials come from **Application
+Default Credentials** — workload identity in-cluster, or
+`GOOGLE_APPLICATION_CREDENTIALS` locally — and must grant Pub/Sub subscribe on
+the subscription and the Chat bot scope.
 
 ```sh
 export SWITCHBOARD_DAEMON_TOKEN=…
@@ -116,6 +118,59 @@ conversion is one-way, and the decoder normalizes both dialects away before
 anything downstream could tell them apart, so a legacy-only button is not
 expressible anyway. Clickable controls need the HTTP interaction endpoint tracked
 in [#29](https://github.com/go-steer/switchboard/issues/29).
+
+#### HTTP ingress
+
+`--googlechat-ingress http` receives events on an endpoint switchboard serves —
+`POST /chat` on `--googlechat-listen` — instead of pulling them from Pub/Sub.
+Same events, same decoder, same egress; only the transport differs, and nothing
+below the adapter can tell which one a turn arrived on.
+
+```sh
+switchboard serve --platform googlechat \
+  --googlechat-ingress http \
+  --googlechat-listen :8081 \
+  --googlechat-service-account service-123456789@gcp-sa-gsuiteaddons.iam.gserviceaccount.com \
+  --googlechat-commands 1=progress \
+  --daemon-url http://127.0.0.1:7777
+# Point the Chat app's connection settings at https://<your-host>/chat instead
+# of a Pub/Sub topic. The endpoint has to be publicly reachable over HTTPS.
+```
+
+It is **opt-in because it is a public attack surface**, and the Pub/Sub posture
+— nothing reaches the process that Google did not put there — is the better
+default for a deployment that does not need what HTTP buys. What it buys is
+everything requiring a synchronous response, which is card clicks and dialogs;
+switchboard renders no buttons yet, so today the endpoint is the same
+conversation over a different wire, and the clicks land with the rest of
+[#29](https://github.com/go-steer/switchboard/issues/29).
+
+Every request is checked before its payload is read, and the check is the whole
+reason the endpoint is safe to expose:
+
+- A **Google-signed ID token**, taken from the `Authorization: Bearer` header or
+  the event body's `authorizationEventObject.systemIdToken` — Chat sends both,
+  and either one passing is enough, so a proxy that strips the header does not
+  break delivery.
+- The token's **audience must be this endpoint's URL**, which is what stops one
+  minted for some other endpoint from being replayed here. Derived from each
+  request by default; pin it with `--googlechat-endpoint-url` when something in
+  front of switchboard rewrites `Host`.
+- The token's **email must be `--googlechat-service-account`**. This is the one
+  that carries the weight and it is required — the flag has no unpinned mode and
+  the adapter refuses to start without it. Every Workspace add-on's traffic is
+  signed by an address of the same
+  `service-<project number>@gcp-sa-gsuiteaddons.iam.gserviceaccount.com` shape
+  derived from its own project number, so a check that stops at "Google signed
+  it" accepts every add-on on the platform as this one. The Chat API
+  configuration page names yours.
+
+A verified request is answered `200 {}` immediately and the turn runs on behind
+it: Chat gives the endpoint about 30 seconds and a turn is routinely longer, so
+the response cannot be the answer — it arrives in the thread through the same
+REST egress Pub/Sub uses. An event the gateway cannot act on is also answered
+`200`, for the reason Pub/Sub events are always acked: a retry is a duplicate
+turn, not a second chance.
 
 #### App commands
 
@@ -858,15 +913,22 @@ switchboard serve --outbound-only --ingress-addr :8080 --ingress-allow C0123ABCD
 ```
 
 The banner says so on every start, because a gateway nobody can talk to and a
-broken one look identical otherwise. Three configurations are refused:
+broken one look identical otherwise. Five configurations are refused:
 
 - **Neither direction.** `--outbound-only` with no `--ingress-addr` is a process
   that could neither receive nor be asked to post, so it exits rather than
   idling while every probe reports it healthy.
-- **Unable to receive, without saying so.** No app token on Slack, or no
-  `--google-subscription` on Chat, without `--outbound-only`.
+- **Unable to receive, without saying so.** No app token on Slack, or on Chat no
+  `--google-subscription` (Pub/Sub ingress) or no `--googlechat-listen` (HTTP
+  ingress), without `--outbound-only`.
 - **Half an inbound pair on Chat.** `--google-project` without
   `--google-subscription`, or the reverse, is a typo, not a deployment shape.
+- **Both Chat transports at once.** `--googlechat-ingress http` together with a
+  `--google-subscription`: one of the two is wrong, and guessing which would
+  send you reading the half that was already doing what you asked.
+- **An HTTP ingress that trusts anyone.** `--googlechat-ingress http` without
+  `--googlechat-service-account`. See [HTTP ingress](#http-ingress) — an
+  unpinned token check is not a check, so it is refused rather than warned about.
 
 [#23]: https://github.com/go-steer/switchboard/issues/23
 

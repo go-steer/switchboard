@@ -13,12 +13,17 @@
 # limitations under the License.
 
 # Ingress for the switchboard pod, restricted to the metrics port. The
-# two chat paths are outbound pulls (Slack Socket Mode is an outbound
-# WebSocket; Google Chat is a Pub/Sub pull) and switchboard dials the
-# core-agent daemon rather than being dialed — so the ONLY thing that
-# should connect TO this pod is a Prometheus scraper (and the kubelet's
-# probes, which bypass NetworkPolicy) hitting :9090 for /metrics +
-# /healthz. The single rule below admits that port and nothing else.
+# two chat paths as configured here are outbound pulls (Slack Socket Mode
+# is an outbound WebSocket; Google Chat is a Pub/Sub pull) and switchboard
+# dials the core-agent daemon rather than being dialed — so the ONLY thing
+# that should connect TO this pod is a Prometheus scraper (and the
+# kubelet's probes, which bypass NetworkPolicy) hitting :9090 for /metrics
+# + /healthz. The single rule below admits that port and nothing else.
+#
+# Two optional surfaces are not pull-based and need a rule of their own if
+# you turn them on: the outbound ingress (`ingress_addr`) and the Chat
+# HTTP ingress (`googlechat_ingress: http`). Both are off in these
+# manifests; deploy/README.md spells out what each needs.
 #
 # The rule has no `from`, so it admits the metrics port from any source.
 # Kubernetes NetworkPolicy cannot special-case the kubelet, and scraper

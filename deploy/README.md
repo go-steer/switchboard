@@ -231,6 +231,62 @@ cosign verify ghcr.io/go-steer/switchboard:0.4.0 \
   replicas, either front the ingress with a session-affinity Service or have
   callers fall back to full `text` on the `409`.
 
+- **The Chat HTTP ingress** is **off** too: the Chat overlay receives over
+  Pub/Sub, which is what lets these manifests ship with one inbound port and no
+  Service at all. Switching it on
+  ([#29](https://github.com/go-steer/switchboard/issues/29), and see
+  [googlechat-setup.md](../docs/googlechat-setup.md#the-http-ingress) for the
+  console side) opens a surface that has to be reachable from *Google* rather
+  than from a workload you control — which is the difference from the outbound
+  ingress above, and the reason there is no overlay for it here:
+
+  1. Four keys in `config.json`, **replacing** `google_project` and
+     `google_subscription` — passing a subscription alongside this ingress is a
+     startup error, not an ignored setting:
+
+     ```json
+     "googlechat_ingress": "http",
+     "googlechat_listen": ":8081",
+     "googlechat_service_account": "service-PROJECT_NUMBER@gcp-sa-gsuiteaddons.iam.gserviceaccount.com",
+     "googlechat_endpoint_url": "https://chat.example.com/chat"
+     ```
+
+     plus the port, which stays in the Deployment for the same reason the
+     outbound ingress's does:
+
+     ```yaml
+     ports:
+       - {name: chat, containerPort: 8081, protocol: TCP}
+     ```
+
+     `googlechat_service_account` is the identity inbound requests must
+     authenticate as, and switchboard refuses to start the endpoint without it.
+     It is a public address rather than a credential, so it belongs in the file.
+     `googlechat_endpoint_url` pins the audience tokens are checked against;
+     pin it here even though most controllers preserve `Host`, because in this
+     shape the URL is known, fixed, and written down two files away.
+
+  2. A NetworkPolicy ingress rule admitting the port. Give it a `from`
+     selecting your **ingress controller**, not a workload of yours — the
+     caller is Google's frontend arriving through that controller:
+
+     ```yaml
+     - ports: [{port: chat, protocol: TCP}]
+       from:
+         - namespaceSelector:
+             matchLabels: {kubernetes.io/metadata.name: ingress-nginx}
+     ```
+
+  3. A Service, and an Ingress or Gateway holding a **real certificate**. Chat
+     calls HTTPS only, the path is fixed at `/chat`, and the URL must be
+     character-for-character the one in the console — a mismatch fails as an
+     authentication error on every request, since the URL is what the token's
+     audience names.
+
+  4. Nothing on the GSA. This shape publishes to no topic and pulls from no
+     subscription, so `roles/pubsub.subscriber` and the topic grant both go
+     away; egress still authenticates through ADC exactly as before.
+
 - **Outbound-only Deployments.** If a workload only posts, set
   `"outbound_only": true` in its `config.json` — **together with the outbound
   ingress above**, which is then the only way in. Without `ingress_addr` the
