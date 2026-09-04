@@ -6,6 +6,41 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [v0.4.0] — 2026-09-04
+
+A release about what switchboard says while it works. No new surface, no new
+verb, nothing a room can do that it could not do before — three things that
+were reporting badly now report honestly, which is the difference between a
+gateway you can run and one you can only watch.
+
+**A thread that does not wait its turn keeps its clock** (#42). One progress
+placeholder is kept per conversation, and every way a turn could end used to
+delete it — so asking a second question before the first had answered cost the
+second turn its clock, its elapsed time, and, if the timing was unkind, its
+usage footer to the wrong answer. An answer with something queued behind it now
+re-anchors the placeholder below itself instead of retiring it, a turn that
+narrated or died freezes it rather than deleting it, and a backlog that went
+stale across a stream outage resynchronises on the next idle daemon. This needs
+a daemon that advertises `inbox` events; without one the previous behaviour
+applies unchanged and switchboard says so once at stream open.
+
+**Every log line carries a severity** (#49). Records were ingested at
+`DEFAULT`, so nothing in a deployment could alert on an error and nothing
+reached Error Reporting. All ~100 call sites are now classified against one
+rubric, JSON renders Cloud Logging's `severity` in Cloud Logging's vocabulary,
+and the two optional listeners' own runtime errors — a recovered handler panic,
+a failed TLS handshake — stop bypassing the logger entirely. There is no
+`DEBUG` and no `--log-level`. Structured attributes are still to come.
+
+**Pushing a tag is the whole release** (#76). The GitHub Release is built from
+the tag's own changelog section rather than by hand, which is why v0.2.0 and
+v0.3.0 shipped images and signatures but no release. This is the first tag
+where that step is not a thing anyone has to remember.
+
+Upgrading costs one thing: eight startup warnings dropped the `warning:` they
+carried in their own text, because the level says it now. A run that greps its
+own logs for `warning:` should grep for `WARN`.
+
 ### Added
 - Pushing a tag now publishes the GitHub Release, not just the image.
   `release-images.yml` grows a `github-release` job that builds the notes from
