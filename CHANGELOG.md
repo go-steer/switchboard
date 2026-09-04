@@ -6,6 +6,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- Pushing a tag now publishes the GitHub Release, not just the image.
+  `release-images.yml` grows a `github-release` job that builds the notes from
+  the tag's own `CHANGELOG.md` section under the `go install` / `docker pull` /
+  `cosign verify` preamble, and `CONTRIBUTING.md` records the three steps of
+  cutting a release. The step had only ever been done by hand, which is why
+  v0.2.0 and v0.3.0 shipped images and signatures but no release — the two tags
+  where the tag was the last thing anyone did. It runs after the image is pushed
+  so the `docker pull` in the notes works the moment the notes are readable, a
+  tag with no matching changelog section fails rather than publishing an empty
+  body, and an existing release — a draft included — is left alone, so
+  hand-written notes still win by being drafted before the tag.
+
 ### Fixed
 - `internal/version.Version` is `v0.4.0-dev`, so a build off main no longer
   claims to be the release that just shipped (#43). Same window

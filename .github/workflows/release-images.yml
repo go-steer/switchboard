@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-name: Release images
+name: Release
 
 # Builds + publishes the multi-arch (amd64 + arm64) distroless image
 #
@@ -34,6 +34,11 @@ name: Release images
 #   cosign verify ghcr.io/go-steer/switchboard:X.Y.Z \
 #     --certificate-identity-regexp '^https://github.com/go-steer/switchboard' \
 #     --certificate-oidc-issuer https://token.actions.githubusercontent.com
+#
+# On a tag push a second job publishes the GitHub Release, after the
+# image is up so the `docker pull` in the notes works the moment they
+# are readable. v0.2.0 and v0.3.0 were tagged with no release because
+# that step was only ever done by hand; it is now part of the tag.
 #
 # Manual republish (e.g. for a tag pushed before this workflow
 # existed): use the workflow_dispatch entrypoint with the tag input.
@@ -211,3 +216,115 @@ jobs:
           # immutable. cosign signs once and the signature covers every
           # tag that points at the same digest.
           echo "$TAGS" | xargs -I {} cosign sign --yes "{}@${DIGEST}"
+
+  # Publish the GitHub Release for a tag. Runs only for a tag — a push
+  # to main has nothing to release — and only after the image is
+  # pushed, because the notes tell a reader to `docker pull` it.
+  github-release:
+    needs: build-and-push
+    if: github.ref_type == 'tag' || (github.event_name == 'workflow_dispatch' && inputs.tag != '')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write   # create the release
+    steps:
+      - name: Resolve the tag
+        id: tag
+        run: |
+          TAG="${{ inputs.tag || github.ref_name }}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          # Image tags carry no `v` — metadata-action's {{version}}
+          # strips it — while the Go module version keeps it. The notes
+          # print both, so they are computed separately rather than one
+          # being interpolated into the other.
+          echo "image_tag=${TAG#v}" >> "$GITHUB_OUTPUT"
+          # Semver's convention: any tag containing a `-` is a
+          # pre-release. Same rule the :latest guard above uses.
+          if [[ "$TAG" == *-* ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Check out the tag itself, not the dispatching ref: on
+      # workflow_dispatch the default checkout is the branch the run was
+      # started from, whose CHANGELOG is ahead of the tag's.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.tag.outputs.tag }}
+          fetch-depth: 0   # need the previous tag for the compare link
+
+      # A release that already exists — including a draft someone is
+      # still editing — is left alone. This is what makes a republish
+      # dispatch safe to re-run, and it means hand-written notes always
+      # win over generated ones: create the draft first, then tag.
+      - name: Skip if the release already exists
+        id: exists
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "::notice::Release $TAG already exists — leaving it alone."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # The notes are the tag's own CHANGELOG section, under the install
+      # preamble. A tag whose section is missing is a tag cut before the
+      # `[Unreleased]` roll-up, which is a mistake worth failing on
+      # rather than releasing with an empty body.
+      - name: Build the release notes
+        if: steps.exists.outputs.skip == 'false'
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          IMAGE_TAG: ${{ steps.tag.outputs.image_tag }}
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/${{ env.IMAGE_NAME }}
+        run: |
+          set -euo pipefail
+
+          # Everything between this version's heading and the next one.
+          SECTION=$(awk -v tag="## [$TAG]" '
+            index($0, tag) == 1 { found = 1; next }
+            found && /^## / { exit }
+            found && !body && /^[[:space:]]*$/ { next }
+            found { body = 1; print }
+          ' CHANGELOG.md)
+          if [[ -z "${SECTION//[[:space:]]/}" ]]; then
+            echo "::error::No '## [$TAG]' section in CHANGELOG.md — roll [Unreleased] up before tagging." >&2
+            exit 1
+          fi
+
+          {
+            printf '```sh\ngo install github.com/go-steer/switchboard/cmd/switchboard@%s\n```\n\n' "$TAG"
+            printf '```sh\ndocker pull %s:%s\n```\n\n' "$IMAGE" "$IMAGE_TAG"
+            printf 'The module version keeps its `v` and the image tag does not.\n\n'
+            printf 'The image is multi-arch (amd64 + arm64), distroless\n'
+            printf '(`gcr.io/distroless/static-debian12:nonroot`, no shell, no package manager)\n'
+            printf 'and signed with Sigstore keyless:\n\n'
+            printf '```sh\ncosign verify %s:%s \\\n' "$IMAGE" "$IMAGE_TAG"
+            printf "  --certificate-identity-regexp '^https://github.com/go-steer/switchboard' \\\\\n"
+            printf '  --certificate-oidc-issuer https://token.actions.githubusercontent.com\n```\n\n'
+            printf -- '---\n\n'
+            printf '%s\n' "$SECTION"
+          } > release-notes.md
+
+          # Link back to the tag the reader is upgrading from, if there
+          # is one. --no-contains drops this tag and anything reachable
+          # from it, so the newest older tag is what's left on top.
+          PREV=$(git tag --list 'v*.*.*' --sort=-v:refname --no-contains "$TAG" | head -n1 || true)
+          if [[ -n "$PREV" ]]; then
+            printf '\n**Full diff:** https://github.com/%s/compare/%s...%s\n' \
+              "${{ github.repository }}" "$PREV" "$TAG" >> release-notes.md
+          fi
+
+      - name: Create the release
+        if: steps.exists.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          gh release create "$TAG" \
+            --title "switchboard $TAG" \
+            --notes-file release-notes.md \
+            ${{ steps.tag.outputs.prerelease == 'true' && '--prerelease' || '' }}
