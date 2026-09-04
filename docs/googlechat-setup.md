@@ -4,7 +4,8 @@ How to stand up the Google Chat integration end to end, and how to test it at
 three levels of cost. Layers A and B need nothing but a checkout. Layer C needs
 a Google Workspace domain and a GCP project.
 
-Design rationale for the choices below is in [DESIGN.md](DESIGN.md) §3.3.
+Design rationale for the choices below is in [DESIGN.md](DESIGN.md) §3.3, and
+for the HTTP interaction endpoint that is not built yet, §3.4.
 
 ## What each layer can and cannot prove
 
@@ -148,7 +149,10 @@ confirmed against captured traffic:
 
 - A **Google Workspace** account. Chat apps cannot be installed by a consumer
   gmail account — this is a hard gate.
-- A GCP project with the **Google Chat API** and **Pub/Sub** enabled.
+- A GCP project with the **Google Chat API** and **Pub/Sub** enabled, *and* the
+  Chat service identity registered — see [The Chat service
+  identity](#the-chat-service-identity). Enabling the API is not enough, and
+  skipping it fails silently and completely.
 - A **service account** in that project, and ADC resolving to it. Not your own
   `gcloud auth application-default login` — see
   [Credentials](#credentials-app-auth). Credentials are never passed as flags.
@@ -205,6 +209,41 @@ confirmed against captured traffic:
   The published image works too (`ghcr.io/go-steer/switchboard:main`), but a
   local binary is easier to restart between demo steps, and several of them ask
   you to.
+
+### The Chat service identity
+
+Do this before anything below, and re-check it first when nothing arrives.
+
+```sh
+gcloud beta services identity create --service=chat.googleapis.com --project=<PROJECT>
+```
+
+The Chat API needs its own service-identity registration on the hosting project.
+Enabling the APIs is **not** sufficient, and neither is the *add-ons* identity —
+the omission is invisible because both registrations resolve to the **same**
+service account,
+`service-<PROJECT_NUMBER>@gcp-sa-gsuiteaddons.iam.gserviceaccount.com`. The
+account exists, every IAM check passes, and Chat's backend never binds it to the
+app record: deliveries are dropped upstream of anything you can observe. Not
+over Pub/Sub, not over HTTP. No failed requests, no audit-log entries, no error
+on your side at all — the Chat client just says "app is not responding".
+
+The one diagnostic marker is the **"Service account email"** field on the Chat
+API configuration page: populated means delivery works, blank means zero
+delivery. After running the command, **re-save the Chat config once** and
+refresh before concluding it did not help. The programmatic twin:
+
+```sh
+gcloud workspace-add-ons get-authorization --project=<PROJECT>
+```
+
+Ruled out empirically as causes of the same symptom, so do not spend time on
+them: org policies, Workspace tier, admin allowlists, topic IAM, the order the
+APIs were enabled, the OAuth consent screen, cross-domain visibility, and
+project age. Two projects configured identically can differ only in this.
+
+This is measured, from two days of root-causing it in a sibling project
+(`multi-agent-chat`, July 2026), not from Google's documentation.
 
 ### Pub/Sub
 

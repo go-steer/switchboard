@@ -250,8 +250,8 @@ someone else in the room may be entitled to answer. There is no value meaning
 rather than an adapter, it is a Slack control only for as long as Slack is the
 only platform delivering a press: the add-on framework routes no click trigger
 to a Chat app (§3.3), so `--approvers` narrows nothing there until the HTTP
-interaction endpoint lands (#29), and covers it with no further work when it
-does.
+interaction endpoint lands (#29, designed in §3.4), and covers it with no
+further work when it does.
 
 None of this is the backend's authorization moving here. Switchboard is gating a
 surface it invented, on the identity it already asserts; core-agent still decides
@@ -639,7 +639,89 @@ sets `status`. Text is always sent as the message fallback, and a card
 Chat rejects with a 400 falls back to posting the text — a rich render never
 costs a reply.
 
-### 3.4 Configuration, and why it grew a file
+### 3.4 Google Chat over HTTP: the interaction endpoint
+
+Pub/Sub buys the no-public-ingress posture and pays for it in interactivity
+(§3.3). [#29](https://github.com/go-steer/switchboard/issues/29) adds an HTTP
+interaction endpoint as a **second ingress chosen per deployment**, not as a
+replacement: Pub/Sub stays the default, because for a deployment that never
+needed a button the endpoint is a public attack surface bought for nothing.
+
+Most of the work is not the transport. `decodeEvent` already takes a `[]byte`
+and both dialects already normalize into one `inbound`, so the two ingresses
+converge one function in. What is coupled to Pub/Sub is `dispatch`, which owns
+the `*pubsub.Message` and its ack; the handler path is the same decode and the
+same `chat.Handler` calls with a different envelope and a different way of
+saying "done". Four things do not carry over, and they are the design.
+
+**The wire is not the same JSON.** HTTP delivery serializes proto-JSON, which
+renders numbers as floats — `"appCommandId": 100.0` — where Pub/Sub delivers
+`100`. `commandID.UnmarshalJSON` parses with `strconv.ParseInt(s, 10, 64)`,
+which rejects `100.0`, and it deliberately never returns an error: an
+unreadable ID leaves the zero value, which maps to no configured command and is
+ignored. Over Pub/Sub that tolerance loses one malformed command. Over HTTP it
+would lose **every** command, silently, in a deployment whose hand-written test
+fixtures all pass — the failure is invisible from inside the repo, which is the
+same reason `--googlechat-log-events` exists. The decoder has to accept the
+float spelling, and the case belongs in the fixtures for both transports.
+
+**Authentication has no Pub/Sub analogue.** Over Pub/Sub, authorization *is* the
+subscription's IAM — only Chat publishes, only switchboard pulls, and nothing
+reaches the process that Google did not put there. An HTTP endpoint is reachable
+by anyone, so the request has to prove it came from Chat. Google's
+[Verify requests from Chat](https://developers.google.com/workspace/chat/verify-requests-from-chat)
+documents only the *legacy* Chat-app case, and the add-on dialect this gateway
+is designed against is not on that page. What follows is measured against a
+working Workspace add-on rather than documented — a separate codebase, so it
+carries less provenance than #28's live testing here, and the first deployment
+should confirm it with `--googlechat-log-events` before it is trusted:
+
+- Every request carries a Google-signed ID token in **both** the
+  `Authorization: Bearer` header and the body's
+  `authorizationEventObject.systemIdToken`.
+- `iss` is `accounts.google.com`, `aud` is **the endpoint URL Chat called**, and
+  `email` is the hosting project's add-ons service agent,
+  `service-<project number>@gcp-sa-gsuiteaddons.iam.gserviceaccount.com`.
+- So the audience is derived from the request rather than configured, with an
+  explicit override for a proxy that rewrites `Host`. Validation is
+  `google.golang.org/api/idtoken` against Google's published certificates. The
+  legacy project-number audience mode needs a *different* certificate URL
+  (`chat@system.gserviceaccount.com`) that `idtoken` cannot be pointed at —
+  one more place the two dialects diverge in favour of the add-on one.
+- **The email is pinned.** A valid token from that service-account *shape*
+  proves the caller is an add-on, not that it is this one, and the shape is
+  derivable from any project number. Pinning it to the deployment's own is what
+  makes the check mean something.
+- The token is verification material and is never forwarded. The asserted caller
+  stays the Chat user's email, exactly as over Pub/Sub.
+
+**Thirty seconds, and nothing after the response.** Chat gives the endpoint ~30
+seconds, and a turn routinely takes longer, so the endpoint acknowledges and the
+turn's output arrives as the same separate REST posts Pub/Sub already makes.
+What HTTP adds is the ability to answer *the click itself* in the response,
+which is what a press actually needs — an approval button must visibly do
+something at the moment it is pressed rather than a round-trip later. The
+platform hazard to design around is that side effects deferred to a goroutine
+*after* the response are not reliably run: on Cloud Run's default CPU
+allocation the instance is throttled the moment the response completes. Anything
+that must happen happens before the write.
+
+**Buttons render only where a click can be delivered.** #52 removed every button
+rather than ship controls that could only fail, so #29 owns putting them back —
+gated on the ingress, because a button rendered by a Pub/Sub deployment still
+produces "Switchboard is unable to process your request". Rendering also gains
+an input it never had: in the add-on HTTP runtime `onClick.action.function` must
+be the **full HTTPS endpoint URL**, and a bare function name fails client-side
+with no request sent at all, so the card builder has to know the endpoint. The
+button's logical identity still travels in `action.parameters` (§3.3), which is
+what keeps one encoding serving both dialects.
+
+Responses use the add-on envelope —
+`hostAppDataAction.chatDataAction.createMessageAction` / `updateMessageAction` —
+not the legacy `actionResponse` with `cardsV2`. `RenderActions` is specifically
+the dialog lifecycle, and switchboard renders no dialogs.
+
+### 3.5 Configuration, and why it grew a file
 
 Flags were enough while every setting was a scalar the whole process shared.
 Two pressures ended that.

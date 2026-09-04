@@ -6,6 +6,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- `docs/googlechat-setup.md` documents the Chat **service identity** step
+  (`gcloud beta services identity create --service=chat.googleapis.com`).
+  Enabling the Chat API is not sufficient and the omission is invisible: both
+  registrations resolve to the same service account, so every IAM check passes
+  while Chat drops all deliveries upstream of anything observable — no requests,
+  no audit entries, no errors, over Pub/Sub or HTTP. The console's "Service
+  account email" field is the one marker. Also lists what has been ruled out
+  empirically as causing the same symptom, so the two days it cost in a sibling
+  project are not spent again.
+- `docs/DESIGN.md` §3.4 designs the Google Chat HTTP interaction endpoint (#29)
+  ahead of building it: ingress as a per-deployment choice with Pub/Sub still
+  the default, request authentication (the part with no Pub/Sub analogue, where
+  authorization was the subscription's IAM), the ~30-second response budget, and
+  what gating buttons on the ingress requires of the card builder. Records that
+  HTTP delivery serializes numbers as proto-JSON floats where Pub/Sub sends
+  ints — which today's `commandID` decoder rejects into a silent zero, so an
+  HTTP deployment would drop every command while the fixtures stayed green.
+
 ## [v0.4.0] — 2026-09-04
 
 A release about what switchboard says while it works. No new surface, no new
