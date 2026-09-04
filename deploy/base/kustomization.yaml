@@ -15,7 +15,8 @@
 # Platform-neutral base. Not applyable on its own — build a platform
 # overlay instead (see overlays/slack, overlays/googlechat). The image
 # tag is set here so both overlays inherit one source of truth; override
-# newTag with a released :vX.Y.Z in production.
+# newTag with a released :X.Y.Z in production (no `v` — the image tags
+# drop it, while the Go module version keeps it).
 #
 # The namespace is NOT set here, and that is load-bearing rather than an
 # omission. Each overlay generates the config ConfigMap, and a generated
