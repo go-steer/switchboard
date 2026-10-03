@@ -64,17 +64,32 @@ func agentFrame(seq int64, text string) boundFrame {
 type boundDaemon struct {
 	creates, injects atomic.Int64
 	// injectStatus, when set, is what inject answers with instead of success:
-	// the daemon having forgotten the session it was bound to.
+	// the daemon having forgotten the session it was bound to. A 404 or 410
+	// also makes the session vanish for every other route, since that is what
+	// it means — a daemon that refuses inject but still serves the stream is
+	// not one that lost the session, it is one refusing the caller (refuse).
 	injectStatus int
+	// refuse is a caller the daemon's ACL does not admit. Inject as them gets
+	// the same 404 a missing session does, which is what core-agent answers so
+	// that a refusal reveals nothing; the session itself is untouched.
+	refuse string
 	// resumed records the `since` of every connection to the event stream.
 	resumed chan string
 	// gone, once closed, is the session disappearing out from under whoever is
 	// watching it: open streams end and new ones are refused.
 	gone chan struct{}
 
-	mu      sync.Mutex
-	frames  []boundFrame
-	streams []chan boundFrame
+	mu       sync.Mutex
+	frames   []boundFrame
+	streams  []chan boundFrame
+	vanished map[string]bool
+}
+
+// missing reports whether the daemon has lost sid.
+func (d *boundDaemon) missing(sid string) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.vanished[sid]
 }
 
 // publish adds a frame to the session and hands it to whoever is listening. A
@@ -99,13 +114,31 @@ func (d *boundDaemon) mux(t *testing.T) *http.ServeMux {
 	t.Helper()
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /sessions", func(w http.ResponseWriter, r *http.Request) {
-		d.creates.Add(1)
+		// "fresh", then "fresh-2", …: a session opened after a lost one is a
+		// different session, and a test that reuses the name cannot tell them
+		// apart.
+		sid := "fresh"
+		if n := d.creates.Add(1); n > 1 {
+			sid = fmt.Sprintf("fresh-%d", n)
+		}
 		w.WriteHeader(http.StatusCreated)
-		fmt.Fprint(w, `{"app":"core-agent","sessionID":"fresh"}`)
+		fmt.Fprintf(w, `{"app":"core-agent","sessionID":%q}`, sid)
 	})
 	mux.HandleFunc("POST /sessions/{app}/{sid}/inject", func(w http.ResponseWriter, r *http.Request) {
 		d.injects.Add(1)
+		if d.refuse != "" && r.Header.Get("X-Asserted-Caller") == d.refuse {
+			http.Error(w, "session not found", http.StatusNotFound)
+			return
+		}
 		if d.injectStatus != 0 {
+			if d.injectStatus == http.StatusNotFound || d.injectStatus == http.StatusGone {
+				d.mu.Lock()
+				if d.vanished == nil {
+					d.vanished = map[string]bool{}
+				}
+				d.vanished[r.PathValue("sid")] = true
+				d.mu.Unlock()
+			}
 			http.Error(w, "unknown session", d.injectStatus)
 			return
 		}
@@ -115,6 +148,14 @@ func (d *boundDaemon) mux(t *testing.T) *http.ServeMux {
 		since, _ := strconv.ParseInt(r.URL.Query().Get("since"), 10, 64)
 		if d.resumed != nil {
 			d.resumed <- r.URL.Query().Get("since")
+		}
+		// The ACL guards every route, not just inject: a probe as the refused
+		// caller must be refused too, or a check that probes as the wrong
+		// identity passes.
+		if d.missing(r.PathValue("sid")) ||
+			(d.refuse != "" && r.Header.Get("X-Asserted-Caller") == d.refuse) {
+			http.Error(w, "unknown session", http.StatusNotFound)
+			return
 		}
 		select {
 		case <-d.gone:
@@ -376,13 +417,27 @@ func TestBindRefusesASessionTheDaemonDoesNotHave(t *testing.T) {
 // one thing that must not happen is for switchboard to quietly open a fresh
 // session and let the thread carry on as if the agent still remembered it.
 func TestALostBindingIsAnnouncedAndDropped(t *testing.T) {
-	d := &boundDaemon{injectStatus: http.StatusNotFound}
+	d := &boundDaemon{resumed: make(chan string, 8)}
 	router, fake := boundRouter(t, d)
 	router.CommitBind("C0:1", mustSession(t, boundSession), 5)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	msg := chat.Message{Conversation: "C0:1", Caller: "alice@example.com", Text: "what happened?"}
+	// One turn that lands first, so the relay is on an open stream before the
+	// session goes. Otherwise it can reconnect into the 404 and announce the
+	// loss in its own words — true, but not the notice under test.
+	if err := router.Handle(ctx, msg); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	for range 2 { // the adopt-time head probe, then the relay
+		select {
+		case <-d.resumed:
+		case <-time.After(2 * time.Second):
+			t.Fatal("the relay never subscribed")
+		}
+	}
+	d.injectStatus = http.StatusNotFound
 	if err := router.Handle(ctx, msg); err == nil {
 		t.Fatal("Handle succeeded against a session the daemon does not have")
 	}
@@ -922,5 +977,157 @@ func TestARelayThatLosesItsSessionSaysSoAndStops(t *testing.T) {
 				bindings, sessions)
 		}
 		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// TestALostOwnSessionIsAnnouncedAndDropped is #88: the same failure as
+// TestALostBindingIsAnnouncedAndDropped, for a session switchboard opened
+// itself. The recovery used to be gated on the session having been adopted, so
+// this — the common case — kept the dead entry and failed every later turn in
+// the thread identically until the process restarted.
+func TestALostOwnSessionIsAnnouncedAndDropped(t *testing.T) {
+	d := &boundDaemon{resumed: make(chan string, 8)}
+	router, fake := boundRouter(t, d)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	msg := chat.Message{Conversation: "C0:1", Caller: "alice@example.com", Text: "what happened?"}
+	// As in TestALostBindingIsAnnouncedAndDropped: the relay is connected
+	// before the session goes, so the inject path is the one that finds out.
+	if err := router.Handle(ctx, msg); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	select {
+	case <-d.resumed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the relay never subscribed")
+	}
+	d.injectStatus = http.StatusNotFound
+	if err := router.Handle(ctx, msg); err == nil {
+		t.Fatal("Handle succeeded against a session the daemon does not have")
+	}
+
+	select {
+	case rep := <-fake.replies:
+		if !strings.Contains(rep.Text, "core-agent/fresh") {
+			t.Errorf("notice = %q, want the session named so an operator can go and look", rep.Text)
+		}
+		if !strings.Contains(rep.Text, "not delivered") {
+			t.Errorf("notice = %q, want it to say the message went nowhere", rep.Text)
+		}
+		if strings.Contains(rep.Text, "tied to") {
+			t.Errorf("notice = %q; this thread was never bound to anything", rep.Text)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the thread was told nothing")
+	}
+
+	router.mu.Lock()
+	_, stillSessioned := router.sessions["C0:1"]
+	router.mu.Unlock()
+	if stillSessioned {
+		t.Error("the dead entry survived; the next turn would reuse it")
+	}
+
+	d.injectStatus = 0
+	if err := router.Handle(ctx, msg); err != nil {
+		t.Fatalf("Handle after the lost session: %v, want the thread usable again", err)
+	}
+	if got := d.creates.Load(); got != 2 {
+		t.Errorf("creates = %d, want 2: the second message must open a session of its own", got)
+	}
+}
+
+// TestARelayThatLosesItsOwnSessionSaysSoAndStops is the stream half of #88: a
+// session switchboard opened, ending in a 404 while nobody is typing, must not
+// be reconnected to forever.
+func TestARelayThatLosesItsOwnSessionSaysSoAndStops(t *testing.T) {
+	d := &boundDaemon{resumed: make(chan string, 8), gone: make(chan struct{})}
+	router, fake := boundRouter(t, d)
+	router.minBackoff = time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := router.Handle(ctx, chat.Message{Conversation: "C0:1", Caller: "alice@example.com", Text: "hi"}); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	select {
+	case <-d.resumed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the relay never subscribed")
+	}
+	close(d.gone)
+
+	select {
+	case rep := <-fake.replies:
+		if !strings.Contains(rep.Text, "core-agent/fresh") {
+			t.Errorf("notice = %q, want the session named", rep.Text)
+		}
+		if !strings.Contains(rep.Text, "Nothing further") {
+			t.Errorf("notice = %q, want it to say nothing more is coming", rep.Text)
+		}
+		if strings.Contains(rep.Text, "tied to") {
+			t.Errorf("notice = %q; this thread was never bound to anything", rep.Text)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the thread was never told its session was gone")
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		router.mu.Lock()
+		sessions := len(router.sessions)
+		router.mu.Unlock()
+		if sessions == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("sessions=%d, want the dead entry dropped so the next message starts fresh", sessions)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// TestARefusedCallerDoesNotLoseTheThreadsSession is the trap in #88's fix.
+// Under ACL enforcement core-agent refuses a caller with the same 404 a
+// missing session gets, so the second person to reply in a thread — neither
+// the session's owner nor a contributor — reads exactly like a lost session.
+// Discarding on that would throw away the owner's working session, and the
+// session opened in its place would refuse the owner in turn.
+func TestARefusedCallerDoesNotLoseTheThreadsSession(t *testing.T) {
+	d := &boundDaemon{refuse: "bob@example.com"}
+	router, fake := boundRouter(t, d)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	alice := chat.Message{Conversation: "C0:1", Caller: "alice@example.com", Text: "deploy status?"}
+	bob := chat.Message{Conversation: "C0:1", Caller: "bob@example.com", Text: "and staging?"}
+	if err := router.Handle(ctx, alice); err != nil {
+		t.Fatalf("Handle(alice): %v", err)
+	}
+	if err := router.Handle(ctx, bob); err == nil {
+		t.Fatal("Handle(bob) succeeded; the daemon refused him")
+	}
+
+	select {
+	case rep := <-fake.replies:
+		if strings.Contains(rep.Text, "no longer has") {
+			t.Errorf("notice = %q; the session is alive, bob was refused", rep.Text)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("bob's failed turn was not surfaced at all")
+	}
+
+	router.mu.Lock()
+	e, ok := router.sessions["C0:1"]
+	router.mu.Unlock()
+	if !ok || sessionRef(e.sess) != "core-agent/fresh" {
+		t.Fatalf("sessions[C0:1] = %v, %v; want alice's session kept", e, ok)
+	}
+	if err := router.Handle(ctx, alice); err != nil {
+		t.Fatalf("Handle(alice) after bob was refused: %v", err)
+	}
+	if got := d.creates.Load(); got != 1 {
+		t.Errorf("creates = %d, want 1: alice is still on the session she opened", got)
 	}
 }
