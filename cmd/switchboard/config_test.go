@@ -461,6 +461,37 @@ func TestAChannelApproverListReplacesTheDefault(t *testing.T) {
 	}
 }
 
+// A channel's standing-approver list replaces the default's, is counted for
+// the banner, and leaves a channel that does not mention it on the default
+// (#85).
+func TestAChannelStandingApproverListReplacesTheDefault(t *testing.T) {
+	def := channelSettings{approvals: true, standing: mustApprovers(t, "ana@example.com")}
+	cfg := &Config{Channels: map[string]ChannelConfig{
+		"C1": {StandingApprovers: []string{"ben@example.com"}},
+		"C2": {Name: "says nothing about it"},
+	}}
+	got, err := channelsFrom(cfg, def, "slack", chat.CallerEmail)
+	if err != nil {
+		t.Fatalf("channelsFrom: %v", err)
+	}
+	if s := got["C1"].standing; !s.allows("ben@example.com") || s.allows("ana@example.com") {
+		t.Errorf("C1 standing = %+v, want ben and only ben", s)
+	}
+	if s := got["C2"].standing; !s.allows("ana@example.com") || s.allows("ben@example.com") {
+		t.Errorf("C2 standing = %+v, want the default", s)
+	}
+	if n := standingSpread(got); n != 2 {
+		t.Errorf("standingSpread = %d, want 2 (both relay prompts with a narrowed list)", n)
+	}
+
+	_, err = channelsFrom(&Config{Channels: map[string]ChannelConfig{
+		"C1": {StandingApprovers: []string{"ana@example.com ben@example.com"}},
+	}}, def, "slack", chat.CallerEmail)
+	if err == nil || !strings.Contains(err.Error(), "standing_approvers") {
+		t.Errorf("a bad channel standing list = %v, want an error naming standing_approvers", err)
+	}
+}
+
 // The corollary of replacing, and the reason the startup banner counts it: a
 // channel can widen as well as narrow, so a narrowed default is not a floor.
 func TestAChannelCanWidenBackToTheWholeRoom(t *testing.T) {

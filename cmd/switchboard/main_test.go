@@ -882,3 +882,57 @@ func TestRunServeApproverValidation(t *testing.T) {
 		})
 	}
 }
+
+// TestRunServeStandingApproverValidation is the same wiring check for
+// --standing-approvers (#85): consulted, checked against the caller mode, and
+// not widened by an environment variable that renders as "".
+func TestRunServeStandingApproverValidation(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		env  string // SWITCHBOARD_STANDING_APPROVERS; "-" means leave it unset
+		want string
+	}{
+		{
+			name: "a list nobody could match is refused at startup",
+			args: []string{"--approvals", "--standing-approvers", "ana@example.com;ben@example.com"},
+			env:  "-",
+			want: "invalid value for --standing-approvers",
+		},
+		{
+			name: "checked against the caller mode this run uses",
+			args: []string{"--approvals", "--caller-id", "id", "--standing-approvers", "ana@example.com"},
+			env:  "-",
+			want: "invalid value for --standing-approvers",
+		},
+		{
+			name: "set to nothing in the environment is not the same as unset",
+			args: []string{"--approvals"},
+			env:  "",
+			want: envStandingApprovers,
+		},
+		{
+			name: "read from the environment when the flag is absent",
+			args: []string{"--approvals"},
+			env:  "not-an-email",
+			want: "invalid value for $" + envStandingApprovers,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("SWITCHBOARD_DAEMON_TOKEN", "daemon-token")
+			t.Setenv(envApprovers, "")
+			os.Unsetenv(envApprovers)
+			t.Setenv(envStandingApprovers, tc.env)
+			if tc.env == "-" {
+				os.Unsetenv(envStandingApprovers)
+			}
+			err := runServe(tc.args)
+			if err == nil {
+				t.Fatal("runServe accepted a standing-approver list it cannot honour")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error = %q, want it to mention %q", err, tc.want)
+			}
+		})
+	}
+}

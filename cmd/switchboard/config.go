@@ -142,6 +142,13 @@ type ChannelConfig struct {
 	// including back to ["channel"] — so a narrowed default is not a floor, and
 	// the startup banner counts both.
 	Approvers []string `json:"approvers,omitempty"`
+
+	// StandingApprovers gates the answer that outlives the session
+	// (approval.Decision.Standing) on top of Approvers: a standing press has
+	// to satisfy both, so this narrows and never widens. Replaces the wider
+	// list like Approvers does, and like it can say ["channel"], which here
+	// means "no tighter than the approver list" (#85).
+	StandingApprovers []string `json:"standing_approvers,omitempty"`
 }
 
 // loadConfig reads and validates a config file.
@@ -447,6 +454,13 @@ func channelsFrom(cfg *Config, def channelSettings, platform string, mode chat.C
 			}
 			s.approvers = p
 		}
+		if c.StandingApprovers != nil {
+			p, err := parseApproverList(c.StandingApprovers, mode)
+			if err != nil {
+				return nil, fmt.Errorf("channels[%q].standing_approvers: %w", id, err)
+			}
+			s.standing = p
+		}
 		out[id] = s
 	}
 	return out, nil
@@ -502,6 +516,7 @@ func configureRouter(r *Router, ac *approval.Client, def channelSettings, byChan
 	r.setShowUsage(def.showUsage)
 	r.setApprovals(ac, def.approvals)
 	r.setApprovers(def.approvers)
+	r.setStandingApprovers(def.standing)
 	r.setChannels(byChannel)
 }
 
@@ -550,6 +565,19 @@ func approverSpread(byChannel map[string]channelSettings) (open, named int) {
 		}
 	}
 	return open, named
+}
+
+// standingSpread counts, among the channels that relay prompts, how many set
+// their own standing-approver list — reported because, like an approver list,
+// a channel's replaces the default and can therefore widen it.
+func standingSpread(byChannel map[string]channelSettings) int {
+	n := 0
+	for _, s := range byChannel {
+		if s.approvals && !s.standing.open() {
+			n++
+		}
+	}
+	return n
 }
 
 // hasFlag reports whether any of these flag names was given on argv. Used for

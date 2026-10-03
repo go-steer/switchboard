@@ -446,6 +446,15 @@ type channelSettings struct {
 	// shipped default — see approverPolicy for why that is a posture rather
 	// than an omission.
 	approvers approverPolicy
+
+	// standing narrows approvers further for the one answer whose reach is
+	// not bounded by the room it was pressed in: a grant that outlives the
+	// session (approval.Decision.Standing). A standing press has to satisfy
+	// both policies, so this can only narrow — a standing list naming someone
+	// the approver list does not still refuses them. The zero value adds no
+	// restriction, which keeps a deployment that never sets it exactly where
+	// it was (#85).
+	standing approverPolicy
 }
 
 // sessionEntry is a conversation's session plus the state to create it

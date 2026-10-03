@@ -256,6 +256,28 @@ None of this is the backend's authorization moving here. Switchboard is gating a
 surface it invented, on the identity it already asserts; core-agent still decides
 what that caller may *do* with the decision, and is free to refuse it again.
 
+**Standing grants get a second gate (#85).** One flat list cannot tell a press
+that authorizes one call from a press that writes a grant outliving the
+session, and the argument that makes `channel` a defensible default — room
+membership is access control the platform enforces for free — holds for the
+first and not the second: the membership being relied on is membership *now*,
+and the grant is still there afterwards. `--standing-approvers` applies to
+`approval.Decision.Standing`, which today is `allow-always` only. The session
+grants are broad but die with the session, so the room they were pressed in is
+still the room they apply to. `Standing` is written as the list of decisions
+that are *not* standing, so one the package does not recognise is gated as the
+wider kind.
+
+A standing press has to pass both lists, so the second can only narrow; a
+standing list naming somebody the approver list does not still refuses them,
+as a non-approver. Unset means `channel` — no tighter than `--approvers` — so
+the default changes nothing, and the startup banner says which posture a run
+has in both directions, because "a standing grant needs no more than any other
+answer" is the fact an operator most needs to read off a default run. The
+refusal is its own notice, and says the narrower answers are still the
+presser's to give: the question is not stuck, it is just not theirs to make
+permanent.
+
 ## 3. Architecture
 
 ```
@@ -797,7 +819,8 @@ grown a resolver of its own, `progressFor`, for the runtime progress-mode
 override. Everything else was read straight off `Router`. That asymmetry is the
 shape of a third bespoke lookup, so #71 collapsed it: one `settingsFor(channel)`
 serves `approvals`, `approvers`, `progress_mode` and `show_usage`, and adding
-the next scopable setting is a field on `channelSettings`.
+the next scopable setting is a field on `channelSettings` — which is all
+`standing_approvers` (#85) took.
 
 **Resolution is layered narrowest-first, and only one layer is reachable at
 runtime.** A channel's block in the file is a complete answer for that channel,

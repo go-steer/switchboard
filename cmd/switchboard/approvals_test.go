@@ -1881,3 +1881,124 @@ func pressIn(e *sessionEntry, channel, promptID string) chat.Press {
 		Message:      chat.MessageRef{Conversation: conv, ID: "ts1"},
 	}
 }
+
+// ------------------------------------------------ standing approvers (#85)
+
+// pressWith is pressIn in the default test channel, answering d.
+func pressWith(e *sessionEntry, promptID string, d approval.Decision) chat.Press {
+	p := pressIn(e, "C1", promptID)
+	p.Option = string(d)
+	return p
+}
+
+// TestAStandingGrantIsGatedSeparately is #85's done-when: with the default
+// open approver list, anyone in the room may approve a call, and only the
+// standing approvers may write a grant that outlives the session. The same
+// presser keeps the narrower answers — the question is not stuck for them.
+func TestAStandingGrantIsGatedSeparately(t *testing.T) {
+	d := newPermsDaemon(t)
+	r, fake, _ := permsRouter(t, d)
+	r.setStandingApprovers(mustApprovers(t, "ana@example.com"))
+	e := liveEntryIn(r, "C1:1", "C1")
+
+	bob := pressWith(e, "pr1", approval.AllowAlways)
+	bob.Caller = "ben@example.com"
+	if err := r.HandlePress(context.Background(), bob); err != nil {
+		t.Fatalf("HandlePress: %v", err)
+	}
+	if n := len(d.posts()); n != 0 {
+		t.Fatalf("a standing grant from a non-standing approver reached the daemon %d time(s)", n)
+	}
+	if got := drainNotice(t, fake); got != noticeNotStandingApprover {
+		t.Errorf("the thread was told %q, want %q", got, noticeNotStandingApprover)
+	}
+
+	once := pressWith(e, "pr1", approval.AllowOnce)
+	once.Caller = "ben@example.com"
+	if err := r.HandlePress(context.Background(), once); err != nil {
+		t.Fatalf("HandlePress: %v", err)
+	}
+	if n := len(d.posts()); n != 1 {
+		t.Fatalf("the narrower answer from the same presser answered %d times, want 1", n)
+	}
+
+	ana := pressWith(e, "pr2", approval.AllowAlways)
+	ana.Caller = "ana@example.com"
+	if err := r.HandlePress(context.Background(), ana); err != nil {
+		t.Fatalf("HandlePress: %v", err)
+	}
+	if n := len(d.posts()); n != 2 {
+		t.Fatalf("the standing approver's grant answered %d times in total, want 2", n)
+	}
+}
+
+// TestTheStandingListOnlyNarrows: a standing approver who is not an approver
+// is refused as not an approver. The standing list is a second gate, not a
+// second way in.
+func TestTheStandingListOnlyNarrows(t *testing.T) {
+	d := newPermsDaemon(t)
+	r, fake, _ := permsRouter(t, d)
+	r.setApprovers(mustApprovers(t, "ana@example.com"))
+	r.setStandingApprovers(mustApprovers(t, "ben@example.com"))
+	e := liveEntryIn(r, "C1:1", "C1")
+
+	p := pressWith(e, "pr1", approval.AllowAlways)
+	p.Caller = "ben@example.com"
+	if err := r.HandlePress(context.Background(), p); err != nil {
+		t.Fatalf("HandlePress: %v", err)
+	}
+	if n := len(d.posts()); n != 0 {
+		t.Fatalf("a standing approver outside the approver list answered %d time(s)", n)
+	}
+	if got := drainNotice(t, fake); got != noticeNotApprover {
+		t.Errorf("the thread was told %q, want %q", got, noticeNotApprover)
+	}
+}
+
+// TestAnUnsetStandingListChangesNothing: the default is behaviour-preserving.
+// A router nobody configured standing approvers on lets every approver write
+// a standing grant, as it did before the setting existed.
+func TestAnUnsetStandingListChangesNothing(t *testing.T) {
+	d := newPermsDaemon(t)
+	r, _, _ := permsRouter(t, d)
+	r.setApprovers(mustApprovers(t, "ana@example.com"))
+	e := liveEntryIn(r, "C1:1", "C1")
+
+	p := pressWith(e, "pr1", approval.AllowAlways)
+	p.Caller = "ana@example.com"
+	if err := r.HandlePress(context.Background(), p); err != nil {
+		t.Fatalf("HandlePress: %v", err)
+	}
+	if n := len(d.posts()); n != 1 {
+		t.Fatalf("an approver's standing grant answered %d times, want 1", n)
+	}
+}
+
+// TestAChannelsOwnStandingApproversGovernThatChannel: the per-channel block
+// replaces the default list for that channel, as approvers does.
+func TestAChannelsOwnStandingApproversGovernThatChannel(t *testing.T) {
+	d := newPermsDaemon(t)
+	r, fake, _ := permsRouter(t, d)
+	r.setStandingApprovers(mustApprovers(t, "ana@example.com"))
+	r.setChannels(map[string]channelSettings{
+		"C9": {approvals: true, standing: mustApprovers(t, "ben@example.com")},
+	})
+	e := liveEntryIn(r, "C9:1", "C9")
+
+	p := pressIn(e, "C9", "pr1")
+	p.Option = string(approval.AllowAlways)
+	p.Caller = "ana@example.com"
+	if err := r.HandlePress(context.Background(), p); err != nil {
+		t.Fatalf("HandlePress: %v", err)
+	}
+	if got := drainNotice(t, fake); got != noticeNotStandingApprover {
+		t.Errorf("the replaced default standing approver was told %q, want %q", got, noticeNotStandingApprover)
+	}
+	p.Caller = "ben@example.com"
+	if err := r.HandlePress(context.Background(), p); err != nil {
+		t.Fatalf("HandlePress: %v", err)
+	}
+	if n := len(d.posts()); n != 1 {
+		t.Fatalf("the channel's own standing approver answered %d times, want 1", n)
+	}
+}

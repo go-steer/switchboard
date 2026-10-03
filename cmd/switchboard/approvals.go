@@ -53,6 +53,11 @@ func (r *Router) setApprovals(c *approval.Client, on bool) {
 // setChannels.
 func (r *Router) setApprovers(p approverPolicy) { r.defaults.approvers = p }
 
+// setStandingApprovers narrows who may give an answer that outlives the
+// session, in a channel the config file said nothing about. Like
+// setApprovers, the zero policy is the open one and changes nothing.
+func (r *Router) setStandingApprovers(p approverPolicy) { r.defaults.standing = p }
+
 // watchPermsIfOffered starts this session's permission watcher, at most once.
 //
 // The trigger is the capabilities frame, not the daemon's awaiting_permission
@@ -335,7 +340,14 @@ const (
 	// is configuration, and reading it back to whoever presses hardest turns a
 	// refusal into a directory.
 	noticeNotApprover = "⛔ **Not an approver** — that answer wasn't sent. Someone on this gateway's approver list has to answer it."
+	// noticeNotStandingApprover refuses only the answer that outlives the
+	// session, and says the narrower ones are still open to the presser — the
+	// question is not stuck, it is just not theirs to make permanent.
+	noticeNotStandingApprover = "⛔ **Not a standing approver** — that answer wasn't sent. A grant that outlasts this session needs someone on this gateway's standing-approver list; you can still answer for this request."
 )
+
+// envStandingApprovers is the environment alternative to --standing-approvers.
+const envStandingApprovers = "SWITCHBOARD_STANDING_APPROVERS"
 
 // approversChannel is the --approvers value meaning "anyone who can post here".
 const approversChannel = "channel"
@@ -530,6 +542,16 @@ func (r *Router) HandlePress(ctx context.Context, p chat.Press) error {
 		// and a press that vanishes reads as one that worked.
 		r.logf.Warnf("perms %s: press by %q is not an approver", p.Conversation, p.Caller)
 		return r.surfaceNotice(ctx, p.Conversation, noticeNotApprover)
+	}
+	if d.Standing() && !settings.standing.allows(p.Caller) {
+		// The same refusal, for the one answer whose blast radius is the
+		// daemon rather than the room: membership of the conversation is what
+		// lets somebody approve a call, and it says nothing about who should
+		// write a grant still in force after they have left it (#85). Placed
+		// with the approver check, before the prompt is located, for the same
+		// reason. The narrower answers on the same question stay available.
+		r.logf.Warnf("perms %s: press by %q is not a standing approver (%s)", p.Conversation, p.Caller, d)
+		return r.surfaceNotice(ctx, p.Conversation, noticeNotStandingApprover)
 	}
 	sess, promptID, ok := splitDecisionRef(p.DecisionID)
 	if !ok {

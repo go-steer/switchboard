@@ -45,8 +45,8 @@ JSON has no comments, which the YAML args did. For a channel block there is a
 
 ### Per-channel settings
 
-`approvals`, `approvers`, `progress_mode` and `show_usage` can be scoped to a
-channel, over a `defaults` block that sets them process-wide:
+`approvals`, `approvers`, `standing_approvers`, `progress_mode` and
+`show_usage` can be scoped to a channel, over a `defaults` block that sets them process-wide:
 
 ```json
 {
