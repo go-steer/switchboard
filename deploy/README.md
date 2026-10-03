@@ -71,6 +71,16 @@ rather than adding to it, so a block can widen a room as well as narrow one.
 A `channels` block also outranks a flag, which is the one exception to the
 precedence rule above.
 
+## Platform app configuration
+
+The chat platform's own app has to exist before any of this can connect.
+For Slack it is described by [`slack/app-manifest.yaml`](slack/app-manifest.yaml)
+— paste it at api.slack.com/apps (create from manifest, or **App Manifest** on
+an existing app) and reinstall; [slack-setup.md](../docs/slack-setup.md) walks
+through it. It is not a Kubernetes manifest and no kustomization references it.
+Google Chat's app is configured in the Cloud console; see
+[googlechat-setup.md](../docs/googlechat-setup.md).
+
 ## Prerequisites (not created by these manifests)
 
 1. **Namespace** — everything targets `agent-triage` (change with

@@ -17,6 +17,10 @@
 # "Create New App → From an app manifest"), then reinstall the app so new
 # scopes reach the bot token. See docs/slack-setup.md.
 #
+# Not a Kubernetes manifest: it lives in deploy/ because the Slack app is a
+# prerequisite of standing switchboard up, wherever it runs. Nothing in the
+# kustomizations references it.
+#
 # Kept next to the code on purpose: the scopes below are derived from the API
 # calls pkg/chat/slack makes, and a scope the code starts needing should change
 # here in the same PR. The app-level token (connections:write, for Socket Mode)
