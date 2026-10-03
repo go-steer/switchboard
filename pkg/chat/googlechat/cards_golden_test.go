@@ -35,6 +35,24 @@ import (
 //	go test ./pkg/chat/googlechat -run Golden -update
 var updateGolden = flag.Bool("update", false, "rewrite the golden card JSON in testdata/cards")
 
+// goldenActionURL is the endpoint the button goldens send their clicks to.
+const goldenActionURL = "https://switchboard.example.com/chat"
+
+// goldenDecisionText and goldenDecision are a permission prompt as the router
+// posts it (cmd/switchboard/approvals.go postPrompt): the question, then its
+// answers in prose, then the answers again as the Decision the buttons render.
+const goldenDecisionText = "🔐 The agent wants to run **bash**: `kubectl rollout restart deploy/api`\n\n" +
+	"• Deny\n• Allow once\n• Allow commands like this for the session"
+
+var goldenDecision = &chat.Decision{
+	ID: "core-agent/s1#p7",
+	Options: []chat.DecisionOption{
+		{Value: "deny", Label: "Deny"},
+		{Value: "allow_once", Label: "Allow once"},
+		{Value: "allow_session_verb", Label: "Allow commands like this for the session", Broad: true},
+	},
+}
+
 // goldenAnswer is the model turn the answer-card goldens render — headers,
 // emphasis, a link, a fence and a rule, so one card exercises every structure
 // the renderer lifts out of the text.
@@ -111,7 +129,18 @@ func TestCardsGolden(t *testing.T) {
 		// the ack above visible rather than remembered.
 		{"ack-plain", gatewayCard(chat.KindAck,
 			toChatText("Progress mode for this channel set to *stream*.")), 0},
-		{"welcome", welcomeCard([]string{"off", "indicator", "status", "stream"}), 0},
+		{"welcome", welcomeCard([]string{"off", "indicator", "status", "stream"}, ""), 0},
+		// The button-bearing cards, rendered only on the HTTP ingress (#29).
+		// Each button's function is the endpoint URL itself — the add-on HTTP
+		// runtime fails a bare function name client-side, with no request.
+		{"welcome-buttons", welcomeCard([]string{"off", "indicator", "status", "stream"}, goldenActionURL), 0},
+		{"ack-buttons", ackCard(toChatText("Progress mode for this channel set to *stream*."),
+			"progress", []string{"off", "indicator", "status", "stream"}, goldenActionURL), 0},
+		{"decision", decisionCard(toChatText(goldenDecisionText), goldenDecision, goldenActionURL), 0},
+		// The same question once answered: no Decision, so no buttons — the
+		// edit that takes them down, and the record of who decided.
+		{"decision-settled", decisionCard(toChatText(goldenDecisionText+"\n\n✅ **Allowed**, this once — alice@example.com"),
+			nil, goldenActionURL), 0},
 		{"answer", answerCard(goldenAnswer), 0},
 		// The whole fence has to survive, across as many widgets as it takes.
 		{"answer-spilled", answerCard(goldenSpilledAnswer), 2},

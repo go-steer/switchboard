@@ -15,6 +15,7 @@
 package googlechat
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"slices"
@@ -131,8 +132,8 @@ func TestGatewayCardsCarryNothingClickable(t *testing.T) {
 		"activity":                gatewayCard(chat.KindActivity, "Running `bash`"),
 		"notice":                  gatewayCard(chat.KindNotice, "That turn didn't go through."),
 		"ack":                     gatewayCard(chat.KindAck, "Progress mode is *off*."),
-		"welcome":                 welcomeCard([]string{"off", "indicator", "status", "stream"}),
-		"welcome-without-choices": welcomeCard(nil),
+		"welcome":                 welcomeCard([]string{"off", "indicator", "status", "stream"}, ""),
+		"welcome-without-choices": welcomeCard(nil, ""),
 		"answer":                  answerCard("# Findings\n\nThe first thing.\n"),
 		"answer-spilled":          answerCard("# Findings\n\n" + spilled),
 		"answer-with-usage": withUsageFooter(answerCard("# Findings\n\nThe first thing.\n"),
@@ -146,15 +147,180 @@ func TestGatewayCardsCarryNothingClickable(t *testing.T) {
 	}
 }
 
+// TestNoActionURLMeansNoButton is #28's invariant restated for the builders
+// that do render buttons (#29): without an action URL — which is to say on the
+// Pub/Sub ingress, where a click never arrives — they render none, and the
+// decision card renders nothing at all so the reply goes as text.
+func TestNoActionURLMeansNoButton(t *testing.T) {
+	choices := []string{"off", "indicator", "status", "stream"}
+	for name, card := range map[string]*chatv1.GoogleAppsCardV1Card{
+		"welcome": welcomeCard(choices, ""),
+		"ack":     ackCard("Progress mode for this channel set to *stream*.", "progress", choices, ""),
+	} {
+		if card == nil {
+			t.Fatalf("%s: no card", name)
+		}
+		assertNothingClickable(t, name, card)
+	}
+	if card := decisionCard("Allow bash?", goldenDecision, ""); card != nil {
+		t.Errorf("decision card without an action URL = %+v, want nil so the question goes as text", card)
+	}
+}
+
+// TestPubSubAdapterRendersNoButton is the same invariant one level up, through
+// the adapter: a Pub/Sub deployment's decisions, acks and welcome stay inert
+// whatever the card mode.
+func TestPubSubAdapterRendersNoButton(t *testing.T) {
+	f := &fakeMessenger{}
+	a := newTestAdapter(f)
+	a.cards = CardsRich
+	a.verify.audience = testAudience // configured, and still not used: the ingress decides
+	if got := a.actionURL(); got != "" {
+		t.Fatalf("actionURL on Pub/Sub = %q, want none", got)
+	}
+	if card := a.cardFor(chat.Reply{Text: goldenDecisionText, Kind: chat.KindDecision, Decision: goldenDecision}); card != nil {
+		t.Errorf("Pub/Sub decision card = %+v, want the text path", card)
+	}
+	h := &choiceHandler{}
+	h.choices = []string{"off", "stream"}
+	if card := a.ackCardFor(h, "progress", "Progress mode set to *stream*."); card != nil {
+		assertNothingClickable(t, "ack", card)
+	}
+	a.welcome(context.Background(), h, "spaces/AAA:spaces/AAA/threads/T1")
+	if len(f.creates) != 1 || f.creates[0].card == nil {
+		t.Fatalf("welcome creates = %+v, want one card", f.creates)
+	}
+	assertNothingClickable(t, "welcome", f.creates[0].card)
+}
+
+// buttonsOf returns every button on a card, in order.
+func buttonsOf(card *chatv1.GoogleAppsCardV1Card) []*chatv1.GoogleAppsCardV1Button {
+	var out []*chatv1.GoogleAppsCardV1Button
+	for _, s := range card.Sections {
+		for _, w := range s.Widgets {
+			if w.ButtonList != nil {
+				out = append(out, w.ButtonList.Buttons...)
+			}
+		}
+	}
+	return out
+}
+
+func paramsOf(b *chatv1.GoogleAppsCardV1Button) map[string]string {
+	out := map[string]string{}
+	for _, p := range b.OnClick.Action.Parameters {
+		out[p.Key] = p.Value
+	}
+	return out
+}
+
+// TestDecisionButtonsCarryTheAnswer: one button per answer, each sent to the
+// endpoint URL and carrying the decision's ID and its own value — the two
+// strings runPress hands back to the router as a Press.
+func TestDecisionButtonsCarryTheAnswer(t *testing.T) {
+	card := decisionCard("Allow bash?", goldenDecision, testAudience)
+	buttons := buttonsOf(card)
+	if len(buttons) != len(goldenDecision.Options) {
+		t.Fatalf("buttons = %d, want %d", len(buttons), len(goldenDecision.Options))
+	}
+	for i, b := range buttons {
+		o := goldenDecision.Options[i]
+		if b.Text != o.Label {
+			t.Errorf("button %d text = %q, want %q", i, b.Text, o.Label)
+		}
+		if b.OnClick.Action.Function != testAudience {
+			t.Errorf("button %d function = %q, want the endpoint URL; a bare name fails with no request sent", i, b.OnClick.Action.Function)
+		}
+		p := paramsOf(b)
+		if p[paramDecision] != goldenDecision.ID || p[paramOption] != o.Value {
+			t.Errorf("button %d params = %v, want decision %q option %q", i, p, goldenDecision.ID, o.Value)
+		}
+	}
+}
+
+// TestDecisionCardEdgeCases: the shapes that must not produce a button that
+// lies or a choice of one.
+func TestDecisionCardEdgeCases(t *testing.T) {
+	// Settled: the edit that records how it ended takes the buttons down.
+	settled := decisionCard("Allow bash?\n\n✅ Allowed", nil, testAudience)
+	if settled == nil {
+		t.Fatal("settled decision rendered no card; the click's response needs one")
+	}
+	assertNothingClickable(t, "settled", settled)
+
+	// An answer with no value cannot be pressed meaningfully, and dropping it
+	// leaves one — which is not a choice.
+	lone := decisionCard("Allow bash?", &chat.Decision{ID: "s#p", Options: []chat.DecisionOption{
+		{Value: "", Label: "Broken"}, {Value: "deny", Label: "Deny"},
+	}}, testAudience)
+	if lone == nil {
+		t.Fatal("no card")
+	}
+	assertNothingClickable(t, "one surviving answer", lone)
+
+	// A blank label falls back to the value rather than an empty button.
+	blank := decisionCard("Allow bash?", &chat.Decision{ID: "s#p", Options: []chat.DecisionOption{
+		{Value: "deny", Label: " "}, {Value: "allow_once", Label: "Allow once"},
+	}}, testAudience)
+	if b := buttonsOf(blank); len(b) != 2 || b[0].Text != "deny" {
+		t.Errorf("buttons = %+v, want the value as the blank label's text", b)
+	}
+}
+
+// TestALongQuestionKeepsItsOutcome: a prompt's detail can push the body past
+// one widget's budget, and the settled edit puts the outcome after all of it.
+// A clamp would cut exactly the line recording who decided; the body spills
+// instead, and the outcome is still on the card.
+func TestALongQuestionKeepsItsOutcome(t *testing.T) {
+	// Escaping grows every rune of this, the ampersands fivefold — more than
+	// any fixed split ratio allows for.
+	detail := strings.Repeat("<a&b> ", 300) + strings.Repeat("&&", 700)
+	text := "Permission needed: `" + detail + "`\n\n✅ Allowed, this once — ana@example.com"
+	card := decisionCard(text, nil, testAudience)
+	if card == nil {
+		t.Fatal("no card")
+	}
+	got := cardText(card)
+	if !strings.Contains(got, "ana@example.com") {
+		t.Errorf("the outcome was cut from a long question's settled card")
+	}
+	for _, s := range card.Sections {
+		for _, w := range s.Widgets {
+			if w.TextParagraph != nil && len(w.TextParagraph.Text) > maxWidgetText {
+				t.Errorf("a widget carries %d bytes, over the %d budget", len(w.TextParagraph.Text), maxWidgetText)
+			}
+		}
+	}
+}
+
+// TestCommandRowReinvokesTheCommand: the welcome's and the ack's buttons are
+// the command typed out, one per accepted value.
+func TestCommandRowReinvokesTheCommand(t *testing.T) {
+	card := ackCard("Progress mode set to *stream*.", "progress", []string{"off", " ", "stream "}, testAudience)
+	buttons := buttonsOf(card)
+	if len(buttons) != 2 {
+		t.Fatalf("buttons = %d, want 2 (blank dropped)", len(buttons))
+	}
+	for i, want := range []string{"off", "stream"} {
+		p := paramsOf(buttons[i])
+		if buttons[i].Text != want || p[paramCommand] != "progress" || p[paramArg] != want {
+			t.Errorf("button %d = %q %v, want progress %s", i, buttons[i].Text, p, want)
+		}
+	}
+	if card := ackCard("Unknown command.", "frobnicate", nil, testAudience); len(buttonsOf(card)) != 0 {
+		t.Error("a command with no choices grew buttons")
+	}
+}
+
 // assertNothingClickable fails when a card carries a control. It covers the
 // card only; Chat's message-level accessoryWidgets would be the other half,
 // and nothing here sets one.
 func assertNothingClickable(t *testing.T, name string, card *chatv1.GoogleAppsCardV1Card) {
 	t.Helper()
 	if found := interactivePaths(card); len(found) > 0 {
-		t.Errorf("%s card carries a control at %s. No card this gateway sends has one: "+
-			"an action click never reaches the app (#28), and an openLink button, which "+
-			"sends no event at all, is untested here (#29)", name, strings.Join(found, ", "))
+		t.Errorf("%s card carries a control at %s. No card rendered without an action URL "+
+			"may have one: over Pub/Sub an action click never reaches the app (#28), and an "+
+			"openLink button, which sends no event at all, is untested here", name, strings.Join(found, ", "))
 	}
 }
 
@@ -166,7 +332,7 @@ func assertNothingClickable(t *testing.T, name string, card *chatv1.GoogleAppsCa
 //
 // Two deliberate edges. It is a ban on controls, not only on event-senders: an
 // openLink button sends the app nothing and would match anyway, which is right
-// while none has been tried here (#29). And it is not a ban on everything a
+// while none has been tried here. And it is not a ban on everything a
 // user can operate: a collapsible section and a maxLines paragraph both render
 // an expander, and neither has "control" in its name — they are inert, so they
 // are out of scope rather than missed.
@@ -233,7 +399,7 @@ func isClickableField(name string) bool {
 // as good as this, so the shapes a card could regrow a control in are checked
 // against it directly — including the two that a ButtonList-only check missed.
 func TestInteractivePathsFindsTheAffordancesItClaimsTo(t *testing.T) {
-	clean := welcomeCard([]string{"off", "stream"})
+	clean := welcomeCard([]string{"off", "stream"}, "")
 	if got := interactivePaths(clean); len(got) != 0 {
 		t.Fatalf("the shipped welcome should be clean, got %v", got)
 	}
@@ -255,7 +421,7 @@ func TestInteractivePathsFindsTheAffordancesItClaimsTo(t *testing.T) {
 		},
 	}
 	for want, graft := range grafts {
-		card := welcomeCard([]string{"off", "stream"})
+		card := welcomeCard([]string{"off", "stream"}, "")
 		graft(card)
 		if got := interactivePaths(card); len(got) != 1 || got[0] != want {
 			t.Errorf("grafting %s: interactivePaths = %v, want exactly [%s]", want, got, want)
@@ -277,7 +443,7 @@ func TestAckCardIsJustTheAck(t *testing.T) {
 }
 
 func TestWelcomeCard(t *testing.T) {
-	card := welcomeCard([]string{"off", "", " stream "})
+	card := welcomeCard([]string{"off", "", " stream "}, "")
 	if card == nil || card.Header == nil || card.Header.Title != "switchboard" {
 		t.Fatalf("welcome card should introduce the app: %+v", card)
 	}
@@ -290,7 +456,7 @@ func TestWelcomeCard(t *testing.T) {
 	}
 	// A handler with no choices to report still gets a welcome, and must not
 	// be given an empty argument list to read.
-	bare := welcomeCard(nil)
+	bare := welcomeCard(nil, "")
 	if bare == nil || bare.Header == nil {
 		t.Fatalf("a welcome with no choices is still a card")
 	}
@@ -303,7 +469,7 @@ func TestWelcomeCard(t *testing.T) {
 	if !strings.Contains(bareText, "progress") {
 		t.Fatalf("a welcome should name the command even with no values, got %q", bareText)
 	}
-	if empty := welcomeCard([]string{"", "  "}); empty == nil ||
+	if empty := welcomeCard([]string{"", "  "}, ""); empty == nil ||
 		cardText(empty) != bareText {
 		t.Fatalf("choices that are all blank should read exactly the same as none")
 	}
@@ -330,7 +496,7 @@ func TestWelcomeTextMatchesTheCard(t *testing.T) {
 	if !strings.Contains(welcomeTextFor(choices), hint) {
 		t.Fatalf("fallback dropped the progress hint %q", hint)
 	}
-	if card := welcomeCard(choices); card == nil ||
+	if card := welcomeCard(choices, ""); card == nil ||
 		!strings.Contains(cardText(card), toCardHTML(hint)) {
 		t.Fatalf("card dropped the progress hint %q", hint)
 	}

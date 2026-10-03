@@ -1,0 +1,13 @@
+{
+  "sections": [
+    {
+      "widgets": [
+        {
+          "textParagraph": {
+            "text": "🔐 The agent wants to run \u003cb\u003ebash\u003c/b\u003e: `kubectl rollout restart deploy/api`\u003cbr\u003e\u003cbr\u003e• Deny\u003cbr\u003e• Allow once\u003cbr\u003e• Allow commands like this for the session\u003cbr\u003e\u003cbr\u003e✅ \u003cb\u003eAllowed\u003c/b\u003e, this once — alice@example.com"
+          }
+        }
+      ]
+    }
+  ]
+}

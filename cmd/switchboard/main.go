@@ -518,9 +518,19 @@ func runServe(args []string) (err error) {
 			logf.Infof("googlechat: HTTP ingress, accepting events authenticated as %s", *googleChatSA)
 			if *googleEndpointURL == "" {
 				logf.Warnf("no --googlechat-endpoint-url, so each inbound token is checked against " +
-					"the URL its own request names; pin it if anything in front of switchboard " +
-					"rewrites Host")
+					"the URL its own request names, and card buttons appear only once the first " +
+					"verified event has taught the gateway that URL; pin it if anything in front " +
+					"of switchboard rewrites Host")
 			}
+		}
+		// A permission prompt nobody can answer from the room is still worth
+		// posting — it says the agent is blocked, and on what — but an
+		// operator who turned approvals on for a Chat deployment should not
+		// have to discover from a thread that the buttons cannot exist here.
+		if wantApprovals && inbound && (ingressMode != googlechat.IngressHTTP || cardMode == googlechat.CardsOff) {
+			logf.Warnf("approvals: Google Chat renders the answers as buttons only with " +
+				"--googlechat-ingress http and cards on; this run posts permission prompts as " +
+				"text, and they have to be answered somewhere else")
 		}
 	default:
 		return fmt.Errorf("invalid --platform %q (want \"slack\" or \"googlechat\")", *platform)

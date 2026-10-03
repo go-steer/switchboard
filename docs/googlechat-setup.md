@@ -79,13 +79,11 @@ with real traffic as soon as you have a live app (below). Comparing
 `addon-slash-command.json` with `legacy-slash-command.json` is the dialect
 invariant in one glance — equivalent events must produce identical outcomes.
 
-The card-click payloads cannot be replaced that way: no card the gateway sends
-has a button, and Chat delivered no click to the subscription when one did
-(#28). A legacy app would have received that click, but the gateway renders no
-button in either dialect, so neither can produce real traffic — and the legacy
-half is known from operating Chat rather than tested here, so the fixture is
-what pins our reading of it. They stay hand-written, pinning the decode path for
-the HTTP ingress in [#29](https://github.com/go-steer/switchboard/issues/29).
+The card-click payloads cannot be replaced that way over Pub/Sub: Chat
+delivered no click to the subscription (#28). Buttons render on the HTTP
+ingress (#29), so that is where a real click can be captured; until one is, the
+click fixtures stay hand-written, and the legacy half is known from operating
+Chat rather than tested here.
 
 ### Capturing real payloads
 
@@ -372,11 +370,17 @@ export SWITCHBOARD_DAEMON_TOKEN=…   # the one dev/demo/daemon printed
 ### The HTTP ingress
 
 Everything above receives over Pub/Sub. The other transport is an endpoint Chat
-posts events to, which is what dialogs and card clicks need and what
-[#29](https://github.com/go-steer/switchboard/issues/29) is about. Switchboard
-renders no buttons yet, so on today's build this is the same conversation over a
-different wire — worth setting up now only if you are working on that issue or
-you want the endpoint proved out before the clicks land.
+posts events to, which is what dialogs and card clicks need
+([#29](https://github.com/go-steer/switchboard/issues/29)). On this ingress the
+gateway's cards carry buttons: permission prompts are answered with a press,
+and the welcome and the `progress` ack offer the modes as a row. Each button
+sends its click to the endpoint's full URL, which the gateway takes from
+`--googlechat-endpoint-url` or learns from the first verified event.
+
+The first deployment should capture a real click with `--googlechat-log-events`
+and add it to `testdata/events`: the click fixtures are hand-written, and the
+response shape a click is answered with (`updateMessageAction`) is measured on
+a sibling add-on rather than on this one.
 
 It costs the property the paragraph above is about. Chat has to reach the
 process, so a laptop behind NAT no longer works without a tunnel, and the URL is
