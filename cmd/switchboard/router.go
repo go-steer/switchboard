@@ -362,6 +362,10 @@ type Router struct {
 	// seam.
 	parkWait time.Duration
 
+	// audit is the ingress record (#89): one line per turn and per press.
+	// Nil records nothing, which is the default.
+	audit *auditLog
+
 	// defaults are the channel-scopable settings as they apply to a channel
 	// with nothing said about it, and byChannel is what a config file said
 	// about the ones it named (#71). Both are written once at startup — by
@@ -1484,7 +1488,12 @@ func (r *Router) Handle(ctx context.Context, msg chat.Message) (err error) {
 	// One counter per inbound turn, tallied by outcome on the way out.
 	defer func() { r.metrics.recordMessage(err) }()
 
-	entry, err := r.session(ctx, msg.Conversation, msg.Channel, msg.Caller)
+	// And one audit line, on the way out for the same reason: every exit is
+	// a turn somebody caused, including the ones that failed.
+	var entry *sessionEntry
+	defer func() { r.auditTurn(msg, entry, err) }()
+
+	entry, err = r.session(ctx, msg.Conversation, msg.Channel, msg.Caller)
 	if err != nil {
 		r.surfaceError(ctx, msg.Conversation, err)
 		return err

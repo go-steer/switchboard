@@ -352,6 +352,7 @@ func (a *Adapter) handleEvent(ctx context.Context, h chat.Handler, data []byte) 
 			Channel:      in.space,
 			Caller:       in.caller,
 			Text:         in.text,
+			MessageID:    in.messageName,
 		}
 		if err := h.Handle(ctx, msg); err != nil {
 			a.logf.Errorf("googlechat: handle %s: %v", conv, err)

@@ -7,6 +7,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- `--audit-log` writes an **ingress audit record** (#89): one JSON line per
+  turn and per approval press, joining the chat message (the platform's own
+  message ID), the asserted caller, the `app/sid` session and the outcome —
+  the link between "who said it in chat" and "what the daemon was told", which
+  switchboard is the only component able to see and previously wrote nowhere.
+  Never the message text. `stdout` keeps it apart from the operational log on
+  stderr; a file is appended to, created `0640`, and a run that cannot open it
+  does not start. Also `$SWITCHBOARD_AUDIT_LOG` and `audit_log` in the config
+  file. `chat.Message` gains `MessageID`, filled by both adapters.
 - Google Chat cards carry **buttons on the HTTP ingress** (#29), which puts
   Google Chat on the approval gate: a permission prompt renders as a card with
   a button per answer, a press reaches the router as the person who clicked,

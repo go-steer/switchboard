@@ -151,7 +151,9 @@ type inbound struct {
 	cmdArgs string
 
 	// messageName is the resource name of the message hosting the clicked
-	// card (kindButton) — what Update patches to reflect the new state.
+	// card (kindButton) — what Update patches to reflect the new state — or,
+	// for a turn (kindMessage), of the message itself, which the audit record
+	// carries back to the platform (#89).
 	messageName string
 
 	// params are the action parameters carried by a button click. Add-ons
@@ -324,6 +326,9 @@ func normalizeAddon(ev *wireEvent) inbound {
 			return welcomeOrIgnore(in, m)
 		}
 		in.kind = kindMessage
+		if m != nil {
+			in.messageName = m.Name
+		}
 		return in
 
 	case c.AppCommandPayload != nil:
@@ -479,6 +484,7 @@ func legacyTurn(in inbound, m *chatv1.Message) inbound {
 		return welcomeOrIgnore(in, m)
 	}
 	in.kind = kindMessage
+	in.messageName = m.Name
 	return in
 }
 

@@ -62,11 +62,12 @@ func TestDecodeAddonEvents(t *testing.T) {
 				}
 			}`,
 			want: inbound{
-				kind:   kindMessage,
-				space:  "spaces/AAA",
-				thread: "spaces/AAA/threads/T1",
-				caller: "users/123",
-				text:   "hello there",
+				kind:        kindMessage,
+				space:       "spaces/AAA",
+				thread:      "spaces/AAA/threads/T1",
+				caller:      "users/123",
+				text:        "hello there",
+				messageName: "spaces/AAA/messages/M1", // carried for the audit record (#89)
 			},
 		},
 		{

@@ -53,6 +53,13 @@ type Message struct {
 
 	// Text is the message body with platform mention markup stripped.
 	Text string
+
+	// MessageID is the platform's own handle on this message — a Slack
+	// message timestamp, a Google Chat message resource name — or empty when
+	// the event did not carry one. Nothing routes on it. It is what lets an
+	// audit record of the turn be followed back to the message that caused it
+	// (#89), in the platform that is the system of record for its content.
+	MessageID string
 }
 
 // CallerMode selects how a platform user maps onto the daemon's

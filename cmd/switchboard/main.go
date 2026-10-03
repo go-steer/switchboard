@@ -214,6 +214,10 @@ func runServe(args []string) (err error) {
 	logFormat := fs.String("log-format", string(logging.Text),
 		"log rendering: \"text\" (timestamped lines for a terminal) or \"json\" (one object "+
 			"per line for a collector)")
+	auditLogDest := fs.String("audit-log", "",
+		"append one JSON line per turn and per approval press — conversation, asserted "+
+			"caller, session and platform message ID, never the text — to this file, or "+
+			"\"stdout\"; empty = off")
 	showVersion := fs.Bool("version", false, "print build identity and exit")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -264,6 +268,7 @@ func runServe(args []string) (err error) {
 	res.str("ingress-addr", "SWITCHBOARD_INGRESS_ADDR", cfg.IngressAddr, ingressAddr)
 	res.str("ingress-token-env", "", cfg.IngressTokenEnv, ingressTokenEnv)
 	res.str("log-format", "SWITCHBOARD_LOG_FORMAT", cfg.LogFormat, logFormat)
+	res.str("audit-log", "SWITCHBOARD_AUDIT_LOG", cfg.AuditLog, auditLogDest)
 	// The channel-scopable four resolve into the same variables, and then again
 	// per channel below: what lands here is the posture for a channel the file
 	// says nothing about.
@@ -562,6 +567,22 @@ func runServe(args []string) (err error) {
 	if inbound {
 		router = NewRouter(dc, adapter, progress, m, logf)
 		configureRouter(router, ac, defaults, byChannel)
+	}
+	// Opened before anything is dispatched, and a failure to open it stops the
+	// run: an operator who asked for an audit trail and got a gateway running
+	// without one has a gap they will only find when they need the record.
+	switch {
+	case *auditLogDest == "":
+	case !inbound:
+		logf.Warnf("--audit-log records turns and presses, and an outbound-only run has neither")
+	default:
+		audit, err := openAuditLog(*auditLogDest, logf)
+		if err != nil {
+			return err
+		}
+		defer audit.close()
+		router.setAudit(audit)
+		logf.Infof("audit: one record per turn and per approval press goes to %s", *auditLogDest)
 	}
 	if wantApprovals {
 		switch {

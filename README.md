@@ -1098,6 +1098,40 @@ regardless. That is when the line was *collected*, though, and it is absent
 entirely from a local run, a redirect to a file, or a `kubectl logs` dump taken
 without `--timestamps` — which is why the line carries its own.
 
+### Audit record
+
+switchboard is the one component that sees who actually spoke: it resolves the
+chat identity and asserts it to the daemon, which trusts the assertion. So the
+join an investigation needs — *this chat message, from this person, caused this
+session's turn* — exists here and nowhere else. `--audit-log` writes it down:
+one JSON line per turn and per approval press.
+
+```sh
+--audit-log stdout                  # or $SWITCHBOARD_AUDIT_LOG, or "audit_log" in the config file
+--audit-log /var/log/switchboard/audit.jsonl
+```
+
+```json
+{"time":"2026-10-03T09:00:00Z","kind":"turn","conversation":"C0123:1700000000.000100","channel":"C0123","caller":"alice@example.com","session":"core-agent/s-7f3a","message_id":"1700000000.000100","outcome":"injected"}
+{"time":"2026-10-03T09:02:11Z","kind":"press","conversation":"C0123:1700000000.000100","channel":"C0123","caller":"bob@example.com","session":"core-agent/s-7f3a","message_id":"1700000042.000200","outcome":"applied","prompt_id":"p-12","decision":"allow-once","approver":"bob@example.com"}
+```
+
+- `caller` is exactly what went in `X-Asserted-Caller`, so a daemon audit entry
+  can be matched on it; `session` is `app/sid`; `message_id` is the platform's
+  own handle on the message (a Slack `ts`, a Chat message resource name), which
+  is how you get back to what was actually said.
+- Every turn is recorded, including the ones that failed (`no_session`,
+  `inject_failed`, with the daemon's `status`). Every press is recorded with
+  what became of it: `applied`, `not_approver`, `not_standing`, `stale`,
+  `settled_elsewhere`, `maybe_applied`, `failed`, `disabled`, `invalid`. A
+  press's `approver` is who the daemon says it recorded.
+- **Never the message text.** The chat platform is the system of record for
+  content, with its own retention and legal posture; the record is the join.
+- Its own sink, deliberately: `stdout` keeps it apart from the operational log
+  (which is on stderr), and a file is opened for append, created `0640`, never
+  truncated. A run that cannot open it does not start. A write that fails is
+  logged and dropped rather than failing the turn.
+
 ### Container
 
 Images are published to **GHCR** and are multi-arch
