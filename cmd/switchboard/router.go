@@ -397,6 +397,18 @@ type Router struct {
 	mu       sync.Mutex
 	sessions map[string]*sessionEntry
 
+	// dormant holds the conversations that have a session but no live entry:
+	// restored from the state file and not yet re-attached (#86). A dormant
+	// record is the conversation's session as surely as a live entry is, so
+	// session() revives it before anything would open a new one, and a bind
+	// treats it as taken. Guarded by mu.
+	dormant map[string]sessionRecord
+
+	// store persists the routing table, and dirty schedules a write; both nil
+	// when --state-dir is unset, which keeps everything in memory as before.
+	store stateStore
+	dirty chan struct{}
+
 	// The conversations whose session switchboard did not create, recorded by
 	// the outbound ingress and consulted by session() before it creates one
 	// (#38). Guarded by mu, like sessions, because every rule about a binding
@@ -485,6 +497,10 @@ type sessionEntry struct {
 	// answer is checked against before the entry is given up on (sessionGone).
 	// Set before ready is closed, like sess.
 	owner string
+
+	// touched is the last traffic on the conversation, as UnixNano: what the
+	// state file records and the revive window is measured against (#86).
+	touched atomic.Int64
 
 	// stop ends this entry's relay goroutine. The relay otherwise runs for the
 	// life of the process, which is right for a session that keeps answering;
@@ -1348,6 +1364,7 @@ func NewRouter(client *daemon.Client, out sender, progress ProgressMode, m *metr
 		tickInterval: progressTickInterval,
 		tickMaxAge:   progressTickMaxAge,
 		sessions:     make(map[string]*sessionEntry),
+		dormant:      make(map[string]sessionRecord),
 		bindings:     make(map[string]binding),
 		boundTo:      make(map[string]string),
 		reserving:    make(map[string]string),
@@ -1416,6 +1433,7 @@ func (r *Router) setProgress(channel string, mode ProgressMode) {
 	r.omu.Lock()
 	r.overrides[channel] = mode
 	r.omu.Unlock()
+	r.markDirty()
 }
 
 // HandleCommand processes a gateway control command and returns a short
@@ -1517,6 +1535,7 @@ func (r *Router) Handle(ctx context.Context, msg chat.Message) (err error) {
 	// before the agent frame carrying that turn's text, so for the moment
 	// between the two the entry reads as idle while the figures it is holding
 	// are the ones that answer is about to print.
+	entry.touch()
 	if !entry.turnInFlight() && !entry.awaitingAnswer() {
 		entry.resetUsage()
 	}
@@ -2198,6 +2217,26 @@ func (r *Router) session(ctx context.Context, conv, channel, caller string) (*se
 		<-e.ready
 		return e, e.err
 	}
+	// A conversation with a recorded session picks it back up rather than
+	// opening another (#86): the relay resumes from the last answer delivered,
+	// and the session the daemon has been holding is the one that knows the
+	// thread. A record that cannot be read is dropped and the conversation
+	// starts fresh, which is all that was possible before there were records.
+	if rec, ok := r.dormant[conv]; ok {
+		delete(r.dormant, conv)
+		e, err := entryFromRecord(rec, channel)
+		if err == nil {
+			r.sessions[conv] = e
+			r.mu.Unlock()
+			r.metrics.sessionOpened()
+			r.startRelay(ctx, conv, e, e.owner)
+			close(e.ready)
+			r.markDirty()
+			r.logf.Infof("session %s: re-attached %s from seq %d", conv, sessionRef(e.sess), rec.Relayed)
+			return e, nil
+		}
+		r.logf.Warnf("session %s: unreadable record (%v); opening a new session", conv, err)
+	}
 	// This goroutine owns creation; publish a not-yet-ready entry so
 	// concurrent turns on the same conversation wait rather than
 	// double-create, and release the map lock before the network call.
@@ -2216,9 +2255,11 @@ func (r *Router) session(ctx context.Context, conv, channel, caller string) (*se
 		e.seq.Store(since)
 		e.relayed.Store(since)
 		e.noticed.Store(since)
+		e.touch()
 		r.metrics.sessionOpened()
 		r.startRelay(ctx, conv, e, "")
 		close(e.ready)
+		r.markDirty()
 		r.logf.Infof("session %s: adopted %s from seq %d", conv, sessionRef(b.sess), since)
 		return e, nil
 	}
@@ -2235,9 +2276,11 @@ func (r *Router) session(ctx context.Context, conv, channel, caller string) (*se
 		return e, e.err
 	}
 	e.owner = caller
+	e.touch()
 	r.metrics.sessionOpened()
 	r.startRelay(ctx, conv, e, caller)
 	close(e.ready)
+	r.markDirty()
 	return e, nil
 }
 
@@ -2303,6 +2346,7 @@ func (r *Router) discard(conv string, e *sessionEntry, unbind bool) bool {
 	}
 	e.stopTicker()
 	r.metrics.sessionClosed()
+	r.markDirty()
 	return true
 }
 
@@ -2556,6 +2600,8 @@ func (r *Router) relay(ctx context.Context, conv string, e *sessionEntry, owner 
 					return nil
 				}
 				e.relayed.Store(reply.Seq)
+				e.touch()
+				r.markDirty()
 				r.deliverText(ctx, e, conv, reply.Text)
 				return nil
 			}
@@ -2571,6 +2617,7 @@ func (r *Router) relay(ctx context.Context, conv string, e *sessionEntry, owner 
 				}
 				if calls := daemon.ToolCalls(ev.Data); len(calls) > 0 {
 					e.noticed.Store(reply.Seq)
+					r.markDirty()
 					r.postActivity(ctx, e, conv, mode, calls)
 					return nil
 				}
@@ -2582,6 +2629,7 @@ func (r *Router) relay(ctx context.Context, conv string, e *sessionEntry, owner 
 				if mode == ProgressStream {
 					if results := daemon.ToolResults(ev.Data); len(results) > 0 {
 						e.noticed.Store(reply.Seq)
+						r.markDirty()
 						r.postToolResults(ctx, e, conv, results)
 					}
 				}

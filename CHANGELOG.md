@@ -7,6 +7,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- `--state-dir` makes **conversations survive a restart** (#86). The
+  conversation → session routing table — each thread's session, the identity
+  its relay subscribes as, its delivery watermarks, plus ingress bindings and
+  `progress` overrides — is snapshotted to `state.json` (debounced; written
+  to a temp file, synced and renamed; once more at shutdown). After a restart
+  the next message in a thread goes to the session it had instead of a new
+  one; threads active in the last hour re-attach at boot so an answer
+  produced during the outage is still delivered, older ones on their next
+  message; nothing already delivered is posted twice. An unreadable file is
+  moved aside with an error rather than stopping the run. Also
+  `$SWITCHBOARD_STATE_DIR` and `state_dir` in the config file, and a
+  `deploy/components/durable-state` kustomize component adding the volume.
+  Without it nothing changes, and the banner says threads are in memory.
 - `--audit-log` writes an **ingress audit record** (#89): one JSON line per
   turn and per approval press, joining the chat message (the platform's own
   message ID), the asserted caller, the `app/sid` session and the outcome —

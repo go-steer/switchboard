@@ -1,0 +1,35 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Durable routing state (#86): a restart re-attaches every thread to the
+# session it had, instead of starting it over and leaking the old session on
+# the daemon. Opt-in, because it needs a PersistentVolumeClaim and so a
+# StorageClass the cluster may not have. Add it to an overlay:
+#
+#   components:
+#     - ../../components/durable-state
+#
+# The one setting it makes is through the environment rather than the
+# config file, against the base's rule, because it is not a choice an
+# operator edits: it is where this component mounts the volume, and the two
+# have to agree. Setting state_dir in config.json as well is harmless only
+# if it names the same path — the variable outranks the file.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+resources:
+  - pvc.yaml
+
+patches:
+  - path: patch-deployment.yaml

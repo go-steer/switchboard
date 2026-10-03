@@ -29,6 +29,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/go-steer/switchboard/internal/logging"
 	"github.com/go-steer/switchboard/internal/version"
@@ -214,6 +215,9 @@ func runServe(args []string) (err error) {
 	logFormat := fs.String("log-format", string(logging.Text),
 		"log rendering: \"text\" (timestamped lines for a terminal) or \"json\" (one object "+
 			"per line for a collector)")
+	stateDir := fs.String("state-dir", "",
+		"persist the conversation → session routing table here, so a restart re-attaches "+
+			"every thread to the session it had instead of starting over; empty = memory only")
 	auditLogDest := fs.String("audit-log", "",
 		"append one JSON line per turn and per approval press — conversation, asserted "+
 			"caller, session and platform message ID, never the text — to this file, or "+
@@ -269,6 +273,7 @@ func runServe(args []string) (err error) {
 	res.str("ingress-token-env", "", cfg.IngressTokenEnv, ingressTokenEnv)
 	res.str("log-format", "SWITCHBOARD_LOG_FORMAT", cfg.LogFormat, logFormat)
 	res.str("audit-log", "SWITCHBOARD_AUDIT_LOG", cfg.AuditLog, auditLogDest)
+	res.str("state-dir", "SWITCHBOARD_STATE_DIR", cfg.StateDir, stateDir)
 	// The channel-scopable four resolve into the same variables, and then again
 	// per channel below: what lands here is the posture for a channel the file
 	// says nothing about.
@@ -698,6 +703,41 @@ func runServe(args []string) (err error) {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	// The routing table, restored before anything is dispatched so the first
+	// message in a thread finds the session it had (#86). Restored on ctx
+	// because the relays it re-attaches run on it, as every relay does.
+	switch {
+	case *stateDir == "" && inbound:
+		logf.Infof("state: conversations are held in memory; a restart starts every thread over (--state-dir)")
+	case *stateDir == "":
+	case !inbound:
+		logf.Warnf("--state-dir persists conversations, and an outbound-only run has none")
+	default:
+		store, err := openFileStore(*stateDir)
+		if err != nil {
+			return err
+		}
+		st, err := store.load()
+		if err != nil {
+			// Set aside rather than refused: a run that will not start over a
+			// corrupt file is a crash loop that loses every thread anyway.
+			moved, merr := store.setAside(time.Now())
+			if merr != nil {
+				return fmt.Errorf("state: %v, and it could not be moved aside: %w", err, merr)
+			}
+			logf.Errorf("state: %v; moved it to %s and starting with no conversations", err, moved)
+			st = routerState{Version: stateVersion}
+		}
+		router.setStore(store)
+		revived, dormant := router.restore(ctx, st, time.Now())
+		logf.Infof("state: routing table persisted to %s; restored %d conversation(s): %d re-attached now, %d on their next message",
+			store.where(), revived+dormant, revived, dormant)
+		go router.runPersister(ctx)
+		// The last word on what the table looked like, written after the
+		// adapter has stopped dispatching, whatever the persister had pending.
+		defer router.saveState()
+	}
 
 	// Serve the optional listeners: /metrics + /healthz, and the outbound
 	// ingress. A bind failure cancels ctx (stop closes the Done channel,

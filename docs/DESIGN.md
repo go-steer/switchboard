@@ -887,9 +887,36 @@ resolve one. Accepting them in a channel block and ignoring them is exactly what
 ### Conversation ↔ session mapping
 
 The mapping key is the platform's stable thread identifier. Same key across turns
-⇒ same session ⇒ conversational continuity. The initial store is in-memory;
-durability (survive a switchboard restart) is a later phase and can reuse the
-same file-backed pattern as W6's `PeerRegistry`.
+⇒ same session ⇒ conversational continuity.
+
+**Durable with `--state-dir` (#86), in memory without it.** The in-memory map
+cost more than continuity once it held more than routing: every restart reset
+every thread silently, and stranded each conversation's session on the daemon
+with nothing that could find it again — `POST /sessions` carries no
+caller-supplied key, so nothing on the daemon ties a session to the
+conversation that caused it (go-steer/core-agent#995 would, and would make
+recovery derivable from the daemon for every companion; until it lands the
+record is switchboard's own).
+
+What is written is a snapshot, not a log: per conversation its session, the
+identity its relay subscribes as, whether it was adopted, its two delivery
+watermarks and when it last had traffic; plus the ingress bindings and the
+runtime progress overrides. A debounced persister writes it after each burst of
+changes (a temporary file, synced, renamed over the old one) and once more at
+shutdown. On boot every conversation is restored **dormant**; those with
+traffic in the last hour are re-attached at once, so an answer the agent
+produced while switchboard was down still arrives, and the rest re-attach on
+their next message rather than opening a stream per thread ever touched. A
+relay resumes from the last answer it delivered, with the notice watermark
+raised to meet it, so a restart neither replays nor skips. A dormant record is
+the conversation's session as surely as a live entry is — `session()` revives
+it before anything opens a new one, and a bind treats the thread as taken.
+
+A file the build cannot read (corrupt, or another `version`) is moved aside
+with an error and the run starts empty: refusing to start would turn one bad
+file into a crash loop that loses everything else too. One writer, so still one
+replica; the store sits behind an interface that does not presume a file, which
+is where a shared store would go when a second replica is actually in the path.
 
 ## 4. Phasing
 

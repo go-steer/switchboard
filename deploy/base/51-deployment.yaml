@@ -47,12 +47,14 @@ metadata:
     app.kubernetes.io/component: gateway
 spec:
   replicas: 1
-  # A chat conversation maps to one core-agent session held in an
-  # in-memory map (DESIGN.md: durability is a later phase). A second
-  # replica would split that map and break conversational continuity, so
-  # keep this at 1 until the session map is durable. Recreate avoids two
-  # instances briefly double-consuming the same Slack/Pub/Sub stream
-  # during a rollout.
+  # A chat conversation maps to one core-agent session. The map is in
+  # memory unless the durable-state component (deploy/components) gives it a
+  # volume (#86) — and even then it is one file with one writer, so a second
+  # replica would split the routing table either way. Keep this at 1 until
+  # there is a shared store. Recreate avoids two instances briefly
+  # double-consuming the same Slack/Pub/Sub stream during a rollout, and
+  # with durable state it is also what keeps the old pod from writing the
+  # file after the new one has read it.
   strategy:
     type: Recreate
   selector:
@@ -115,8 +117,9 @@ spec:
               drop: ["ALL"]
           volumeMounts:
             # Writable /tmp so the root filesystem can stay read-only;
-            # HTTP/TLS clients may spool here. emptyDir is ephemeral —
-            # switchboard persists nothing (the session map is in-memory).
+            # HTTP/TLS clients may spool here. emptyDir is ephemeral, which
+            # is right: the one thing switchboard can persist, the routing
+            # table, goes on its own volume (components/durable-state).
             - name: tmp
               mountPath: /tmp
             # The gateway config file. Read once at startup, so a ConfigMap

@@ -981,6 +981,33 @@ broken one look identical otherwise. Five configurations are refused:
 
 [#23]: https://github.com/go-steer/switchboard/issues/23
 
+### Surviving a restart
+
+By default every conversation's session lives in memory, so a restart — a
+rollout, a node drain, an OOM — starts every thread over without saying so,
+and leaves the old sessions on the daemon with nothing that can find them.
+`--state-dir` (or `$SWITCHBOARD_STATE_DIR`, or `state_dir` in the config file)
+keeps the routing table on disk instead:
+
+```sh
+--state-dir /var/lib/switchboard
+```
+
+```
+2026-10-03T09:00:00.000Z INFO  switchboard: state: routing table persisted to /var/lib/switchboard/state.json; restored 41 conversation(s): 3 re-attached now, 38 on their next message
+```
+
+After a restart the next message in a thread goes to the session it had. A
+thread active in the last hour is re-attached immediately, so anything the
+agent said while switchboard was down is delivered; older threads re-attach
+when someone next speaks. Nothing already delivered is posted twice. Ingress
+bindings and `progress` overrides survive too. The directory is created `0700`
+— the file names who spoke in every thread — and a file switchboard cannot
+read is moved aside with an error rather than stopping the run.
+
+Still one replica: the file has one writer. On Kubernetes, the
+[`durable-state` component](deploy/README.md#durable-state) adds the volume.
+
 ### Health & metrics
 
 `--metrics-addr=host:port` (empty by default, disabled) starts a small HTTP
