@@ -352,7 +352,7 @@ func (r *Router) restore(ctx context.Context, st routerState, now time.Time) (re
 			continue
 		}
 		r.dormant[conv] = rec
-		if now.Sub(rec.Touched) <= reviveWindow {
+		if now.Sub(rec.Touched) <= r.reviveWindow() {
 			recent = append(recent, conv)
 		}
 	}
@@ -381,6 +381,17 @@ func (r *Router) restore(ctx context.Context, st routerState, now time.Time) (re
 		revived++
 	}
 	return revived, dormant
+}
+
+// reviveWindow is how recent a restored conversation's traffic must be for it
+// to re-attach at boot: the idle TTL when reaping is on, since anything inside
+// it would still have been live had the process not restarted, and the
+// default window otherwise.
+func (r *Router) reviveWindow() time.Duration {
+	if r.idleTTL > 0 {
+		return r.idleTTL
+	}
+	return reviveWindow
 }
 
 // otherSession reports whether conv already has a session other than sess —

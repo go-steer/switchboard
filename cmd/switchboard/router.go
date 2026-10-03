@@ -409,6 +409,10 @@ type Router struct {
 	store stateStore
 	dirty chan struct{}
 
+	// idleTTL releases a conversation's streams after this long without
+	// traffic (#87); zero never does. Set once at startup.
+	idleTTL time.Duration
+
 	// The conversations whose session switchboard did not create, recorded by
 	// the outbound ingress and consulted by session() before it creates one
 	// (#38). Guarded by mu, like sessions, because every rule about a binding
@@ -2213,6 +2217,11 @@ func (r *Router) postToolResults(ctx context.Context, e *sessionEntry, conv stri
 func (r *Router) session(ctx context.Context, conv, channel, caller string) (*sessionEntry, error) {
 	r.mu.Lock()
 	if e, ok := r.sessions[conv]; ok {
+		// Touched under the lock the reaper sweeps under, so a message
+		// arriving for an idle conversation either finds it still live and
+		// marks it busy, or finds it already dormant and revives it below —
+		// never a live entry whose relay is about to be stopped (#87).
+		e.touch()
 		r.mu.Unlock()
 		<-e.ready
 		return e, e.err
@@ -2223,19 +2232,9 @@ func (r *Router) session(ctx context.Context, conv, channel, caller string) (*se
 	// thread. A record that cannot be read is dropped and the conversation
 	// starts fresh, which is all that was possible before there were records.
 	if rec, ok := r.dormant[conv]; ok {
-		delete(r.dormant, conv)
-		e, err := entryFromRecord(rec, channel)
-		if err == nil {
-			r.sessions[conv] = e
-			r.mu.Unlock()
-			r.metrics.sessionOpened()
-			r.startRelay(ctx, conv, e, e.owner)
-			close(e.ready)
-			r.markDirty()
-			r.logf.Infof("session %s: re-attached %s from seq %d", conv, sessionRef(e.sess), rec.Relayed)
+		if e := r.reviveLocked(ctx, conv, channel, rec); e != nil {
 			return e, nil
 		}
-		r.logf.Warnf("session %s: unreadable record (%v); opening a new session", conv, err)
 	}
 	// This goroutine owns creation; publish a not-yet-ready entry so
 	// concurrent turns on the same conversation wait rather than
@@ -2282,6 +2281,49 @@ func (r *Router) session(ctx context.Context, conv, channel, caller string) (*se
 	close(e.ready)
 	r.markDirty()
 	return e, nil
+}
+
+// reviveLocked re-attaches a dormant conversation: the record becomes a live
+// entry and its relay resumes from the last answer delivered. The caller holds
+// r.mu, and on success it is released here; on failure — a record that cannot
+// be read — the record is dropped, the lock is still held, and nil is
+// returned.
+func (r *Router) reviveLocked(ctx context.Context, conv, channel string, rec sessionRecord) *sessionEntry {
+	delete(r.dormant, conv)
+	e, err := entryFromRecord(rec, channel)
+	if err != nil {
+		r.logf.Warnf("session %s: unreadable record (%v); opening a new session", conv, err)
+		return nil
+	}
+	e.touch()
+	r.sessions[conv] = e
+	r.mu.Unlock()
+	r.metrics.sessionOpened()
+	r.startRelay(ctx, conv, e, e.owner)
+	close(e.ready)
+	r.markDirty()
+	r.logf.Infof("session %s: re-attached %s from seq %d", conv, sessionRef(e.sess), rec.Relayed)
+	return e
+}
+
+// liveOrRevived returns the conversation's session if it has one, live or
+// dormant, and never opens a new one: ok is false when there is nothing to
+// return. What a press needs — a question can only answer to the session that
+// asked it.
+func (r *Router) liveOrRevived(ctx context.Context, conv, channel string) (*sessionEntry, bool) {
+	r.mu.Lock()
+	if e, ok := r.sessions[conv]; ok {
+		r.mu.Unlock()
+		<-e.ready
+		return e, e.err == nil
+	}
+	if rec, ok := r.dormant[conv]; ok {
+		if e := r.reviveLocked(ctx, conv, channel, rec); e != nil {
+			return e, true
+		}
+	}
+	r.mu.Unlock()
+	return nil, false
 }
 
 // adoptFrom is the seq an adopted session's relay starts from.
