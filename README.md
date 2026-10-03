@@ -998,12 +998,29 @@ keeps the routing table on disk instead:
 ```
 
 After a restart the next message in a thread goes to the session it had. A
-thread active in the last hour is re-attached immediately, so anything the
-agent said while switchboard was down is delivered; older threads re-attach
-when someone next speaks. Nothing already delivered is posted twice. Ingress
-bindings and `progress` overrides survive too. The directory is created `0700`
-— the file names who spoke in every thread — and a file switchboard cannot
-read is moved aside with an error rather than stopping the run.
+thread active recently (within `--session-idle-ttl`, or the last hour) is
+re-attached immediately, so anything the agent said while switchboard was down
+is delivered; older threads re-attach when someone next speaks, and a press on
+a question they asked re-attaches them too. Delivery across a restart is
+at-least-once: a clean shutdown repeats nothing, and a crash within half a
+second of a post can repeat that one post, but nothing is skipped. Questions
+still on screen are not asked again, a "Working…" placeholder a turn had up is
+taken down, and ingress bindings and `progress` overrides survive too. The
+directory is created `0700` — the file names who spoke in every thread; a
+directory switchboard cannot write stops the run at startup; a file it cannot
+parse is moved aside with an error rather than stopping it; and a thread
+nobody has spoken in for 30 days is forgotten. If the daemon itself lost its
+sessions, each recently active thread is told so once, as it would be on any
+other lost session.
+
+With `--state-dir`, a conversation idle for **`--session-idle-ttl`** (default
+`12h`, `0` for never) releases its daemon streams — the relay and the prompt
+watcher each hold one open — and re-attaches on its next message, so a
+workspace's worth of old threads does not hold a workspace's worth of
+connections. A turn in flight is never idle, and neither is a thread the
+outbound ingress bound an unattended agent to, since nothing a human does keeps
+that one live. Naming a TTL without `--state-dir` is refused: releasing an
+entry with no durable record of its session would leak the session.
 
 Still one replica: the file has one writer. On Kubernetes, the
 [`durable-state` component](deploy/README.md#durable-state) adds the volume.

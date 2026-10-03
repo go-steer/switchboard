@@ -903,14 +903,35 @@ identity its relay subscribes as, whether it was adopted, its two delivery
 watermarks and when it last had traffic; plus the ingress bindings and the
 runtime progress overrides. A debounced persister writes it after each burst of
 changes (a temporary file, synced, renamed over the old one) and once more at
-shutdown. On boot every conversation is restored **dormant**; those with
-traffic in the last hour are re-attached at once, so an answer the agent
-produced while switchboard was down still arrives, and the rest re-attach on
-their next message rather than opening a stream per thread ever touched. A
-relay resumes from the last answer it delivered, with the notice watermark
-raised to meet it, so a restart neither replays nor skips. A dormant record is
-the conversation's session as surely as a live entry is — `session()` revives
-it before anything opens a new one, and a bind treats the thread as taken.
+shutdown, serialized with it so an older snapshot never lands last. On boot
+every conversation is restored **dormant**; those with traffic in the revive
+window (the idle TTL, else an hour) are re-attached at once, so an answer the
+agent produced while switchboard was down still arrives, and the rest
+re-attach on their next message — or on a press on a question they asked —
+rather than opening a stream per thread ever touched. A relay resumes from the
+last answer whose post *completed* (a separate watermark from the one that
+dedupes reconnects, which moves before the post), with the notice watermark
+raised to meet it: a clean shutdown repeats nothing, a crash inside the
+debounce can repeat a post, nothing is skipped. The questions still on screen
+are carried across, so the revived prompt watcher does not ask them again; a
+placeholder a turn had up is taken down, its ticker having died with the
+process; and a stale adopted session is re-measured from its head, as adoption
+is. A dormant record is the conversation's session as surely as a live entry
+is — `session()` revives it before anything opens a new one, and a bind treats
+the thread as taken. Records untouched for 30 days are forgotten.
+
+**Idle conversations release their streams (#87).** Each live entry holds a
+relay and, where prompts are relayed, a second stream; a thread somebody said
+one thing in weeks ago held both until a restart. With durable records an entry
+is a cache, so one idle past `--session-idle-ttl` (default 12h) is moved back
+to dormant and its streams closed; the next message re-attaches it. A turn in
+flight or an answer awaited is never idle, and neither is an adopted session —
+an unattended agent posting into its thread has no human turn to keep the
+entry live, and releasing it would stop its output reaching the thread. A
+message for an entry being reaped cannot race it: `session()` touches an
+existing entry under the lock the reaper sweeps under. Without `--state-dir`
+there is no reaping, and naming a TTL is refused, because before records
+existed dropping an entry leaked its session.
 
 A file the build cannot read (corrupt, or another `version`) is moved aside
 with an error and the run starts empty: refusing to start would turn one bad

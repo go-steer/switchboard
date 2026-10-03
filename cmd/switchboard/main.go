@@ -728,6 +728,11 @@ func runServe(args []string) (err error) {
 			return err
 		}
 		st, err := store.load()
+		if err != nil && !errors.Is(err, errStateUnreadable) {
+			// Permissions, I/O: nothing is known about the file, and moving a
+			// good one aside would lose it. Stop and say so.
+			return fmt.Errorf("state: %w", err)
+		}
 		if err != nil {
 			// Set aside rather than refused: a run that will not start over a
 			// corrupt file is a crash loop that loses every thread anyway.
@@ -743,6 +748,13 @@ func runServe(args []string) (err error) {
 		// traffic counts as recent enough to re-attach at boot.
 		router.setIdleTTL(idleTTL)
 		revived, dormant := router.restore(ctx, st, time.Now())
+		// Written once now, which is the check that the directory is
+		// writable: a volume mounted read-only or owned by someone else
+		// would otherwise start cleanly and lose every write to an ERROR
+		// line, which is durable state that is not durable.
+		if err := router.trySaveState(); err != nil {
+			return fmt.Errorf("state: cannot write %s: %w", store.where(), err)
+		}
 		logf.Infof("state: routing table persisted to %s; restored %d conversation(s): %d re-attached now, %d on their next message",
 			store.where(), revived+dormant, revived, dormant)
 		go router.runPersister(ctx)

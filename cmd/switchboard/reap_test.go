@@ -195,3 +195,45 @@ func TestAPressNeverOpensASession(t *testing.T) {
 		t.Errorf("sessions = %d; a press opened one", n)
 	}
 }
+
+// TestAnAdoptedSessionIsNeverReaped: an unattended agent posting into its
+// thread has no human turn to keep the entry live, and releasing its relay
+// would silently stop its output reaching the thread.
+func TestAnAdoptedSessionIsNeverReaped(t *testing.T) {
+	d := &boundDaemon{resumed: make(chan string, 16)}
+	r, _ := boundRouter(t, d)
+	r.setIdleTTL(time.Hour)
+	r.CommitBind("C0:1", mustSession(t, boundSession), 0)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := r.Handle(ctx, chat.Message{Conversation: "C0:1", Caller: "alice@example.com", Text: "hi"}); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	r.mu.Lock()
+	e := r.sessions["C0:1"]
+	r.mu.Unlock()
+	e.endTurn()
+	if n := r.reapIdle(time.Now().Add(48 * time.Hour)); n != 0 {
+		t.Errorf("reaped %d adopted conversation(s)", n)
+	}
+}
+
+// TestReapingForgetsMonthOldDormantRecords: the record does not grow with
+// every thread ever touched.
+func TestReapingForgetsMonthOldDormantRecords(t *testing.T) {
+	r, _ := boundRouter(t, &boundDaemon{})
+	r.setIdleTTL(time.Hour)
+	now := time.Now()
+	r.mu.Lock()
+	r.dormant["old"] = sessionRecord{Session: "core-agent/old", Touched: now.Add(-dormantMaxAge - time.Hour)}
+	r.dormant["recent"] = sessionRecord{Session: "core-agent/recent", Touched: now.Add(-24 * time.Hour)}
+	r.mu.Unlock()
+	r.reapIdle(now)
+	r.mu.Lock()
+	_, old := r.dormant["old"]
+	_, recent := r.dormant["recent"]
+	r.mu.Unlock()
+	if old || !recent {
+		t.Errorf("dormant old=%v recent=%v; want the month-old record forgotten and the recent one kept", old, recent)
+	}
+}

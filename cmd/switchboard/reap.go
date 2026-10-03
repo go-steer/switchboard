@@ -86,12 +86,25 @@ func (r *Router) reapIdle(now time.Time) int {
 		default:
 			continue // still opening: not idle, just new
 		}
-		if e.err != nil || e.touched.Load() > cutoff || e.turnInFlight() || e.awaitingAnswer() {
+		// Never an adopted session: an unattended agent posting into its
+		// thread has no human turn to keep it live, and releasing its relay
+		// would silently stop its output reaching the thread until somebody
+		// spoke there. Bindings are already capped (maxBindings).
+		if e.adopted || e.err != nil || e.touched.Load() > cutoff || e.turnInFlight() || e.awaitingAnswer() {
 			continue
 		}
 		r.dormant[conv] = e.record()
 		delete(r.sessions, conv)
 		released = append(released, e)
+	}
+	// And forget the conversations nobody has spoken in for a month, so the
+	// record does not grow with every thread ever touched (dormantMaxAge).
+	pruned := false
+	for conv, rec := range r.dormant {
+		if now.Sub(rec.Touched) > dormantMaxAge {
+			delete(r.dormant, conv)
+			pruned = true
+		}
 	}
 	r.mu.Unlock()
 	for _, e := range released {
@@ -103,7 +116,7 @@ func (r *Router) reapIdle(now time.Time) int {
 		e.stopTicker()
 		r.metrics.sessionClosed()
 	}
-	if len(released) > 0 {
+	if len(released) > 0 || pruned {
 		r.markDirty()
 	}
 	return len(released)

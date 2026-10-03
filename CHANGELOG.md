@@ -13,13 +13,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `progress` overrides — is snapshotted to `state.json` (debounced; written
   to a temp file, synced and renamed; once more at shutdown). After a restart
   the next message in a thread goes to the session it had instead of a new
-  one; threads active in the last hour re-attach at boot so an answer
-  produced during the outage is still delivered, older ones on their next
-  message; nothing already delivered is posted twice. An unreadable file is
-  moved aside with an error rather than stopping the run. Also
-  `$SWITCHBOARD_STATE_DIR` and `state_dir` in the config file, and a
-  `deploy/components/durable-state` kustomize component adding the volume.
-  Without it nothing changes, and the banner says threads are in memory.
+  one; recently active threads re-attach at boot so an answer produced during
+  the outage is still delivered, older ones on their next message or on a
+  press. Delivery is at-least-once across a crash and exact across a clean
+  shutdown; questions on screen are not asked again; a frozen placeholder is
+  taken down. An unparseable file is moved aside with an error; an unwritable
+  directory stops the run at startup. Threads untouched for 30 days are
+  forgotten. Also `$SWITCHBOARD_STATE_DIR` and `state_dir` in the config
+  file, and a `deploy/components/durable-state` kustomize component adding
+  the volume. Without it nothing changes, and the banner says threads are in
+  memory.
+- `--session-idle-ttl` releases an **idle conversation's daemon streams**
+  (#87): with `--state-dir`, a thread with no traffic for the TTL (default
+  `12h`, `0` = never) closes its relay and prompt streams and re-attaches on
+  its next message, instead of holding both open until a restart. Turns in
+  flight and outbound-ingress-bound threads are never reaped. A TTL without
+  `--state-dir` is refused. Also `$SWITCHBOARD_SESSION_IDLE_TTL` and
+  `session_idle_ttl` in the config file.
 - `--audit-log` writes an **ingress audit record** (#89): one JSON line per
   turn and per approval press, joining the chat message (the platform's own
   message ID), the asserted caller, the `app/sid` session and the outcome —

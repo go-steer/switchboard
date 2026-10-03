@@ -169,6 +169,7 @@ func splitDecisionRef(ref string) (sess, promptID string, ok bool) {
 // postPrompt puts one pending permission prompt into the thread, once.
 func (r *Router) postPrompt(ctx context.Context, conv string, e *sessionEntry, p approval.Prompt) {
 	body := promptText(p)
+	e.touch()
 	if !e.claimAsk(p.ID, body, p.Kind) {
 		// Already on screen. Every resubscription is seeded with everything
 		// still pending, which is what lets this watcher reconnect without a
@@ -660,6 +661,9 @@ func (r *Router) HandlePress(ctx context.Context, p chat.Press) error {
 		return fmt.Errorf("press in %s names no prompt: %q", p.Conversation, p.DecisionID)
 	}
 	e, err := r.boundSession(ctx, p.Conversation, p.Channel)
+	if err == nil {
+		e.touch()
+	}
 	if err != nil {
 		// Nothing bound under this conversation at all — most often a restart
 		// under a thread whose buttons are still on screen, with nobody having

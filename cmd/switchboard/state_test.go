@@ -19,9 +19,12 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"github.com/go-steer/switchboard/pkg/chat"
 )
@@ -60,8 +63,7 @@ func TestFileStoreRoundTrips(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	if got.Sessions["C0:1"] != want.Sessions["C0:1"] || len(got.Bindings) != 1 || got.Bindings[0] != want.Bindings[0] ||
-		got.Overrides["C0"] != "stream" {
+	if !reflect.DeepEqual(got, want) {
 		t.Errorf("load = %+v\nwant   %+v", got, want)
 	}
 }
@@ -117,7 +119,11 @@ func TestARestartReattachesTheThreadToItsSession(t *testing.T) {
 	}
 	first.setStore(s1)
 	msg := chat.Message{Conversation: "C0:1", Channel: "C0", Caller: "alice@example.com", Text: "status?"}
-	if err := first.Handle(ctx, msg); err != nil {
+	// The first process runs on a context of its own, so it can actually go
+	// away: its relay must not be listening when the agent speaks again.
+	firstCtx, stopFirst := context.WithCancel(ctx)
+	defer stopFirst()
+	if err := first.Handle(firstCtx, msg); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
 	<-d.resumed
@@ -128,7 +134,9 @@ func TestARestartReattachesTheThreadToItsSession(t *testing.T) {
 		t.Fatal("the first process never delivered its answer")
 	}
 	waitForState(t, first, "C0:1", 3)
+	stopFirst()
 	first.saveState()
+	waitForNoStreams(t, d)
 
 	// While it is down, the agent says one more thing.
 	d.publish(agentFrame(5, "and the canary passed"))
@@ -175,6 +183,24 @@ func TestARestartReattachesTheThreadToItsSession(t *testing.T) {
 	}
 	if got := d.creates.Load(); got != 1 {
 		t.Errorf("creates = %d, want 1: the thread kept its session across the restart", got)
+	}
+}
+
+// waitForNoStreams polls until nothing is subscribed to d.
+func waitForNoStreams(t *testing.T, d *boundDaemon) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		d.mu.Lock()
+		n := len(d.streams)
+		d.mu.Unlock()
+		if n == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%d stream(s) still open after the first process stopped", n)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 
@@ -289,5 +315,118 @@ func TestThePersisterWritesAfterAChange(t *testing.T) {
 			t.Fatalf("the change never reached disk: %+v, %v", st, err)
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// TestARevivedConversationDoesNotAskTwice: a question on screen when the
+// process stopped is carried across, so the revived entry's prompt watcher —
+// seeded with everything still pending — does not post it again beside the
+// copy whose buttons are still live.
+func TestARevivedConversationDoesNotAskTwice(t *testing.T) {
+	e := &sessionEntry{ready: make(chan struct{}), sess: testSession}
+	e.claimAsk("p1", "**Permission needed**", "bash")
+	e.claimAsk("p2", "answered already", "bash")
+	e.claimSettle("p2", settledHere)
+
+	rec := e.record()
+	if len(rec.Asked) != 1 || rec.Asked[0].ID != "p1" || rec.Asked[0].Kind != "bash" {
+		t.Fatalf("Asked = %+v, want only the unanswered question, with its kind", rec.Asked)
+	}
+	revived, err := entryFromRecord(rec, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if revived.claimAsk("p1", "**Permission needed**", "bash") {
+		t.Error("the revived entry would ask p1 again")
+	}
+	if got := revived.askKind("p1"); got != "bash" {
+		t.Errorf("askKind(p1) = %q; the kind must survive for the press deadline (#84)", got)
+	}
+}
+
+// TestTheRecordHoldsWhatWasDeliveredNotWhatWasAttempted: relayed moves before
+// the post is made, so a post cut off by shutdown must not be recorded as
+// made — the next process should retry it.
+func TestTheRecordHoldsWhatWasDeliveredNotWhatWasAttempted(t *testing.T) {
+	e := &sessionEntry{ready: make(chan struct{}), sess: testSession}
+	e.relayed.Store(5)
+	e.delivered.Store(3)
+	if got := e.record().Relayed; got != 3 {
+		t.Errorf("recorded watermark = %d, want 3: the answer at 5 was attempted, not delivered", got)
+	}
+}
+
+// TestRevivingClearsAPlaceholderTheRestartLeft: the ticker died with the
+// process, so a "Working…" message a turn had up would otherwise stay frozen
+// in the thread for good.
+func TestRevivingClearsAPlaceholderTheRestartLeft(t *testing.T) {
+	d := &boundDaemon{resumed: make(chan string, 16)}
+	r, fake := boundRouter(t, d)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	r.restore(ctx, routerState{Version: stateVersion, Sessions: map[string]sessionRecord{"C0:1": {
+		Session: "core-agent/s1", Owner: "alice@example.com", Touched: time.Now(), Placeholder: "ts-working",
+	}}}, time.Now())
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		fake.mu.Lock()
+		deleted := append([]chat.MessageRef(nil), fake.deleted...)
+		fake.mu.Unlock()
+		if len(deleted) == 1 && deleted[0].ID == "ts-working" {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("deleted = %+v, want the stale placeholder taken down", deleted)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// TestRestoredBindingsAreCounted: the bindings gauge counts restored ones, or
+// it reads zero with bindings live and goes negative as they are dropped.
+func TestRestoredBindingsAreCounted(t *testing.T) {
+	d := &boundDaemon{}
+	r, _ := boundRouter(t, d)
+	m := newMetrics()
+	r.metrics = m
+	r.restore(context.Background(), routerState{Version: stateVersion,
+		Bindings: []bindingRecord{{Conversation: "C0:2", Session: boundSession, Since: 5}}}, time.Now())
+	if got := testutil.ToFloat64(m.activeBindings); got != 1 {
+		t.Errorf("activeBindings = %v, want 1", got)
+	}
+}
+
+// TestAStateDirThatCannotBeWrittenStopsTheRun: a read-only or foreign-owned
+// volume would otherwise start cleanly and lose every write to a log line.
+func TestAStateDirThatCannotBeWrittenStopsTheRun(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root writes through directory permissions")
+	}
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(dir, 0o700) })
+	r, _ := boundRouter(t, &boundDaemon{})
+	s, err := openFileStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.setStore(s)
+	if err := r.trySaveState(); err == nil {
+		t.Error("a write into a read-only state dir reported success")
+	}
+
+	// And a file that cannot be read for want of permission is not
+	// "unreadable": nothing is known about it, so it must not be set aside.
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(s.path, []byte(`{"version":1}`), 0o000); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.load(); err == nil || errors.Is(err, errStateUnreadable) {
+		t.Errorf("load of an unreadable-by-permission file = %v; want an error that is not errStateUnreadable", err)
 	}
 }

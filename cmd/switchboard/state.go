@@ -68,6 +68,18 @@ const persistDebounce = 500 * time.Millisecond
 // opening a stream for every thread a workspace has ever touched.
 const reviveWindow = time.Hour
 
+// dormantMaxAge is how long a record is kept for a conversation nobody has
+// spoken in. Past it the thread starts fresh if it ever wakes, which is all
+// that was possible before records existed, and the file stops growing with
+// every thread ever touched.
+const dormantMaxAge = 30 * 24 * time.Hour
+
+// errStateUnreadable marks a snapshot that is there but cannot be used —
+// malformed, or another format — as distinct from one that cannot be read at
+// all. Only the first is safe to set aside: a permission or I/O error says
+// nothing about the file, and moving a good one aside would lose it.
+var errStateUnreadable = errors.New("unreadable")
+
 // routerState is the snapshot. Field names are a format a restarted process
 // reads, so they change only additively; a breaking change bumps stateVersion.
 type routerState struct {
@@ -86,13 +98,29 @@ type sessionRecord struct {
 	// an adopted session (sessionEntry.owner).
 	Owner   string `json:"owner,omitempty"`
 	Adopted bool   `json:"adopted,omitempty"`
-	// Relayed and Noticed are the delivery watermarks: the last answer posted
-	// and the last tool notice posted. The stream resumes from Relayed, and
-	// neither watermark lets a replayed event be posted twice.
+	// Relayed and Noticed are the delivery watermarks: the last answer whose
+	// post completed, and the last tool notice posted. The stream resumes from
+	// Relayed, and neither watermark lets a replayed event be posted twice.
 	Relayed int64 `json:"relayed"`
 	Noticed int64 `json:"noticed,omitempty"`
 	// Touched is the last traffic in either direction.
 	Touched time.Time `json:"touched"`
+	// Asked is the questions this conversation has on screen and unanswered.
+	// Without them a revived entry's prompt watcher, seeded with everything
+	// still pending, would post each question again beside the one whose
+	// buttons are still live.
+	Asked []askedRecord `json:"asked,omitempty"`
+	// Placeholder is the progress message a turn in flight had on screen.
+	// Its ticker died with the process, so a revived entry takes it down
+	// rather than leave "Working… 3m" frozen in the thread.
+	Placeholder string `json:"placeholder,omitempty"`
+}
+
+// askedRecord is one unanswered question, as the thread was shown it.
+type askedRecord struct {
+	ID   string `json:"id"`
+	Text string `json:"text,omitempty"`
+	Kind string `json:"kind,omitempty"`
 }
 
 // bindingRecord is one outbound-ingress binding (#38), in bindOrder.
@@ -139,10 +167,10 @@ func (s *fileStore) load() (routerState, error) {
 	}
 	var st routerState
 	if err := json.Unmarshal(raw, &st); err != nil {
-		return routerState{}, fmt.Errorf("%s: %w", s.path, err)
+		return routerState{}, fmt.Errorf("%s: %w: %v", s.path, errStateUnreadable, err)
 	}
 	if st.Version != stateVersion {
-		return routerState{}, fmt.Errorf("%s: version %d, this build reads %d", s.path, st.Version, stateVersion)
+		return routerState{}, fmt.Errorf("%s: %w: version %d, this build reads %d", s.path, errStateUnreadable, st.Version, stateVersion)
 	}
 	return st, nil
 }
@@ -236,12 +264,24 @@ func (r *Router) runPersister(ctx context.Context) {
 // tries again: the gateway keeps routing either way, and what is lost is only
 // the ability to pick up where it was if it restarts before a write succeeds.
 func (r *Router) saveState() {
-	if r.store == nil {
-		return
-	}
-	if err := r.store.save(r.snapshot()); err != nil {
+	if err := r.trySaveState(); err != nil {
 		r.logf.Errorf("state: save to %s: %v", r.store.where(), err)
 	}
+}
+
+// trySaveState is saveState reporting its error, for the write at startup that
+// proves the directory is writable.
+//
+// The snapshot and the write are one step under saveMu. Otherwise a persister
+// write already in progress at shutdown could take its snapshot first and land
+// its file last, over the newer final one.
+func (r *Router) trySaveState() error {
+	if r.store == nil {
+		return nil
+	}
+	r.saveMu.Lock()
+	defer r.saveMu.Unlock()
+	return r.store.save(r.snapshot())
 }
 
 // snapshot captures the routing table. Entries still opening, or whose opening
@@ -288,15 +328,28 @@ func (r *Router) snapshot() routerState {
 
 // record is the entry's durable form.
 func (e *sessionEntry) record() sessionRecord {
-	return sessionRecord{
+	rec := sessionRecord{
 		Channel: e.channel,
 		Session: sessionRef(e.sess),
 		Owner:   e.owner,
 		Adopted: e.adopted,
-		Relayed: e.relayed.Load(),
+		// delivered, not relayed: relayed moves before the post is made, so a
+		// post cut off by shutdown would otherwise be recorded as made.
+		Relayed: e.delivered.Load(),
 		Noticed: e.noticed.Load(),
 		Touched: time.Unix(0, e.touched.Load()).UTC(),
 	}
+	e.qmu.Lock()
+	for id, a := range e.asked {
+		if a.settled == unsettled {
+			rec.Asked = append(rec.Asked, askedRecord{ID: id, Text: a.text, Kind: a.kind})
+		}
+	}
+	e.qmu.Unlock()
+	e.pmu.Lock()
+	rec.Placeholder = e.progressMsg.ID
+	e.pmu.Unlock()
+	return rec
 }
 
 // touch records traffic on the entry, for the snapshot and the revive window.
@@ -323,8 +376,20 @@ func entryFromRecord(rec sessionRecord, channel string) (*sessionEntry, error) {
 	}
 	e.seq.Store(rec.Relayed)
 	e.relayed.Store(rec.Relayed)
+	e.delivered.Store(rec.Relayed)
 	e.noticed.Store(max(rec.Noticed, rec.Relayed))
 	e.touched.Store(rec.Touched.UnixNano())
+	// A new process is a new connection: whatever turn was in flight was not
+	// watched whole by this one, so an answer replayed into it is taken as
+	// the answer rather than as narration awaiting a turn-complete that will
+	// never be replayed (lifecycle frames carry no seq).
+	e.streamGen.Store(1)
+	if len(rec.Asked) > 0 {
+		e.asked = make(map[string]*askRecord, len(rec.Asked))
+		for _, a := range rec.Asked {
+			e.asked[a.ID] = &askRecord{text: a.Text, kind: a.Kind}
+		}
+	}
 	return e, nil
 }
 
@@ -343,12 +408,16 @@ func (r *Router) restore(ctx context.Context, st routerState, now time.Time) (re
 		r.bindings[b.Conversation] = binding{sess: sess, since: b.Since}
 		r.boundTo[b.Session] = b.Conversation
 		r.bindOrder = append(r.bindOrder, b.Conversation)
+		r.metrics.bindRecorded()
 	}
 	r.evictBindings()
 	var recent []string
 	for conv, rec := range st.Sessions {
 		if _, err := parseSessionRef(rec.Session); err != nil {
 			r.logf.Warnf("state: dropping the session of %s: %v", conv, err)
+			continue
+		}
+		if now.Sub(rec.Touched) > dormantMaxAge {
 			continue
 		}
 		r.dormant[conv] = rec
