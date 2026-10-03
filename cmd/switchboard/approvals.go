@@ -595,18 +595,20 @@ func clampRunes(s string, n int) string {
 func (r *Router) HandlePress(ctx context.Context, p chat.Press) error {
 	// One audit line per press, whatever became of it (#89). The question's
 	// session and prompt come off the press itself, so even a refused press
-	// names what it was trying to answer.
+	// names what it was trying to answer. Clamped, because they are read
+	// before anything validates them: a refused press's payload is recorded as
+	// it arrived, and arrived unbounded.
 	rec := auditRecord{
 		Kind:         auditPress,
 		Conversation: p.Conversation,
 		Channel:      p.Channel,
 		Caller:       p.Caller,
 		MessageID:    p.Message.ID,
-		Decision:     p.Option,
+		Decision:     clampRunes(p.Option, promptNameLimit),
 		Outcome:      auditPressError,
 	}
 	if s, id, ok := splitDecisionRef(p.DecisionID); ok {
-		rec.Session, rec.PromptID = s, id
+		rec.Session, rec.PromptID = clampRunes(s, promptNameLimit), clampRunes(id, promptNameLimit)
 	}
 	defer func() { r.audit.record(rec) }()
 

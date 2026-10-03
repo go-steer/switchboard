@@ -281,6 +281,7 @@ func TestDecodeLegacyEvents(t *testing.T) {
 				"user": {"name": "users/123", "type": "HUMAN"},
 				"space": {"name": "spaces/AAA"},
 				"message": {
+					"name": "spaces/AAA/messages/L1",
 					"argumentText": " hello there ",
 					"text": "@switchboard hello there",
 					"thread": {"name": "spaces/AAA/threads/T1"},
@@ -288,11 +289,12 @@ func TestDecodeLegacyEvents(t *testing.T) {
 				}
 			}`,
 			want: inbound{
-				kind:   kindMessage,
-				space:  "spaces/AAA",
-				thread: "spaces/AAA/threads/T1",
-				caller: "users/123",
-				text:   "hello there",
+				kind:        kindMessage,
+				space:       "spaces/AAA",
+				thread:      "spaces/AAA/threads/T1",
+				caller:      "users/123",
+				text:        "hello there",
+				messageName: "spaces/AAA/messages/L1", // carried for the audit record (#89)
 			},
 		},
 		{

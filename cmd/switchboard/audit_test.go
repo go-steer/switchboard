@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -30,6 +31,7 @@ import (
 	"github.com/go-steer/switchboard/internal/logging"
 	"github.com/go-steer/switchboard/pkg/approval"
 	"github.com/go-steer/switchboard/pkg/chat"
+	"github.com/go-steer/switchboard/pkg/daemon"
 )
 
 // syncBuffer is a bytes.Buffer safe to read while the router writes to it.
@@ -126,6 +128,30 @@ func TestAFailedTurnIsRecordedToo(t *testing.T) {
 	if len(got) != 1 || got[0].Outcome != auditInjectFailed || got[0].Status != http.StatusInternalServerError ||
 		got[0].Session != "core-agent/fresh" {
 		t.Fatalf("records = %+v, want one inject_failed with status 500 naming the session", got)
+	}
+}
+
+// TestATurnWithNoSessionIsRecorded: a daemon that will not open a session
+// still leaves a record of the turn somebody tried to start.
+func TestATurnWithNoSessionIsRecorded(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /sessions", func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "no", http.StatusServiceUnavailable)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	dc, err := daemon.New(daemon.Config{BaseURL: srv.URL, BearerToken: "tok", HTTPClient: srv.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	router := NewRouter(dc, &fakeSender{replies: make(chan chat.Reply, 4)}, ProgressOff, nil, nil)
+	audit, buf := testAudit()
+	router.setAudit(audit)
+
+	_ = router.Handle(context.Background(), chat.Message{Conversation: "C0:1", Caller: "alice@example.com", Text: "hi"})
+	got := records(t, buf)
+	if len(got) != 1 || got[0].Outcome != auditNoSession || got[0].Session != "" || got[0].Status != http.StatusServiceUnavailable {
+		t.Fatalf("records = %+v, want one no_session with status 503 and no session", got)
 	}
 }
 

@@ -1128,8 +1128,8 @@ one JSON line per turn and per approval press.
 - **Never the message text.** The chat platform is the system of record for
   content, with its own retention and legal posture; the record is the join.
 - Its own sink, deliberately: `stdout` keeps it apart from the operational log
-  (which is on stderr), and a file is opened for append, created `0640`, never
-  truncated. A run that cannot open it does not start. A write that fails is
+  (which is on stderr), and a file is opened for append, created `0640` (an
+  existing file keeps the mode it has), never truncated. A run that cannot open it does not start. A write that fails is
   logged and dropped rather than failing the turn.
 
 ### Container
