@@ -7,6 +7,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- `docs/slack-app-manifest.yaml`: the Slack app as a manifest — Socket Mode,
+  `app_mention`, interactivity, the `/switchboard` command, and the bot scopes
+  the adapter's API calls need, including the optional `*:history` scopes for
+  restart verification. Paste it to create the app or to update an existing
+  one, so its configuration lives next to the code that depends on it instead
+  of only in the console.
 - **Answers are delivered effectively once across a restart.** With
   `--state-dir`, each answer is keyed by its session and seq and the attempt
   is written to the state file before the post, so a restarted gateway knows
