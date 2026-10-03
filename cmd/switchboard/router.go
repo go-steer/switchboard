@@ -1495,25 +1495,35 @@ func (r *Router) Handle(ctx context.Context, msg chat.Message) (err error) {
 		// conclude it, and the progress message would linger; undo both here.
 		entry.endTurn()
 		r.clearProgress(ctx, entry, msg.Conversation)
-		if entry.adopted && isMissingSession(err) {
-			// The thread was bound to a session the daemon no longer has. Say
-			// so, and drop the binding with the entry: the next message here
-			// opens a session of its own, which is the right thing to do and
-			// the wrong thing to do silently.
+		if isMissingSession(err) {
+			// The daemon no longer has the session this thread was using. Say
+			// so, and drop the entry (and the binding, if it was one): the next
+			// message here opens a session of its own, which is the right thing
+			// to do and the wrong thing to do silently.
+			//
+			// Whoever opened it. adopted decides what the thread is told — a
+			// session it was following versus one switchboard opened for it —
+			// but not whether the entry is still usable: either way it names a
+			// session that does not exist, and kept, it fails every later turn
+			// the same way until the process restarts (#88).
 			//
 			// ERROR, not WARN, though the thread recovers on the next message:
 			// this one did not, and the rubric is about the turn. It also has
 			// to agree with the adapter, which logs Handle's returned error at
 			// ERROR and cannot know this case was already accounted for — two
 			// levels for one event is worse than the stricter of the two.
-			r.logf.Errorf("handle %s: bound session %s is gone from the daemon: %v",
+			r.logf.Errorf("handle %s: session %s is gone from the daemon: %v",
 				msg.Conversation, sessionRef(entry.sess), err)
 			// Only the turn that actually dropped the entry says so. Several
 			// messages can be in flight in the same thread, and each would
 			// otherwise post its own copy of the same notice.
-			if r.discard(msg.Conversation, entry, true) {
-				if sendErr := r.surfaceNotice(ctx, msg.Conversation, bindLostNotice(entry.sess)); sendErr != nil {
-					r.logf.Errorf("handle %s: surface lost binding: %v", msg.Conversation, sendErr)
+			if r.discard(msg.Conversation, entry, entry.adopted) {
+				notice := sessionLostNotice(entry.sess)
+				if entry.adopted {
+					notice = bindLostNotice(entry.sess)
+				}
+				if sendErr := r.surfaceNotice(ctx, msg.Conversation, notice); sendErr != nil {
+					r.logf.Errorf("handle %s: surface lost session: %v", msg.Conversation, sendErr)
 				}
 			}
 			return err
@@ -2513,19 +2523,24 @@ func (r *Router) relay(ctx context.Context, conv string, e *sessionEntry, owner 
 		if ctx.Err() != nil {
 			return // shutting down: not a reconnectable failure
 		}
-		// A bound session the daemon no longer has is not a blip either. There
-		// is nothing to reconnect to, ever, and a thread left quietly polling
-		// for it looks exactly like a thread where nothing has happened yet.
-		// Only bound sessions: one switchboard opened itself cannot outlive the
-		// entry that holds it.
-		if e.adopted && isMissingSession(err) {
-			r.logf.Warnf("relay %s: bound session %s is gone from the daemon: %v", conv, sessionRef(e.sess), err)
-			if r.discard(conv, e, true) {
+		// A session the daemon no longer has is not a blip either. There is
+		// nothing to reconnect to, ever, and a thread left quietly polling for
+		// it looks exactly like a thread where nothing has happened yet. Bound
+		// or not: a session switchboard opened itself can be lost by the daemon
+		// too — one with no resumer, or one deleted — and its entry is just as
+		// dead (#88).
+		if isMissingSession(err) {
+			r.logf.Warnf("relay %s: session %s is gone from the daemon: %v", conv, sessionRef(e.sess), err)
+			if r.discard(conv, e, e.adopted) {
+				notice := sessionStreamLostNotice(e.sess)
+				if e.adopted {
+					notice = bindStreamLostNotice(e.sess)
+				}
 				// On a context of its own: discard has just cancelled ctx,
 				// which is this goroutine's, and the notice is the point.
 				notify, cancel := context.WithTimeout(context.WithoutCancel(ctx), platformTimeout)
-				if sendErr := r.surfaceNotice(notify, conv, bindStreamLostNotice(e.sess)); sendErr != nil {
-					r.logf.Errorf("relay %s: surface lost binding: %v", conv, sendErr)
+				if sendErr := r.surfaceNotice(notify, conv, notice); sendErr != nil {
+					r.logf.Errorf("relay %s: surface lost session: %v", conv, sendErr)
 				}
 				cancel()
 			}

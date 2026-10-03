@@ -924,3 +924,100 @@ func TestARelayThatLosesItsSessionSaysSoAndStops(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 }
+
+// TestALostOwnSessionIsAnnouncedAndDropped is #88: the same failure as
+// TestALostBindingIsAnnouncedAndDropped, for a session switchboard opened
+// itself. The recovery used to be gated on the session having been adopted, so
+// this — the common case — kept the dead entry and failed every later turn in
+// the thread identically until the process restarted.
+func TestALostOwnSessionIsAnnouncedAndDropped(t *testing.T) {
+	d := &boundDaemon{injectStatus: http.StatusNotFound}
+	router, fake := boundRouter(t, d)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	msg := chat.Message{Conversation: "C0:1", Caller: "alice@example.com", Text: "what happened?"}
+	if err := router.Handle(ctx, msg); err == nil {
+		t.Fatal("Handle succeeded against a session the daemon does not have")
+	}
+
+	select {
+	case rep := <-fake.replies:
+		if !strings.Contains(rep.Text, "core-agent/fresh") {
+			t.Errorf("notice = %q, want the session named so an operator can go and look", rep.Text)
+		}
+		if !strings.Contains(rep.Text, "not delivered") {
+			t.Errorf("notice = %q, want it to say the message went nowhere", rep.Text)
+		}
+		if strings.Contains(rep.Text, "tied to") {
+			t.Errorf("notice = %q; this thread was never bound to anything", rep.Text)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the thread was told nothing")
+	}
+
+	router.mu.Lock()
+	_, stillSessioned := router.sessions["C0:1"]
+	router.mu.Unlock()
+	if stillSessioned {
+		t.Error("the dead entry survived; the next turn would reuse it")
+	}
+
+	d.injectStatus = 0
+	if err := router.Handle(ctx, msg); err != nil {
+		t.Fatalf("Handle after the lost session: %v, want the thread usable again", err)
+	}
+	if got := d.creates.Load(); got != 2 {
+		t.Errorf("creates = %d, want 2: the second message must open a session of its own", got)
+	}
+}
+
+// TestARelayThatLosesItsOwnSessionSaysSoAndStops is the stream half of #88: a
+// session switchboard opened, ending in a 404 while nobody is typing, must not
+// be reconnected to forever.
+func TestARelayThatLosesItsOwnSessionSaysSoAndStops(t *testing.T) {
+	d := &boundDaemon{resumed: make(chan string, 8), gone: make(chan struct{})}
+	router, fake := boundRouter(t, d)
+	router.minBackoff = time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := router.Handle(ctx, chat.Message{Conversation: "C0:1", Caller: "alice@example.com", Text: "hi"}); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	select {
+	case <-d.resumed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the relay never subscribed")
+	}
+	close(d.gone)
+
+	select {
+	case rep := <-fake.replies:
+		if !strings.Contains(rep.Text, "core-agent/fresh") {
+			t.Errorf("notice = %q, want the session named", rep.Text)
+		}
+		if !strings.Contains(rep.Text, "Nothing further") {
+			t.Errorf("notice = %q, want it to say nothing more is coming", rep.Text)
+		}
+		if strings.Contains(rep.Text, "tied to") {
+			t.Errorf("notice = %q; this thread was never bound to anything", rep.Text)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the thread was never told its session was gone")
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		router.mu.Lock()
+		sessions := len(router.sessions)
+		router.mu.Unlock()
+		if sessions == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("sessions=%d, want the dead entry dropped so the next message starts fresh", sessions)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}

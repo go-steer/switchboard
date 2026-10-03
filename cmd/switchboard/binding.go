@@ -347,6 +347,16 @@ func bindLostNotice(sess daemon.Session) string {
 		sessionRef(sess))
 }
 
+// sessionLostNotice is bindLostNotice for a session switchboard opened itself.
+// Same fact and the same consequence, but nothing was "tied" to anything: the
+// thread had a session of its own, and it is the daemon that lost it.
+func sessionLostNotice(sess daemon.Session) string {
+	return fmt.Sprintf("⚠️ The agent backend no longer has this thread's session `%s`. "+
+		"That message was not delivered anywhere. The next one here will start a new "+
+		"session, which will not know what happened in this thread.",
+		sessionRef(sess))
+}
+
 // bindStreamLostNotice is the same fact found the other way round: not by a
 // message failing to reach the session, but by its event stream ending in a 404
 // while nobody was typing. Worth its own wording, because no message was lost —
@@ -356,5 +366,14 @@ func bindStreamLostNotice(sess daemon.Session) string {
 	return fmt.Sprintf("⚠️ This thread was tied to agent session `%s`, and the agent backend "+
 		"no longer has it. Nothing further will arrive here from it. The next message here "+
 		"will start a new session, which will not know what happened in this thread.",
+		sessionRef(sess))
+}
+
+// sessionStreamLostNotice is bindStreamLostNotice for a session switchboard
+// opened itself.
+func sessionStreamLostNotice(sess daemon.Session) string {
+	return fmt.Sprintf("⚠️ The agent backend no longer has this thread's session `%s`. "+
+		"Nothing further will arrive here from it. The next message here will start a "+
+		"new session, which will not know what happened in this thread.",
 		sessionRef(sess))
 }
