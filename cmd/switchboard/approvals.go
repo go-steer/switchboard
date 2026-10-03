@@ -169,7 +169,7 @@ func splitDecisionRef(ref string) (sess, promptID string, ok bool) {
 // postPrompt puts one pending permission prompt into the thread, once.
 func (r *Router) postPrompt(ctx context.Context, conv string, e *sessionEntry, p approval.Prompt) {
 	body := promptText(p)
-	if !e.claimAsk(p.ID, body) {
+	if !e.claimAsk(p.ID, body, p.Kind) {
 		// Already on screen. Every resubscription is seeded with everything
 		// still pending, which is what lets this watcher reconnect without a
 		// cursor — and would otherwise put the same question in the thread
@@ -561,6 +561,14 @@ func promptText(p approval.Prompt) string {
 		// approving something a subagent you forgot about wants.
 		b.WriteString("\n_asked by the `" + clampRunes(p.Source, promptNameLimit) + "` subagent_")
 	}
+	if p.Kind == approval.KindControlPlaneWrite {
+		// The answers here are allow-once and deny, and the gate behind this
+		// kind can take a third — mast's write gate accepts an edited call
+		// (#84). A press-only question that let the reader believe those two
+		// were all there is would be uninformed consent with an audit trail,
+		// so it says where the third one is given.
+		b.WriteString("\n_To change what this call will do rather than allow or deny it, answer it at the agent._")
+	}
 	return b.String()
 }
 
@@ -645,7 +653,9 @@ func (r *Router) HandlePress(ctx context.Context, p chat.Press) error {
 		r.logf.Warnf("perms %s: press answers %s, which is no longer this conversation's session", p.Conversation, sess)
 		return r.surfaceNotice(ctx, p.Conversation, noticeStalePress)
 	}
-	ack, err := r.approvals.Respond(ctx, e.sess, p.Caller, promptID, d)
+	rctx, cancel := respondContext(ctx, e.askKind(promptID))
+	defer cancel()
+	ack, err := r.approvals.Respond(rctx, e.sess, p.Caller, promptID, d)
 	if err != nil {
 		if errors.Is(err, approval.ErrNotFound) {
 			// Someone else got there first, or the prompt timed out. Not a
@@ -693,6 +703,30 @@ func (r *Router) HandlePress(ctx context.Context, p chat.Press) error {
 	}
 	r.traceDecision(ctx, e, p, promptID, outcome, settledHere)
 	return nil
+}
+
+// parkRespondTimeout is how long an answer to a control-plane write may take to
+// come back. mast surfaces its durable write-gate parks on /perms as this kind,
+// and answers /perms/respond only after running the resume turn the answer
+// releases — deliberately, so that it and POST /resume agree (#84). Its own
+// guidance is to give that request "the deadline it would give a turn, not the
+// one it would give an acknowledgement". Under the default 30s a resume turn
+// of any length came back as "the agent took that answer but didn't confirm
+// it", which was true and read like a failure.
+//
+// Bounded rather than open-ended, because a press is held for as long as this
+// runs and a hung daemon should still end in a notice. core-agent raises the
+// same kind for writes to its own permission config and answers at once, so
+// the longer deadline costs it nothing.
+const parkRespondTimeout = 15 * time.Minute
+
+// respondContext gives a press's /perms/respond the deadline its prompt kind
+// needs; every other kind keeps the client's default.
+func respondContext(ctx context.Context, kind string) (context.Context, context.CancelFunc) {
+	if kind == approval.KindControlPlaneWrite {
+		return context.WithTimeout(ctx, parkRespondTimeout)
+	}
+	return ctx, func() {}
 }
 
 // boundSession finds the session a conversation already has, without creating

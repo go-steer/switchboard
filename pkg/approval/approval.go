@@ -67,6 +67,10 @@ import (
 type Client struct {
 	cfg  daemon.Config
 	http *http.Client
+
+	// respondDefault overrides respondTimeout; zero means the constant. A
+	// test seam, so the default can be shown to apply without waiting it out.
+	respondDefault time.Duration
 }
 
 // New returns a Client for the same daemon, token and HTTP client as the
@@ -96,8 +100,13 @@ func New(cfg daemon.Config) (*Client, error) {
 	return &Client{cfg: cfg, http: hc}, nil
 }
 
-// respondTimeout bounds one /perms/respond round-trip. Generous, because
-// failing it means a human pressed a button and the agent stayed blocked.
+// respondTimeout bounds one /perms/respond round-trip when the caller's
+// context sets no deadline of its own. Generous, because failing it means a
+// human pressed a button and the agent stayed blocked.
+//
+// Only a default. A daemon may run the turn the answer releases before it
+// replies — mast's durable write gate does, deliberately (#84) — and a caller
+// that knows a prompt is that kind passes a deadline sized for a turn instead.
 const respondTimeout = 30 * time.Second
 
 // Prompt is one pending permission request: a tool call the agent's gate
@@ -535,8 +544,15 @@ func (c *Client) Respond(ctx context.Context, sess daemon.Session, approver, id 
 		return Ack{}, fmt.Errorf("approval: %q is not a decision this daemon accepts", string(d))
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, respondTimeout)
-	defer cancel()
+	if _, ok := ctx.Deadline(); !ok {
+		limit := c.respondDefault
+		if limit == 0 {
+			limit = respondTimeout
+		}
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, limit)
+		defer cancel()
+	}
 
 	body, err := json.Marshal(respondRequest{ID: id, Decision: string(d)})
 	if err != nil {

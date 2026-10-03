@@ -622,7 +622,7 @@ func TestAPressIsAnsweredAsWhoeverPressedIt(t *testing.T) {
 func TestTheRecordOfAskedQuestionsIsBounded(t *testing.T) {
 	e := &sessionEntry{}
 	for i := range maxAskedPrompts + 1 {
-		if !e.claimAsk(fmt.Sprintf("pr%d", i), "a question") {
+		if !e.claimAsk(fmt.Sprintf("pr%d", i), "a question", "") {
 			t.Fatalf("pr%d was refused, and it has not been asked", i)
 		}
 	}
@@ -869,7 +869,7 @@ func hasLine(lines []string, want string) bool {
 // which is what a real one always is — the record of what was asked is what the
 // edit writes underneath.
 func askedPress(e *sessionEntry, promptID, option, body string) chat.Press {
-	e.claimAsk(promptID, body)
+	e.claimAsk(promptID, body, "")
 	return chat.Press{
 		Conversation: "C1:1",
 		// Both adapters set this on every press — Slack refuses one it cannot
@@ -1452,7 +1452,7 @@ func TestARecordedDecisionStopsHoldingTheQuestion(t *testing.T) {
 func TestASlowRecordCannotLandOnTopOfAFirmerOne(t *testing.T) {
 	r, fake, _ := permsRouter(t, newPermsDaemon(t))
 	e := liveEntry(r, "C1:1")
-	e.claimAsk("pr1", "a question")
+	e.claimAsk("pr1", "a question", "")
 	p := chat.Press{
 		Conversation: "C1:1",
 		Message:      chat.MessageRef{Conversation: "C1:1", ID: "ts1"},
@@ -1871,7 +1871,7 @@ func TestAChannelCanTurnApprovalsOnWhereTheDefaultIsOff(t *testing.T) {
 // pressIn is askedPress for a conversation in a named channel.
 func pressIn(e *sessionEntry, channel, promptID string) chat.Press {
 	conv := channel + ":1"
-	e.claimAsk(promptID, "q")
+	e.claimAsk(promptID, "q", "")
 	return chat.Press{
 		Conversation: conv,
 		Channel:      channel,
@@ -2081,5 +2081,44 @@ func TestAChannelsOwnStandingApproversGovernThatChannel(t *testing.T) {
 	}
 	if n := len(d.posts()); n != 1 {
 		t.Fatalf("the channel's own standing approver answered %d times, want 1", n)
+	}
+}
+
+// ------------------------------------------------ mast write-gate parks (#84)
+
+// TestAControlPlaneWriteGetsATurnLengthDeadline: mast answers a park's
+// /perms/respond only after the resume turn, so a press on that kind is given
+// a turn's deadline; every other kind keeps the client's default, which is
+// what leaving the context alone means.
+func TestAControlPlaneWriteGetsATurnLengthDeadline(t *testing.T) {
+	e := &sessionEntry{}
+	e.claimAsk("park1", "q", approval.KindControlPlaneWrite)
+	e.claimAsk("bash1", "q", approval.KindBash)
+
+	ctx, cancel := respondContext(context.Background(), e.askKind("park1"))
+	defer cancel()
+	dl, ok := ctx.Deadline()
+	if !ok || time.Until(dl) < 10*time.Minute {
+		t.Errorf("park deadline = %v (set %v), want a turn's worth", time.Until(dl), ok)
+	}
+	for _, id := range []string{"bash1", "never-asked"} {
+		ctx, cancel := respondContext(context.Background(), e.askKind(id))
+		if _, ok := ctx.Deadline(); ok {
+			t.Errorf("%s: a deadline was set; the client's default should apply", id)
+		}
+		cancel()
+	}
+}
+
+// TestAControlPlaneWriteSaysAThirdAnswerExists: a press-only question must not
+// read as though allow and deny were all there is, when the gate behind it can
+// take an edited call.
+func TestAControlPlaneWriteSaysAThirdAnswerExists(t *testing.T) {
+	park := promptText(approval.Prompt{ID: "p", Kind: approval.KindControlPlaneWrite, Tool: "patch_k8s_resource", Detail: "deploy/api"})
+	if !strings.Contains(park, "change what this call will do") {
+		t.Errorf("park question = %q, want it to say where an edit is given", park)
+	}
+	if bash := promptText(approval.Prompt{ID: "p", Kind: approval.KindBash, Tool: "bash", Detail: "ls"}); strings.Contains(bash, "change what this call will do") {
+		t.Errorf("a bash question grew the edit line: %q", bash)
 	}
 }

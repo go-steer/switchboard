@@ -718,6 +718,15 @@ flashed button and a still-blocked agent: if the answer does not reach the
 daemon, or the thread has moved on to a different session since the question was
 posted, the reason is posted as a notice.
 
+**mast's durable write gate** answers through the same path: a mast daemon
+(v0.9.0 and later) serves its parked write-gate calls on `/perms` as
+`control_plane_write` prompts, so they arrive in the thread as questions with
+*Allow once* and *Deny*, and a press resolves the park. mast replies only after
+the turn the answer releases has run, so switchboard waits up to fifteen
+minutes for that kind of answer rather than its usual thirty seconds. A park
+can also take an *edited* call, which no button offers; the question says to
+give that answer at the agent.
+
 Only sessions whose agent actually has a permission broker are watched, which
 switchboard reads off the capabilities frame the daemon already sends. Nothing
 is relayed for a session that would answer `501`.
