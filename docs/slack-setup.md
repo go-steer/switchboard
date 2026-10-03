@@ -90,6 +90,12 @@ Derived from the API calls the adapter actually makes (`pkg/chat/slack/slack.go`
 | `users:read.email` | bot | the email on that user record |
 | `commands` | bot | the optional native slash command |
 
+Optional, with `--state-dir`: `channels:history`, `groups:history`,
+`im:history` and `mpim:history` let a restarted gateway check a thread for an
+answer the previous process may already have posted, instead of posting it
+again (`conversations.replies`). Without them it posts, logs once that it
+could not check, and the worst case after a crash is one duplicate message.
+
 Only `chat:write` is unconditional. `--caller-id id` asserts the raw Slack user
 ID and never calls `users.info`, so both `users:read*` scopes drop away — at the
 cost of provisioning `U0123ABC` in the daemon instead of an address a human can

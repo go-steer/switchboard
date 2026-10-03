@@ -7,6 +7,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Answers are delivered effectively once across a restart.** With
+  `--state-dir`, each answer is keyed by its session and seq and the attempt
+  is written to the state file before the post, so a restarted gateway knows
+  exactly which answers may already be in the thread. Google Chat drops a
+  repeat natively (the key becomes the message `requestId`). On Slack the key
+  rides in message metadata and only a possibly-posted answer is checked
+  against the thread first — which needs the optional `*:history` scopes;
+  without them, or for a message Slack has not yet returned, the worst case is
+  one duplicate. `chat.Reply` gains `Key` and `Verify`.
 - `--state-dir` makes **conversations survive a restart** (#86). The
   conversation → session routing table — each thread's session, the identity
   its relay subscribes as, its delivery watermarks, plus ingress bindings and

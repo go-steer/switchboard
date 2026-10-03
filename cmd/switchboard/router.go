@@ -527,6 +527,13 @@ type sessionEntry struct {
 	// the state file records, so a post cut off by shutdown is retried by the
 	// next process rather than recorded as done (#86).
 	delivered atomic.Int64
+	// attempted is the highest seq whose answer a post was started for, and
+	// is written to the state file before the post goes out (noteAttempt).
+	// After a restart, an answer in (delivered, attempted] may or may not have
+	// reached the thread, and verifyThrough is that bound: those posts ask the
+	// adapter to check first. Everything past it is certainly new.
+	attempted     atomic.Int64
+	verifyThrough atomic.Int64
 	// noticed is the same watermark for tool activity, kept separate from
 	// relayed on purpose. They dedupe different things — one guards the answer,
 	// the other guards a progress notice — and sharing a counter means a tool
@@ -2069,7 +2076,7 @@ func (r *Router) clearProgress(ctx context.Context, e *sessionEntry, conv string
 // replayed from seq, and believing that absence would strand a live clock under
 // a delivered answer. Failing either, every text ends the turn, as it did
 // before #42.
-func (r *Router) deliverText(ctx context.Context, e *sessionEntry, conv, text string) {
+func (r *Router) deliverText(ctx context.Context, e *sessionEntry, conv, text string, seq int64) {
 	usage, settled := e.takeUsage()
 	// Two questions, and #42 is what happens when they are answered as one.
 	//
@@ -2100,7 +2107,13 @@ func (r *Router) deliverText(ctx context.Context, e *sessionEntry, conv, text st
 	if !r.settingsFor(e.channel).showUsage {
 		usage = nil
 	}
-	_, err := r.out.Send(ctx, chat.Reply{Conversation: conv, Text: text, Usage: usage})
+	_, err := r.out.Send(ctx, chat.Reply{
+		Conversation: conv,
+		Text:         text,
+		Usage:        usage,
+		Key:          answerKey(e.sess, seq),
+		Verify:       seq <= e.verifyThrough.Load(),
+	})
 	r.metrics.recordReply(err)
 	if err != nil {
 		// A failed post should not tear down the stream; log and keep relaying.
@@ -2370,6 +2383,33 @@ func (r *Router) liveOrRevived(ctx context.Context, conv, channel string) (*sess
 	}
 	r.mu.Unlock()
 	return nil, false
+}
+
+// answerKey is an answer's identity across processes: the session and the seq
+// of the event that carried it. The daemon's seq is per session and never
+// reused, so the same answer replayed into a new process gets the same key and
+// the adapter can recognize the repeat (chat.Reply.Key).
+func answerKey(sess daemon.Session, seq int64) string {
+	return fmt.Sprintf("%s#%d", sessionRef(sess), seq)
+}
+
+// noteAttempt records, durably and before the post, that an answer is about to
+// go out. The one synchronous write on the delivery path, and the thing that
+// makes a restart precise: without it the next process cannot tell an answer
+// that may have been posted from one that certainly was not, and would have to
+// check every one or none. Answers are rare enough that a write each is cheap.
+// Without --state-dir there is no next process to tell, and nothing to write.
+func (r *Router) noteAttempt(e *sessionEntry, seq int64) {
+	e.attempted.Store(seq)
+	if r.store == nil {
+		return
+	}
+	if err := r.trySaveState(); err != nil {
+		// Posted regardless: the record is about recovery, and holding up an
+		// answer for it gets the priority backwards. The cost is that a crash
+		// right now could repeat this answer unverified.
+		r.logf.Errorf("state: record the attempt at %s: %v", answerKey(e.sess, seq), err)
+	}
 }
 
 // adoptFrom is the seq an adopted session's relay starts from.
@@ -2690,7 +2730,8 @@ func (r *Router) relay(ctx context.Context, conv string, e *sessionEntry, owner 
 				}
 				e.relayed.Store(reply.Seq)
 				e.touch()
-				r.deliverText(ctx, e, conv, reply.Text)
+				r.noteAttempt(e, reply.Seq)
+				r.deliverText(ctx, e, conv, reply.Text, reply.Seq)
 				if ctx.Err() == nil {
 					e.delivered.Store(reply.Seq)
 					r.markDirty()

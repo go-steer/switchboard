@@ -1001,9 +1001,16 @@ After a restart the next message in a thread goes to the session it had. A
 thread active recently (within `--session-idle-ttl`, or the last hour) is
 re-attached immediately, so anything the agent said while switchboard was down
 is delivered; older threads re-attach when someone next speaks, and a press on
-a question they asked re-attaches them too. Delivery across a restart is
-at-least-once: a clean shutdown repeats nothing, and a crash within half a
-second of a post can repeat that one post, but nothing is skipped. Questions
+a question they asked re-attaches them too. Nothing is skipped, and answers are
+delivered **effectively once**: before each answer is posted, switchboard
+writes down that it is about to, and the answer carries a key built from its
+session and position. On Google Chat the key is the message's `requestId`, so
+Chat itself drops a repeat. On Slack it rides in message metadata, and an
+answer the dead process may have posted is looked for in the thread before it
+is posted again — which needs the optional history scopes (see
+[Slack setup](docs/slack-setup.md)); without them, or if Slack has not yet
+returned a message it accepted, the worst case is one duplicate message.
+Progress notices stay at-least-once. Questions
 still on screen are not asked again, a "Working…" placeholder a turn had up is
 taken down, and ingress bindings and `progress` overrides survive too. The
 directory is created `0700` — the file names who spoke in every thread; a

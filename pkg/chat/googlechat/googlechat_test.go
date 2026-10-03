@@ -43,11 +43,16 @@ type fakeMessenger struct {
 	// assignThread, when set, is the thread the fake reports each created
 	// message landed in — simulating Chat assigning a thread in a flat space.
 	assignThread string
+	// byRequest is every keyed create, so a repeated request ID returns the
+	// earlier message as Chat does; deduped counts those.
+	byRequest map[string]*chatv1.Message
+	deduped   int
 }
 
 type createCall struct {
 	parent, text, thread, fallback string
 	card                           *chatv1.GoogleAppsCardV1Card
+	requestID                      string
 }
 
 type patchCall struct {
@@ -62,7 +67,7 @@ func cardOf(msg *chatv1.Message) *chatv1.GoogleAppsCardV1Card {
 	return msg.CardsV2[0].Card
 }
 
-func (f *fakeMessenger) create(_ context.Context, parent string, msg *chatv1.Message) (*chatv1.Message, error) {
+func (f *fakeMessenger) create(_ context.Context, parent string, msg *chatv1.Message, requestID string) (*chatv1.Message, error) {
 	card := cardOf(msg)
 	if card != nil && f.cardErr != nil {
 		return nil, f.cardErr
@@ -70,17 +75,30 @@ func (f *fakeMessenger) create(_ context.Context, parent string, msg *chatv1.Mes
 	if f.createErr != nil {
 		return nil, f.createErr
 	}
+	// What Chat does with a request ID it has seen: return the message that
+	// request created, and create nothing.
+	if prev, ok := f.byRequest[requestID]; ok && requestID != "" {
+		f.deduped++
+		return prev, nil
+	}
 	thread := ""
 	if msg.Thread != nil {
 		thread = msg.Thread.Name
 	}
 	f.creates = append(f.creates, createCall{
 		parent: parent, text: msg.Text, thread: thread, fallback: msg.FallbackText, card: card,
+		requestID: requestID,
 	})
 	f.n++
 	out := &chatv1.Message{Name: fmt.Sprintf("spaces/AAA/messages/M%d", f.n)}
 	if f.assignThread != "" {
 		out.Thread = &chatv1.Thread{Name: f.assignThread}
+	}
+	if requestID != "" {
+		if f.byRequest == nil {
+			f.byRequest = map[string]*chatv1.Message{}
+		}
+		f.byRequest[requestID] = out
 	}
 	return out, nil
 }
@@ -1246,5 +1264,35 @@ func TestFitsOneMessage(t *testing.T) {
 	}
 	if a.FitsOneMessage(strings.Repeat("x", chatTextLimit+1)) {
 		t.Fatalf("an over-long text does not fit")
+	}
+}
+
+// TestAKeyedReplyPostedTwiceIsOneMessage: Chat deduplicates on the request ID,
+// so the same reply posted again — after a crash, by the next process — is a
+// no-op. Each part of a chunked reply carries its own ID.
+func TestAKeyedReplyPostedTwiceIsOneMessage(t *testing.T) {
+	f := &fakeMessenger{}
+	a := newTestAdapter(f)
+	long := strings.Repeat("word ", chatTextLimit/5+50) // two chunks
+	r := chat.Reply{Conversation: "spaces/AAA:spaces/AAA/threads/T1", Text: long, Key: "core-agent/s1#7"}
+	if _, err := a.Send(context.Background(), r); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.creates) != 2 || f.creates[0].requestID == "" || f.creates[0].requestID == f.creates[1].requestID {
+		t.Fatalf("creates = %+v, want two parts with distinct request IDs", f.creates)
+	}
+	if _, err := a.Send(context.Background(), r); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.creates) != 2 || f.deduped != 2 {
+		t.Errorf("after a repeat: creates = %d, deduped = %d; want 2 and 2", len(f.creates), f.deduped)
+	}
+
+	// An unkeyed reply carries no ID and is never deduplicated.
+	if _, err := a.Send(context.Background(), chat.Reply{Conversation: r.Conversation, Text: "hi"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.creates[len(f.creates)-1].requestID; got != "" {
+		t.Errorf("an unkeyed reply sent request ID %q", got)
 	}
 }
