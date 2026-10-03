@@ -358,6 +358,10 @@ type Router struct {
 	metrics *metrics
 	logf    logging.Logf
 
+	// parkWait overrides parkRespondTimeout; zero means the constant. A test
+	// seam.
+	parkWait time.Duration
+
 	// defaults are the channel-scopable settings as they apply to a channel
 	// with nothing said about it, and byChannel is what a config file said
 	// about the ones it named (#71). Both are written once at startup — by
@@ -950,12 +954,15 @@ const (
 type askRecord struct {
 	text    string
 	settled settleState
+	// kind is the prompt's approval.Kind, kept because one kind's answer can
+	// take a turn's time to come back (respondDeadline).
+	kind string
 }
 
 // claimAsk reports whether this prompt is one the thread has not been shown
 // yet, and records it along with what the thread was shown. See
 // sessionEntry.asked.
-func (e *sessionEntry) claimAsk(id, text string) bool {
+func (e *sessionEntry) claimAsk(id, text, kind string) bool {
 	e.qmu.Lock()
 	defer e.qmu.Unlock()
 	if e.asked[id] != nil {
@@ -967,8 +974,19 @@ func (e *sessionEntry) claimAsk(id, text string) bool {
 	if e.asked == nil {
 		e.asked = make(map[string]*askRecord)
 	}
-	e.asked[id] = &askRecord{text: text}
+	e.asked[id] = &askRecord{text: text, kind: kind}
 	return true
+}
+
+// askKind returns the kind of a prompt this entry posted, or "" for one it
+// has no record of.
+func (e *sessionEntry) askKind(id string) string {
+	e.qmu.Lock()
+	defer e.qmu.Unlock()
+	if rec := e.asked[id]; rec != nil {
+		return rec.kind
+	}
+	return ""
 }
 
 // releaseAsk undoes a claim whose question never made it into the thread.

@@ -698,3 +698,26 @@ func TestStanding(t *testing.T) {
 		}
 	}
 }
+
+// TestRespondTakesTheCallersDeadline: a daemon that runs the released turn
+// before it replies — mast's write gate does (#84) — needs a deadline sized
+// for a turn, and a caller that knows it passes one. The default applies only
+// when the caller set none; before, it capped every deadline, so a resume turn
+// longer than it came back as an unconfirmed answer.
+func TestRespondTakesTheCallersDeadline(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(150 * time.Millisecond) // the resume turn
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"acknowledged":true,"approver":"alice@example.com"}`)
+	})
+	c.respondDefault = 30 * time.Millisecond
+
+	if _, err := c.Respond(context.Background(), testSession, "alice@example.com", "p1", AllowOnce); err == nil {
+		t.Fatal("with no deadline of its own, Respond outlived its default")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if _, err := c.Respond(ctx, testSession, "alice@example.com", "p1", AllowOnce); err != nil {
+		t.Fatalf("Respond under a turn-length deadline: %v, want it to wait for the turn", err)
+	}
+}

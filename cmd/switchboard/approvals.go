@@ -169,7 +169,7 @@ func splitDecisionRef(ref string) (sess, promptID string, ok bool) {
 // postPrompt puts one pending permission prompt into the thread, once.
 func (r *Router) postPrompt(ctx context.Context, conv string, e *sessionEntry, p approval.Prompt) {
 	body := promptText(p)
-	if !e.claimAsk(p.ID, body) {
+	if !e.claimAsk(p.ID, body, p.Kind) {
 		// Already on screen. Every resubscription is seeded with everything
 		// still pending, which is what lets this watcher reconnect without a
 		// cursor — and would otherwise put the same question in the thread
@@ -561,6 +561,16 @@ func promptText(p approval.Prompt) string {
 		// approving something a subagent you forgot about wants.
 		b.WriteString("\n_asked by the `" + clampRunes(p.Source, promptNameLimit) + "` subagent_")
 	}
+	if p.Kind == approval.KindControlPlaneWrite {
+		// The answers here are allow-once and deny, and the gate behind this
+		// kind can take a third — mast's write gate accepts an edited call
+		// (#84). A press-only question that let the reader believe those two
+		// were all there is would be uninformed consent with an audit trail,
+		// so it says where the third one is given. Conditionally, because
+		// core-agent raises the same kind for writes to its own permission
+		// config and has no third answer: the kind cannot tell the two apart.
+		b.WriteString("\n_If this agent's gate also takes an edited call — mast's write gate does — that answer is given at the agent, not here._")
+	}
 	return b.String()
 }
 
@@ -645,7 +655,10 @@ func (r *Router) HandlePress(ctx context.Context, p chat.Press) error {
 		r.logf.Warnf("perms %s: press answers %s, which is no longer this conversation's session", p.Conversation, sess)
 		return r.surfaceNotice(ctx, p.Conversation, noticeStalePress)
 	}
-	ack, err := r.approvals.Respond(ctx, e.sess, p.Caller, promptID, d)
+	kind := e.askKind(promptID)
+	rctx, cancel := r.respondContext(ctx, kind)
+	defer cancel()
+	ack, err := r.approvals.Respond(rctx, e.sess, p.Caller, promptID, d)
 	if err != nil {
 		if errors.Is(err, approval.ErrNotFound) {
 			// Someone else got there first, or the prompt timed out. Not a
@@ -662,7 +675,7 @@ func (r *Router) HandlePress(ctx context.Context, p chat.Press) error {
 		// and without this the person who pressed it watches an agent stay
 		// blocked with nothing anywhere to say the answer did not land.
 		notice := noticePressFailed
-		if errors.Is(err, approval.ErrMaybeApplied) {
+		if errors.Is(err, approval.ErrMaybeApplied) || turnHeldPress(kind, err) {
 			notice = noticeMaybeApplied
 		}
 		if nerr := r.surfaceNotice(ctx, p.Conversation, notice); nerr != nil {
@@ -693,6 +706,47 @@ func (r *Router) HandlePress(ctx context.Context, p chat.Press) error {
 	}
 	r.traceDecision(ctx, e, p, promptID, outcome, settledHere)
 	return nil
+}
+
+// parkRespondTimeout is how long an answer to a control-plane write may take to
+// come back. mast surfaces its durable write-gate parks on /perms as this kind,
+// and answers /perms/respond only after running the resume turn the answer
+// releases — deliberately, so that it and POST /resume agree (#84). Its own
+// guidance is to give that request "the deadline it would give a turn, not the
+// one it would give an acknowledgement". Under the default 30s, a resume turn
+// longer than that was cut off mid-run, and because a deadline hit before the
+// reply is a transport error, the thread was told "that answer didn't reach
+// the agent — try pressing again" about an answer that had.
+//
+// Bounded rather than open-ended, because a press is held for as long as this
+// runs and a hung daemon should still end in a notice. core-agent raises the
+// same kind for writes to its own permission config and answers at once, so
+// the longer deadline costs it nothing.
+const parkRespondTimeout = 15 * time.Minute
+
+// respondContext gives a press's /perms/respond the deadline its prompt kind
+// needs; every other kind keeps the client's default.
+func (r *Router) respondContext(ctx context.Context, kind string) (context.Context, context.CancelFunc) {
+	if kind == approval.KindControlPlaneWrite {
+		wait := r.parkWait
+		if wait <= 0 {
+			wait = parkRespondTimeout
+		}
+		return context.WithTimeout(ctx, wait)
+	}
+	return ctx, func() {}
+}
+
+// turnHeldPress reports whether a failed answer to this kind may nonetheless
+// have been applied. mast runs the released turn on the request itself and
+// consumes the park when the answer is appended, not when the turn finishes,
+// so a request that ran out of time or was cancelled — a deadline, a
+// shutdown — was received and acted on even though no reply came back. Telling
+// the thread to press again would be wrong twice: the park is spent, and the
+// retry would find nothing.
+func turnHeldPress(kind string, err error) bool {
+	return kind == approval.KindControlPlaneWrite &&
+		(errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled))
 }
 
 // boundSession finds the session a conversation already has, without creating

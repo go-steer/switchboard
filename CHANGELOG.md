@@ -94,6 +94,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   HTTP deployment would drop every command while the fixtures stayed green.
 
 ### Fixed
+- An answer to a **mast write-gate park** is no longer cut off by a slow
+  resume turn and then reported as undelivered (#84). mast serves its durable
+  parks on `/perms` as `control_plane_write` prompts and replies to
+  `/perms/respond` only after the turn the answer releases has run, on the
+  request itself; switchboard capped every respond at 30 seconds, so a longer
+  turn was cancelled mid-run and the thread was told "that answer didn't reach
+  the agent — try pressing again" about an answer that had. A press on that
+  kind now waits up to fifteen minutes, one that still runs out (or is cut by
+  shutdown) is reported as possibly in force rather than as worth retrying,
+  and `approval.Client.Respond` honours a caller's own deadline instead of
+  capping it. The question for that kind also says that, where the gate takes
+  an edited call — mast's does, and no button offers it — that answer is given
+  at the agent.
 - Bumped `google.golang.org/grpc` to v1.83.1 (GO-2026-6348, heap exhaustion
   via HTTP/2 DATA frame fragmentation, reachable through the Pub/Sub
   subscriber; `govulncheck` was failing the build against v1.83.0).
