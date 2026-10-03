@@ -463,6 +463,12 @@ type sessionEntry struct {
 	// Set once, at construction, under Router.mu.
 	adopted bool
 
+	// owner is the identity the relay subscribes as: the caller who created
+	// the session, or empty for an adopted one. It is what a missing-session
+	// answer is checked against before the entry is given up on (sessionGone).
+	// Set before ready is closed, like sess.
+	owner string
+
 	// stop ends this entry's relay goroutine. The relay otherwise runs for the
 	// life of the process, which is right for a session that keeps answering;
 	// an entry that is discarded (a binding the daemon has lost) has to take its
@@ -1495,7 +1501,7 @@ func (r *Router) Handle(ctx context.Context, msg chat.Message) (err error) {
 		// conclude it, and the progress message would linger; undo both here.
 		entry.endTurn()
 		r.clearProgress(ctx, entry, msg.Conversation)
-		if isMissingSession(err) {
+		if isMissingSession(err) && r.sessionGone(ctx, entry, msg.Caller) {
 			// The daemon no longer has the session this thread was using. Say
 			// so, and drop the entry (and the binding, if it was one): the next
 			// message here opens a session of its own, which is the right thing
@@ -1532,6 +1538,31 @@ func (r *Router) Handle(ctx context.Context, msg chat.Message) (err error) {
 		return err
 	}
 	return nil
+}
+
+// sessionGone reports whether a 404 that caller got from the entry's session
+// means the session is gone, rather than that caller is not let in.
+//
+// The daemon cannot be asked to tell the two apart: under ACL enforcement it
+// refuses a caller with the same 404 a missing session gets, deliberately, so
+// that a refusal reveals nothing about which sessions exist. So the second
+// person to post in a thread — not the session's owner, and not a contributor,
+// since switchboard adds none — gets exactly the answer a lost session gives,
+// and discarding on it would throw away the owner's working session and open
+// one the owner will be refused from in turn.
+//
+// The relay's identity settles it. It is the one this process subscribes as —
+// the creator for a session switchboard opened, none for one it adopted — and
+// it is admitted, or the relay would not be running. A 404 for that identity
+// too is the session; anything else, including a probe that fails some other
+// way, is not proof of a loss and leaves the entry alone. The probe is skipped
+// when the caller already is that identity, since its 404 is the answer.
+func (r *Router) sessionGone(ctx context.Context, e *sessionEntry, caller string) bool {
+	if !e.adopted && caller == e.owner {
+		return true
+	}
+	_, err := r.client.HeadSeq(ctx, e.sess, e.owner)
+	return isMissingSession(err)
 }
 
 // isMissingSession reports whether the daemon answered "no such session"
@@ -2167,6 +2198,7 @@ func (r *Router) session(ctx context.Context, conv, channel, caller string) (*se
 		close(e.ready)
 		return e, e.err
 	}
+	e.owner = caller
 	r.metrics.sessionOpened()
 	r.startRelay(ctx, conv, e, caller)
 	close(e.ready)
@@ -2539,6 +2571,11 @@ func (r *Router) relay(ctx context.Context, conv string, e *sessionEntry, owner 
 				// On a context of its own: discard has just cancelled ctx,
 				// which is this goroutine's, and the notice is the point.
 				notify, cancel := context.WithTimeout(context.WithoutCancel(ctx), platformTimeout)
+				// Nothing will ever conclude a turn that was waiting on this
+				// stream, so take its placeholder down rather than leave a
+				// frozen "Working…" above the notice that explains why.
+				e.endTurn()
+				r.clearProgress(notify, e, conv)
 				if sendErr := r.surfaceNotice(notify, conv, notice); sendErr != nil {
 					r.logf.Errorf("relay %s: surface lost session: %v", conv, sendErr)
 				}

@@ -66,7 +66,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   process restarted. Its relay, likewise, reconnected forever to a stream that
   could never return. Both paths now drop the entry, unbind only if it was a
   binding, and tell the thread; the wording still distinguishes a session the
-  thread was following from one opened for it.
+  thread was following from one opened for it, and a turn left waiting on a
+  lost stream has its "Working…" placeholder taken down.
+
+  A 404 on inject is no longer taken at its word. Under ACL enforcement
+  core-agent refuses a caller with the same 404 a missing session gets, so
+  the second person to reply in someone else's thread looks exactly like a
+  lost session — for adopted sessions this was already misread. The router
+  now confirms by probing the session as the identity its relay subscribes
+  as, and keeps the entry unless that probe is refused too; the refused
+  caller gets the ordinary failed-turn notice.
 - The Google Chat decoder reads a command ID spelled as a whole-number float
   (`"appCommandId": 100.0`), which is how proto-JSON — and so the HTTP ingress
   #29 is building towards — serializes the integer Pub/Sub delivers as `100`.
