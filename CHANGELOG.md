@@ -41,9 +41,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   refuses is told **Not a standing approver** and can still answer for the
   request. Also `$SWITCHBOARD_STANDING_APPROVERS` (an empty value is refused,
   like `$SWITCHBOARD_APPROVERS`) and `standing_approvers` in the config file,
-  per channel too. Defaults to `channel` — no tighter than `--approvers` — so
-  nothing changes on upgrade, and the approvals banner now says on every start
-  whether a standing grant needs more than any other answer.
+  per channel too. `nobody` turns permanent grants from chat off and keeps
+  one-shot approvals. Defaults to `channel` — no tighter than `--approvers` —
+  so nothing changes on upgrade, and the approvals banner now says on every
+  start whether a standing grant needs more than any other answer, and warns
+  when no approver is also a standing approver.
 - Google Chat can receive over **HTTP** instead of Pub/Sub (#29):
   `--googlechat-ingress http` serves `POST /chat` on `--googlechat-listen`, and
   the Chat app's connection settings name that URL instead of a topic. Same

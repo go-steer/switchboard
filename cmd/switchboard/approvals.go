@@ -344,6 +344,9 @@ const (
 	// session, and says the narrower ones are still open to the presser — the
 	// question is not stuck, it is just not theirs to make permanent.
 	noticeNotStandingApprover = "⛔ **Not a standing approver** — that answer wasn't sent. A grant that outlasts this session needs someone on this gateway's standing-approver list; you can still answer for this request."
+	// noticeNoStandingGrants is the same refusal where the list is "nobody":
+	// pointing at a list with no one on it would send somebody looking for it.
+	noticeNoStandingGrants = "⛔ **Permanent grants are off here** — that answer wasn't sent. You can still answer for this request."
 )
 
 // envStandingApprovers is the environment alternative to --standing-approvers.
@@ -375,10 +378,16 @@ type approverPolicy struct {
 	// (chat.CallerMode — an email by default, a platform ID under --caller-id)
 	// and folded to lower case at both ends. Empty is the open posture.
 	allowed map[string]bool
+
+	// none admits nobody. Only a standing-approver list can be set to it
+	// ("nobody"): an approver list has no use for it, since leaving
+	// --approvals off already means no one answers, but nothing else can say
+	// "no permanent grants from chat at all".
+	none bool
 }
 
 // open reports whether anyone who can post in the conversation may answer.
-func (p approverPolicy) open() bool { return len(p.allowed) == 0 }
+func (p approverPolicy) open() bool { return len(p.allowed) == 0 && !p.none }
 
 // allows reports whether this asserted identity may answer a prompt.
 //
@@ -387,6 +396,9 @@ func (p approverPolicy) open() bool { return len(p.allowed) == 0 }
 // attribute is exactly the press a named list is there to exclude, while under
 // the open posture attribution was never what granted it.
 func (p approverPolicy) allows(caller string) bool {
+	if p.none {
+		return false
+	}
 	if p.open() {
 		return true
 	}
@@ -458,9 +470,61 @@ func parseApproverList(fields []string, mode chat.CallerMode) (approverPolicy, e
 	case channel:
 		return approverPolicy{}, nil
 	case len(allowed) == 0:
-		return approverPolicy{}, errors.New(`names nobody: pass "channel" to let anyone in the conversation answer`)
+		return approverPolicy{}, errNamesNobody
 	}
 	return approverPolicy{allowed: allowed}, nil
+}
+
+// errNamesNobody is an approver list with no entries in it.
+var errNamesNobody = errors.New(`names nobody: pass "channel" to let anyone in the conversation answer`)
+
+// standingNobody is the --standing-approvers value admitting no one.
+const standingNobody = "nobody"
+
+// parseStandingList is parseApproverList for a standing-approver list (#85),
+// which differs in two places. "nobody" is a value — permanent grants from chat
+// switched off while one-shot approvals stay on — and an empty list's error
+// says what "channel" means here, which is "no tighter than the approver
+// list" rather than "anyone in the conversation".
+func parseStandingList(fields []string, mode chat.CallerMode) (approverPolicy, error) {
+	var named []string
+	nobody := false
+	for _, f := range fields {
+		switch strings.ToLower(strings.TrimSpace(f)) {
+		case "":
+		case standingNobody:
+			nobody = true
+		default:
+			named = append(named, f)
+		}
+	}
+	if nobody {
+		if len(named) > 0 {
+			return approverPolicy{}, fmt.Errorf("%q cannot be combined with other entries", standingNobody)
+		}
+		return approverPolicy{none: true}, nil
+	}
+	p, err := parseApproverList(fields, mode)
+	if errors.Is(err, errNamesNobody) {
+		return approverPolicy{}, fmt.Errorf(`names nobody: pass "channel" for no tighter than the approver list, or %q for no standing grants at all`, standingNobody)
+	}
+	return p, err
+}
+
+// unreachableStanding reports whether no approver can also give a standing
+// answer: both lists name people and none is on both, so every allow-always
+// press would be refused. Fails closed, but it is a configuration mistake only
+// startup can see, and a button that can never work is worth a line.
+func unreachableStanding(approvers, standing approverPolicy) bool {
+	if approvers.open() || standing.open() || standing.none {
+		return false
+	}
+	for id := range standing.allowed {
+		if approvers.allowed[id] {
+			return false
+		}
+	}
+	return true
 }
 
 // promptDetailLimit bounds the agent-controlled detail put in a message. The
@@ -551,7 +615,11 @@ func (r *Router) HandlePress(ctx context.Context, p chat.Press) error {
 		// with the approver check, before the prompt is located, for the same
 		// reason. The narrower answers on the same question stay available.
 		r.logf.Warnf("perms %s: press by %q is not a standing approver (%s)", p.Conversation, p.Caller, d)
-		return r.surfaceNotice(ctx, p.Conversation, noticeNotStandingApprover)
+		notice := noticeNotStandingApprover
+		if settings.standing.none {
+			notice = noticeNoStandingGrants
+		}
+		return r.surfaceNotice(ctx, p.Conversation, notice)
 	}
 	sess, promptID, ok := splitDecisionRef(p.DecisionID)
 	if !ok {

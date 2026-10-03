@@ -168,8 +168,9 @@ func runServe(args []string) (err error) {
 			"asserts (emails, or platform IDs under --caller-id \"id\")")
 	standingApprovers := fs.String("standing-approvers", approversChannel,
 		"who may give an answer that outlives the session (allow-always), on top of "+
-			"--approvers: \"channel\" for no tighter than --approvers, or a comma-separated "+
-			"list of asserted identities, who must also be approvers")
+			"--approvers: \"channel\" for no tighter than --approvers, \"nobody\" for no "+
+			"permanent grants from chat, or a comma-separated list of asserted identities, "+
+			"who must also be approvers")
 	googleProject := fs.String("google-project", "",
 		"GCP project hosting the Google Chat Pub/Sub subscription (--platform googlechat)")
 	googleSub := fs.String("google-subscription", "",
@@ -339,7 +340,7 @@ func runServe(args []string) (err error) {
 	if cfg.Defaults.StandingApprovers != nil {
 		fileStanding = "defaults.standing_approvers"
 	}
-	standing, err := parseApproverList(standingFields, callerMode)
+	standing, err := parseStandingList(standingFields, callerMode)
 	if err != nil {
 		return fmt.Errorf("invalid value for %s: %w", res.origin("standing-approvers", envStandingApprovers, fileStanding), err)
 	}
@@ -604,13 +605,25 @@ func runServe(args []string) (err error) {
 		// see — it is the shipped default, and it is a standing grant for
 		// anyone who may approve.
 		if inbound {
-			if standing.open() {
+			switch {
+			case standing.none:
+				logf.Infof("approvals: answers that outlive the session (allow-always) are off; nobody can give one from chat")
+			case standing.open():
 				logf.Infof("approvals: an answer that outlives the session (allow-always) needs no more than any other; narrow it with --standing-approvers")
-			} else {
+			default:
 				logf.Infof("approvals: an answer that outlives the session (allow-always) needs one of %d named standing approver(s), who must also be approvers", len(standing.allowed))
 			}
-			if n := standingSpread(byChannel); n > 0 {
-				logf.Infof("approvals: %d configured channel(s) name their own standing approvers", n)
+			if open, named, none := standingSpread(cfg, byChannel); open+named+none > 0 {
+				logf.Infof("approvals: %d configured channel(s) set their own standing approvers: %d let any approver make a grant permanent, %d name who may, %d allow none",
+					open+named+none, open, named, none)
+			}
+			// Fails closed, so nothing is granted by mistake — but every
+			// allow-always button in these rooms is one nobody can press.
+			if *approvals && unreachableStanding(policy, standing) {
+				logf.Warnf("approvals: no approver is also a standing approver, so allow-always can never be given")
+			}
+			if n := unreachableChannels(byChannel); n > 0 {
+				logf.Warnf("approvals: in %d configured channel(s) no approver is also a standing approver, so allow-always can never be given there", n)
 			}
 		}
 	} else {

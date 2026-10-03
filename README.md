@@ -668,9 +668,11 @@ Anyone in the room can approve a call, deny it, or grant the rest of the
 session; only Ana can save a grant. Somebody else pressing *Always allow* is
 told **Not a standing approver** and can still answer for the request itself.
 The list only narrows — a standing press has to pass `--approvers` as well, so
-naming someone here who is not an approver does not let them in. It defaults to
-`channel`, which means no tighter than `--approvers`, and the startup banner
-says which posture a run has:
+naming someone here who is not an approver does not let them in (a run whose
+two lists share nobody says so at startup, since its *Always allow* buttons can
+never work). `nobody` switches permanent grants from chat off while leaving
+one-shot approvals on. It defaults to `channel`, which means no tighter than
+`--approvers`, and the startup banner says which posture a run has:
 
 ```
 2026-10-03T09:00:00.000Z INFO  switchboard: approvals: an answer that outlives the session (allow-always) needs one of 1 named standing approver(s), who must also be approvers

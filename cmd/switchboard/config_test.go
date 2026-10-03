@@ -469,6 +469,8 @@ func TestAChannelStandingApproverListReplacesTheDefault(t *testing.T) {
 	cfg := &Config{Channels: map[string]ChannelConfig{
 		"C1": {StandingApprovers: []string{"ben@example.com"}},
 		"C2": {Name: "says nothing about it"},
+		"C3": {StandingApprovers: []string{approversChannel}},
+		"C4": {StandingApprovers: []string{standingNobody}},
 	}}
 	got, err := channelsFrom(cfg, def, "slack", chat.CallerEmail)
 	if err != nil {
@@ -480,8 +482,16 @@ func TestAChannelStandingApproverListReplacesTheDefault(t *testing.T) {
 	if s := got["C2"].standing; !s.allows("ana@example.com") || s.allows("ben@example.com") {
 		t.Errorf("C2 standing = %+v, want the default", s)
 	}
-	if n := standingSpread(got); n != 2 {
-		t.Errorf("standingSpread = %d, want 2 (both relay prompts with a narrowed list)", n)
+	if !got["C3"].standing.open() {
+		t.Errorf("C3 standing = %+v, want widened back to the approver list", got["C3"].standing)
+	}
+	if s := got["C4"].standing; !s.none || s.allows("ana@example.com") {
+		t.Errorf("C4 standing = %+v, want nobody", s)
+	}
+	// Explicit blocks only: C2 inherits and is not "its own"; C3 widening a
+	// narrowed default is exactly the fact the banner line is for.
+	if open, named, none := standingSpread(cfg, got); open != 1 || named != 1 || none != 1 {
+		t.Errorf("standingSpread = open %d named %d none %d, want 1 1 1", open, named, none)
 	}
 
 	_, err = channelsFrom(&Config{Channels: map[string]ChannelConfig{

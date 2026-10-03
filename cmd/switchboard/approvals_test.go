@@ -1884,6 +1884,87 @@ func pressIn(e *sessionEntry, channel, promptID string) chat.Press {
 
 // ------------------------------------------------ standing approvers (#85)
 
+// TestStandingNobodyTurnsPermanentGrantsOff: "nobody" refuses every standing
+// press, with a notice that does not send anyone looking for a list, while the
+// one-shot answers stay open.
+func TestStandingNobodyTurnsPermanentGrantsOff(t *testing.T) {
+	d := newPermsDaemon(t)
+	r, fake, _ := permsRouter(t, d)
+	none, err := parseStandingList([]string{standingNobody}, chat.CallerEmail)
+	if err != nil {
+		t.Fatalf("parseStandingList(nobody): %v", err)
+	}
+	r.setStandingApprovers(none)
+	e := liveEntryIn(r, "C1:1", "C1")
+
+	if err := r.HandlePress(context.Background(), pressWith(e, "pr1", approval.AllowAlways)); err != nil {
+		t.Fatalf("HandlePress: %v", err)
+	}
+	if got := drainNotice(t, fake); got != noticeNoStandingGrants {
+		t.Errorf("the thread was told %q, want %q", got, noticeNoStandingGrants)
+	}
+	if err := r.HandlePress(context.Background(), pressWith(e, "pr1", approval.AllowOnce)); err != nil {
+		t.Fatalf("HandlePress: %v", err)
+	}
+	if n := len(d.posts()); n != 1 {
+		t.Fatalf("posts = %d, want only the one-shot answer", n)
+	}
+}
+
+func TestParseStandingList(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		fields []string
+		want   string // error substring; "" for success
+	}{
+		{"nobody", []string{"nobody"}, ""},
+		{"nobody, any case", []string{" NoBody "}, ""},
+		{"nobody with names", []string{"nobody", "ana@example.com"}, "cannot be combined"},
+		{"channel", []string{"channel"}, ""},
+		{"named", []string{"ana@example.com"}, ""},
+		// The empty list's error says what "channel" means for this list.
+		{"empty", []string{" ", ""}, "no tighter than the approver list"},
+		{"junk", []string{"ana@example.com ben@example.com"}, "not one identity"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parseStandingList(tc.fields, chat.CallerEmail)
+			switch {
+			case tc.want == "" && err != nil:
+				t.Errorf("err = %v, want none", err)
+			case tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)):
+				t.Errorf("err = %v, want it to mention %q", err, tc.want)
+			}
+		})
+	}
+	// And "nobody" is not an approver-list value: it would be an approver
+	// called nobody, refused as not an email.
+	if _, err := parseApprovers("nobody", chat.CallerEmail); err == nil {
+		t.Error(`--approvers "nobody" was accepted`)
+	}
+}
+
+// TestUnreachableStanding: two named lists with no one on both make every
+// allow-always unpressable, which startup warns about.
+func TestUnreachableStanding(t *testing.T) {
+	ana, ben := mustApprovers(t, "ana@example.com"), mustApprovers(t, "ben@example.com")
+	both := mustApprovers(t, "ana@example.com,ben@example.com")
+	for _, tc := range []struct {
+		name                string
+		approvers, standing approverPolicy
+		want                bool
+	}{
+		{"disjoint", ana, ben, true},
+		{"overlap", both, ben, false},
+		{"open approvers", approverPolicy{}, ben, false},
+		{"open standing", ana, approverPolicy{}, false},
+		{"standing nobody is deliberate, not a mistake", ana, approverPolicy{none: true}, false},
+	} {
+		if got := unreachableStanding(tc.approvers, tc.standing); got != tc.want {
+			t.Errorf("%s: unreachableStanding = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
 // pressWith is pressIn in the default test channel, answering d.
 func pressWith(e *sessionEntry, promptID string, d approval.Decision) chat.Press {
 	p := pressIn(e, "C1", promptID)

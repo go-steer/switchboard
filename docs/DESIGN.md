@@ -270,7 +270,10 @@ wider kind.
 
 A standing press has to pass both lists, so the second can only narrow; a
 standing list naming somebody the approver list does not still refuses them,
-as a non-approver. Unset means `channel` — no tighter than `--approvers` — so
+as a non-approver, and two named lists sharing nobody are warned about at
+startup because every *Always allow* button is then dead. Unlike the approver
+list, this one has a value meaning "nobody": there is no other switch that
+keeps one-shot approvals and forbids permanent grants. Unset means `channel` — no tighter than `--approvers` — so
 the default changes nothing, and the startup banner says which posture a run
 has in both directions, because "a standing grant needs no more than any other
 answer" is the fact an operator most needs to read off a default run. The
