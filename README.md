@@ -104,8 +104,9 @@ it never arrives: the connection settings route four triggers (message, app
 command, added-to-space, removed-from-space), and a live click was answered with
 *"Switchboard is unable to process your request"* while nothing at all reached
 the subscription ([#28](https://github.com/go-steer/switchboard/issues/28)).
-Cards here are therefore output only: the welcome names the progress values in
-its text and you type the one you want. An `openLink` button should be fine,
+Over Pub/Sub, cards are therefore output only: the welcome names the progress
+values in its text and you type the one you want. Buttons come back on the
+HTTP ingress below. An `openLink` button should be fine,
 since it sends no event to the app, but that is untested here. Updating a card
 means patching the whole hosting message, and a patch is idempotent so a
 redelivery is harmless.
@@ -116,8 +117,7 @@ operating Chat rather than tested here as #28's half was. Switchboard still
 renders no button there: add-ons are where Google is taking Chat apps, the
 conversion is one-way, and the decoder normalizes both dialects away before
 anything downstream could tell them apart, so a legacy-only button is not
-expressible anyway. Clickable controls need the HTTP interaction endpoint tracked
-in [#29](https://github.com/go-steer/switchboard/issues/29).
+expressible anyway. Clickable controls need the HTTP interaction endpoint.
 
 #### HTTP ingress
 
@@ -140,10 +140,17 @@ switchboard serve --platform googlechat \
 It is **opt-in because it is a public attack surface**, and the Pub/Sub posture
 — nothing reaches the process that Google did not put there — is the better
 default for a deployment that does not need what HTTP buys. What it buys is
-everything requiring a synchronous response, which is card clicks and dialogs;
-switchboard renders no buttons yet, so today the endpoint is the same
-conversation over a different wire, and the clicks land with the rest of
-[#29](https://github.com/go-steer/switchboard/issues/29).
+everything requiring a synchronous response, which is card clicks and dialogs.
+On this ingress the cards grow buttons (#29): permission prompts are answered
+with a press (see *Answering permission prompts* below), and the welcome and the
+`progress` ack offer the modes as a row. A click is answered in its own
+response, so the card it was pressed on changes at once; a press that takes
+longer than ten seconds is acknowledged and its edit follows over REST.
+
+A button's click is sent to the endpoint's full URL — Chat's add-on runtime
+needs that rather than a function name — so the gateway has to know it. Set
+`--googlechat-endpoint-url`, or let it be learned from the first verified event;
+until one arrives, a card that would carry buttons goes as text.
 
 Every request is checked before its payload is read, and the check is the whole
 reason the endpoint is safe to expose:
@@ -633,13 +640,12 @@ and a run whose list cannot match is refused rather than started: emails under
 cleanly, announces its approvers, and then refuses every one of them — a total
 approval outage whose only symptom is the notice above.
 
-**This is a Slack control today.** The gate is on a press, and no press reaches
-this gateway from Chat: the add-on framework routes no click trigger, so Chat
-posts the question as prose with the answers listed and a Chat-only deployment
-has nothing for `--approvers` to narrow yet (see *Workspace add-on mode* above,
-and [#29](https://github.com/go-steer/switchboard/issues/29) for the HTTP
-interaction endpoint that changes it). The gate is in the router rather than the
-adapter, so it covers Chat the moment presses arrive.
+**On Google Chat this needs the HTTP ingress.** The gate is on a press, and over
+Pub/Sub no press reaches this gateway from Chat: the add-on framework routes no
+click trigger, so the question arrives as prose with the answers listed and
+there is nothing for `--approvers` to narrow (see *Workspace add-on mode*
+above). With `--googlechat-ingress http` the answers are buttons and the gate
+covers them — it is in the router, not the adapter.
 
 This is a gateway-side gate on a surface switchboard invented, not a
 re-implementation of the backend's authorization: core-agent still decides what
@@ -669,11 +675,13 @@ for why each one goes.
 On Slack the answers are buttons, and the ones that outlive the request ask
 again before applying. The app needs **Interactivity & Shortcuts** enabled for
 Slack to deliver a press at all — it is off by default and easy to miss, so
-[slack-setup.md](docs/slack-setup.md#create-the-app) makes it a step. Google
-Chat has no interactive surface yet ([#29]), so the question arrives as text
-with the answers listed — enough to see that the agent is blocked and on what.
-Either way the choices are in the message body too, so nothing depends on the
-buttons rendering.
+[slack-setup.md](docs/slack-setup.md#create-the-app) makes it a step. On Google
+Chat the answers are buttons on the HTTP ingress ([#29]), without Slack's
+second look for the wide ones — Chat has no native confirmation, so that is a
+follow-up — and over Pub/Sub the question arrives as text with the answers
+listed, enough to see that the agent is blocked and on what. Either way the
+choices are in the message body too, so nothing depends on the buttons
+rendering.
 
 A press that cannot be delivered says so in the thread rather than leaving a
 flashed button and a still-blocked agent: if the answer does not reach the

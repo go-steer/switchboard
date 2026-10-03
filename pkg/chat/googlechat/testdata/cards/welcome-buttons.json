@@ -1,0 +1,106 @@
+{
+  "header": {
+    "subtitle": "chat gateway for core-agent",
+    "title": "switchboard"
+  },
+  "sections": [
+    {
+      "widgets": [
+        {
+          "textParagraph": {
+            "text": "Mention me in a thread and I'll relay the turn to the agent. Every reply lands back in the same thread, and a thread is one conversation."
+          }
+        },
+        {
+          "decoratedText": {
+            "startIcon": {
+              "materialIcon": {
+                "name": "waving_hand"
+              }
+            },
+            "text": "Long turns report progress while they run. Set how much you see with `progress \u0026lt;off|indicator|status|stream\u0026gt;`.",
+            "wrapText": true
+          }
+        },
+        {
+          "buttonList": {
+            "buttons": [
+              {
+                "onClick": {
+                  "action": {
+                    "function": "https://switchboard.example.com/chat",
+                    "parameters": [
+                      {
+                        "key": "switchboard_command",
+                        "value": "progress"
+                      },
+                      {
+                        "key": "switchboard_arg",
+                        "value": "off"
+                      }
+                    ]
+                  }
+                },
+                "text": "off"
+              },
+              {
+                "onClick": {
+                  "action": {
+                    "function": "https://switchboard.example.com/chat",
+                    "parameters": [
+                      {
+                        "key": "switchboard_command",
+                        "value": "progress"
+                      },
+                      {
+                        "key": "switchboard_arg",
+                        "value": "indicator"
+                      }
+                    ]
+                  }
+                },
+                "text": "indicator"
+              },
+              {
+                "onClick": {
+                  "action": {
+                    "function": "https://switchboard.example.com/chat",
+                    "parameters": [
+                      {
+                        "key": "switchboard_command",
+                        "value": "progress"
+                      },
+                      {
+                        "key": "switchboard_arg",
+                        "value": "status"
+                      }
+                    ]
+                  }
+                },
+                "text": "status"
+              },
+              {
+                "onClick": {
+                  "action": {
+                    "function": "https://switchboard.example.com/chat",
+                    "parameters": [
+                      {
+                        "key": "switchboard_command",
+                        "value": "progress"
+                      },
+                      {
+                        "key": "switchboard_arg",
+                        "value": "stream"
+                      }
+                    ]
+                  }
+                },
+                "text": "stream"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

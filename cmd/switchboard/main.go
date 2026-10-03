@@ -518,8 +518,9 @@ func runServe(args []string) (err error) {
 			logf.Infof("googlechat: HTTP ingress, accepting events authenticated as %s", *googleChatSA)
 			if *googleEndpointURL == "" {
 				logf.Warnf("no --googlechat-endpoint-url, so each inbound token is checked against " +
-					"the URL its own request names; pin it if anything in front of switchboard " +
-					"rewrites Host")
+					"the URL its own request names, and card buttons appear only once the first " +
+					"verified event has taught the gateway that URL; pin it if anything in front " +
+					"of switchboard rewrites Host")
 			}
 		}
 	default:

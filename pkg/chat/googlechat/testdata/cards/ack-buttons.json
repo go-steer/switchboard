@@ -1,0 +1,97 @@
+{
+  "sections": [
+    {
+      "widgets": [
+        {
+          "decoratedText": {
+            "startIcon": {
+              "materialIcon": {
+                "name": "tune"
+              }
+            },
+            "text": "Progress mode for this channel set to \u003ci\u003estream\u003c/i\u003e.",
+            "wrapText": true
+          }
+        },
+        {
+          "buttonList": {
+            "buttons": [
+              {
+                "onClick": {
+                  "action": {
+                    "function": "https://switchboard.example.com/chat",
+                    "parameters": [
+                      {
+                        "key": "switchboard_command",
+                        "value": "progress"
+                      },
+                      {
+                        "key": "switchboard_arg",
+                        "value": "off"
+                      }
+                    ]
+                  }
+                },
+                "text": "off"
+              },
+              {
+                "onClick": {
+                  "action": {
+                    "function": "https://switchboard.example.com/chat",
+                    "parameters": [
+                      {
+                        "key": "switchboard_command",
+                        "value": "progress"
+                      },
+                      {
+                        "key": "switchboard_arg",
+                        "value": "indicator"
+                      }
+                    ]
+                  }
+                },
+                "text": "indicator"
+              },
+              {
+                "onClick": {
+                  "action": {
+                    "function": "https://switchboard.example.com/chat",
+                    "parameters": [
+                      {
+                        "key": "switchboard_command",
+                        "value": "progress"
+                      },
+                      {
+                        "key": "switchboard_arg",
+                        "value": "status"
+                      }
+                    ]
+                  }
+                },
+                "text": "status"
+              },
+              {
+                "onClick": {
+                  "action": {
+                    "function": "https://switchboard.example.com/chat",
+                    "parameters": [
+                      {
+                        "key": "switchboard_command",
+                        "value": "progress"
+                      },
+                      {
+                        "key": "switchboard_arg",
+                        "value": "stream"
+                      }
+                    ]
+                  }
+                },
+                "text": "stream"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

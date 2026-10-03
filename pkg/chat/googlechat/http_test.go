@@ -16,6 +16,7 @@ package googlechat
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net"
@@ -26,6 +27,7 @@ import (
 	"testing"
 	"time"
 
+	chatv1 "google.golang.org/api/chat/v1"
 	"google.golang.org/api/idtoken"
 
 	"github.com/go-steer/switchboard/pkg/chat"
@@ -506,6 +508,240 @@ func (h *blockingHandler) finished() int {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.done
+}
+
+// pressHandler answers a press the way the router does: it records the press,
+// optionally waits, and then edits the question through the adapter's Update
+// to record the outcome (cmd/switchboard/approvals.go traceDecision).
+type pressHandler struct {
+	fakeHandler
+	a       *Adapter
+	release chan struct{} // nil: answer at once
+	noEdit  bool          // a refused press: say nothing on the question
+	err     error
+}
+
+func (h *pressHandler) HandlePress(ctx context.Context, p chat.Press) error {
+	h.presses = append(h.presses, p)
+	if h.release != nil {
+		<-h.release
+	}
+	if h.noEdit {
+		return h.err
+	}
+	return h.a.Update(ctx, p.Message, chat.Reply{
+		Conversation: p.Conversation,
+		Text:         "Allow bash?\n\n✅ **Allowed**, this once — " + p.Caller,
+		Kind:         chat.KindDecision,
+	})
+}
+
+const testClickBody = `{
+	"chat": {
+		"user": {"name": "users/7", "email": "bob@example.com"},
+		"space": {"name": "spaces/AAA"},
+		"buttonClickedPayload": {
+			"message": {"name": "spaces/AAA/messages/Q1", "thread": {"name": "spaces/AAA/threads/T1"}}
+		}
+	},
+	"commonEventObject": {
+		"parameters": {"switchboard_decision": "core-agent/s1#p7", "switchboard_option": "allow_once"}
+	}
+}`
+
+// clickEnvelope digs the edited message out of an updateMessageAction
+// response, or reports there was none.
+func clickEnvelope(t *testing.T, body []byte) (*chatv1.Message, bool) {
+	t.Helper()
+	var env struct {
+		HostAppDataAction *struct {
+			ChatDataAction *struct {
+				UpdateMessageAction *struct {
+					Message *chatv1.Message `json:"message"`
+				} `json:"updateMessageAction"`
+			} `json:"chatDataAction"`
+		} `json:"hostAppDataAction"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil {
+		t.Fatalf("response %q is not JSON: %v", body, err)
+	}
+	if env.HostAppDataAction == nil || env.HostAppDataAction.ChatDataAction == nil ||
+		env.HostAppDataAction.ChatDataAction.UpdateMessageAction == nil {
+		return nil, false
+	}
+	return env.HostAppDataAction.ChatDataAction.UpdateMessageAction.Message, true
+}
+
+// TestIngressAnswersAClickWithItsEdit is the point of #29: a press shows its
+// result in the click's own response, as an add-on updateMessageAction, rather
+// than a REST round trip later — and it reaches the router as a Press from the
+// person who clicked, never from whoever the question was addressed to.
+func TestIngressAnswersAClickWithItsEdit(t *testing.T) {
+	f := &fakeMessenger{}
+	a := newIngressAdapter(t, f)
+	a.cards = CardsStatus
+	h := &pressHandler{a: a}
+
+	r := postEvent(testClickBody)
+	r.Header.Set("Authorization", "Bearer good-token")
+	rec := httptest.NewRecorder()
+	var wg sync.WaitGroup
+	a.eventHandler(context.Background(), &wg, h).ServeHTTP(rec, r)
+	wg.Wait()
+
+	if len(h.presses) != 1 {
+		t.Fatalf("presses = %d, want 1", len(h.presses))
+	}
+	p := h.presses[0]
+	want := chat.Press{
+		Conversation: "spaces/AAA:spaces/AAA/threads/T1",
+		Channel:      "spaces/AAA",
+		Caller:       "bob@example.com",
+		DecisionID:   "core-agent/s1#p7",
+		Option:       "allow_once",
+		Message:      chat.MessageRef{Conversation: "spaces/AAA:spaces/AAA/threads/T1", ID: "spaces/AAA/messages/Q1"},
+	}
+	if p != want {
+		t.Errorf("press = %+v\nwant    %+v", p, want)
+	}
+	msg, ok := clickEnvelope(t, rec.Body.Bytes())
+	if !ok {
+		t.Fatalf("response = %s, want an updateMessageAction carrying the edit", rec.Body)
+	}
+	if len(msg.CardsV2) != 1 || !strings.Contains(cardText(msg.CardsV2[0].Card), "Allowed") {
+		t.Errorf("edited message = %+v, want the settled decision card", msg)
+	}
+	assertNothingClickable(t, "settled", msg.CardsV2[0].Card)
+	if len(f.patches) != 0 {
+		t.Errorf("patches = %+v; the edit went in the response, so REST must not send it again", f.patches)
+	}
+}
+
+// TestIngressAcknowledgesASlowClick: a press slower than the response can wait
+// is acknowledged with "{}" — Google's documented way to say "the result comes
+// later" — and its edit, whenever it arrives, goes over REST instead of being
+// lost to a response already written.
+func TestIngressAcknowledgesASlowClick(t *testing.T) {
+	f := &fakeMessenger{}
+	a := newIngressAdapter(t, f)
+	a.cards = CardsStatus
+	a.clickWait = 20 * time.Millisecond
+	h := &pressHandler{a: a, release: make(chan struct{})}
+
+	r := postEvent(testClickBody)
+	r.Header.Set("Authorization", "Bearer good-token")
+	rec := httptest.NewRecorder()
+	var wg sync.WaitGroup
+	a.eventHandler(context.Background(), &wg, h).ServeHTTP(rec, r)
+
+	if got := strings.TrimSpace(rec.Body.String()); got != "{}" {
+		t.Errorf("response = %q, want the bare acknowledgment", got)
+	}
+	close(h.release)
+	wg.Wait()
+	if len(f.patches) != 1 || f.patches[0].name != "spaces/AAA/messages/Q1" || f.patches[0].card == nil {
+		t.Fatalf("patches = %+v, want the late edit sent over REST", f.patches)
+	}
+}
+
+// TestIngressAcknowledgesAClickThatEditsNothing: a refused or stale press
+// leaves the question alone and says why beside it, over REST. The click
+// still has to be answered, and "{}" is the answer.
+func TestIngressAcknowledgesAClickThatEditsNothing(t *testing.T) {
+	f := &fakeMessenger{}
+	a := newIngressAdapter(t, f)
+	a.cards = CardsStatus
+	h := &pressHandler{a: a, noEdit: true}
+
+	r := postEvent(testClickBody)
+	r.Header.Set("Authorization", "Bearer good-token")
+	rec := httptest.NewRecorder()
+	var wg sync.WaitGroup
+	a.eventHandler(context.Background(), &wg, h).ServeHTTP(rec, r)
+	wg.Wait()
+
+	if got := strings.TrimSpace(rec.Body.String()); got != "{}" {
+		t.Errorf("response = %q, want the bare acknowledgment", got)
+	}
+	if len(h.presses) != 1 {
+		t.Errorf("presses = %d, want 1", len(h.presses))
+	}
+}
+
+// TestIngressCaptureIsScopedToTheHostingMessage: only the edit to the card
+// that was clicked rides in the response. Anything else the press does — here
+// an edit to some other message — goes out over REST as it always would.
+func TestIngressCaptureIsScopedToTheHostingMessage(t *testing.T) {
+	f := &fakeMessenger{}
+	a := newIngressAdapter(t, f)
+	a.cards = CardsStatus
+	ctx := context.WithValue(context.Background(), clickKey{}, &clickResponse{name: "spaces/AAA/messages/Q1"})
+
+	if err := a.Update(ctx, chat.MessageRef{ID: "spaces/AAA/messages/OTHER"}, chat.Reply{Text: "progress", Kind: chat.KindProgress}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if len(f.patches) != 1 || f.patches[0].name != "spaces/AAA/messages/OTHER" {
+		t.Fatalf("patches = %+v, want the unrelated edit sent over REST", f.patches)
+	}
+}
+
+// TestIngressLearnsItsURLForButtons: a deployment that let the audience be
+// derived from the request still gets buttons, from the first verified event
+// on — the URL that request was addressed to is the one Chat calls.
+func TestIngressLearnsItsURLForButtons(t *testing.T) {
+	f := &fakeMessenger{}
+	a := newIngressAdapter(t, f)
+	a.verify.audience = ""
+	if got := a.actionURL(); got != "" {
+		t.Fatalf("actionURL before any request = %q, want none", got)
+	}
+	r := postEvent(`{"chat": {"space": {"name": "spaces/AAA"}, "removedFromSpacePayload": {}}}`)
+	r.Header.Set("Authorization", "Bearer good-token")
+	serveOne(t, a, &fakeHandler{}, r)
+	if got := a.actionURL(); got != testAudience {
+		t.Errorf("actionURL = %q, want %q", got, testAudience)
+	}
+
+	// An unverified request teaches it nothing: the URL is only trustworthy
+	// because a token minted for it checked out.
+	b := newIngressAdapter(t, f)
+	b.verify.audience = ""
+	bad := postEvent(`{}`)
+	bad.Host = "attacker.example.com"
+	serveOne(t, b, &fakeHandler{}, bad)
+	if got := b.actionURL(); got != "" {
+		t.Errorf("actionURL after a rejected request = %q, want none", got)
+	}
+}
+
+// TestIngressRoutesALegacyClickAsynchronously: the legacy dialect's response
+// envelope is not the add-on one, and is unmeasured here, so its click is
+// acknowledged like any other event and its edit goes over REST.
+func TestIngressRoutesALegacyClickAsynchronously(t *testing.T) {
+	f := &fakeMessenger{}
+	a := newIngressAdapter(t, f)
+	a.cards = CardsStatus
+	h := &pressHandler{a: a}
+	body := `{"type": "CARD_CLICKED",
+		"space": {"name": "spaces/AAA"}, "user": {"name": "users/7", "email": "bob@example.com"},
+		"message": {"name": "spaces/AAA/messages/Q1", "thread": {"name": "spaces/AAA/threads/T1"}},
+		"common": {"parameters": {"switchboard_decision": "core-agent/s1#p7", "switchboard_option": "deny"}}}`
+	r := postEvent(body)
+	r.Header.Set("Authorization", "Bearer good-token")
+	rec := httptest.NewRecorder()
+	var wg sync.WaitGroup
+	a.eventHandler(context.Background(), &wg, h).ServeHTTP(rec, r)
+	wg.Wait()
+
+	if got := strings.TrimSpace(rec.Body.String()); got != "{}" {
+		t.Errorf("response = %q, want the bare acknowledgment", got)
+	}
+	if len(h.presses) != 1 || h.presses[0].Option != "deny" || h.presses[0].Caller != "bob@example.com" {
+		t.Fatalf("presses = %+v, want bob's deny", h.presses)
+	}
+	if len(f.patches) != 1 {
+		t.Errorf("patches = %+v, want the edit over REST", f.patches)
+	}
 }
 
 func TestParseIngressMode(t *testing.T) {

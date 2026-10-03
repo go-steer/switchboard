@@ -41,6 +41,7 @@ import (
 	"sync"
 	"time"
 
+	chatv1 "google.golang.org/api/chat/v1"
 	"google.golang.org/api/idtoken"
 
 	"github.com/go-steer/switchboard/pkg/chat"
@@ -87,6 +88,84 @@ const maxEventBytes = 1 << 20
 // context is cancelled. A turn that is mid-round-trip has already been
 // injected, so cutting it off loses the answer rather than the work.
 const chatIngressGrace = 25 * time.Second
+
+// clickBudget is how long a click's response waits for the edit it causes.
+// Chat allows the endpoint ~30 seconds, but the server's WriteTimeout is 15
+// from the start of the request, and the response has to be written inside
+// both; a press that takes longer than this is answered "{}" and its edit
+// goes over REST instead, which is the documented way to acknowledge an
+// interaction whose result comes later.
+const clickBudget = 10 * time.Second
+
+// clickKey is the context key for a click's pending response.
+type clickKey struct{}
+
+// clickResponse is the edit a click caused to the message hosting its card,
+// held for the click's HTTP response instead of being sent over REST.
+//
+// It exists because the response is the better channel and the router does
+// not know there is one. An approval must visibly do something the moment it
+// is pressed (docs/DESIGN.md §3.4), and a REST patch racing the response is a
+// round-trip later at best. But the router records a decision by calling
+// Update, exactly as it does for Slack, and it should not learn that one
+// platform can answer a click in-band — so the capture sits in rewrite, keyed
+// to the one message the click came from, and everything else the press does
+// (a notice beside the question, a refusal) goes out over REST as usual.
+type clickResponse struct {
+	name string // the hosting message; only its edits are captured
+
+	mu     sync.Mutex
+	msg    *chatv1.Message
+	closed bool
+}
+
+// take captures an edit to name, reporting whether it did. Once the response
+// is written it captures nothing, and the edit falls through to REST — so a
+// press slower than clickBudget still lands, just later.
+func (c *clickResponse) take(name string, card *chatv1.GoogleAppsCardV1Card, text string) bool {
+	if c == nil || name != c.name {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return false
+	}
+	// The latest edit wins, as it would over REST.
+	if cards := singleCard(card); cards != nil {
+		c.msg = &chatv1.Message{CardsV2: cards}
+	} else {
+		c.msg = &chatv1.Message{Text: text}
+	}
+	return true
+}
+
+// close ends capturing and returns what was captured, if anything.
+func (c *clickResponse) close() *chatv1.Message {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.closed = true
+	return c.msg
+}
+
+// clickFrom returns the click response ctx is answering, or nil.
+func clickFrom(ctx context.Context) *clickResponse {
+	c, _ := ctx.Value(clickKey{}).(*clickResponse)
+	return c
+}
+
+// updateMessageResponse is the add-on envelope that edits the message a click
+// came from. Not the legacy actionResponse: the add-on framework answers with
+// hostAppDataAction (docs/DESIGN.md §3.4).
+func updateMessageResponse(msg *chatv1.Message) ([]byte, error) {
+	return json.Marshal(map[string]any{
+		"hostAppDataAction": map[string]any{
+			"chatDataAction": map[string]any{
+				"updateMessageAction": map[string]any{"message": msg},
+			},
+		},
+	})
+}
 
 // authorizationEventObject is the add-on framework's carrier for the
 // Google-signed ID token. The same token arrives in the Authorization header,
@@ -303,6 +382,18 @@ func (a *Adapter) eventHandler(runCtx context.Context, wg *sync.WaitGroup, h cha
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
+		a.learnURL(r)
+
+		// A click is the one event worth holding the response for: what it
+		// changes is the card it was pressed on, and the response is where
+		// that change shows up at once. Only the add-on dialect's envelope is
+		// known here; a legacy click is acknowledged like any other event and
+		// answered over REST, which is how that dialect works over Pub/Sub.
+		if in, err := decodeEvent(body); err == nil &&
+			in.kind == kindButton && in.addon && in.messageName != "" {
+			a.answerClick(w, r, runCtx, wg, h, body, in.messageName)
+			return
+		}
 
 		// Answer now, work after. Chat gives the endpoint ~30 seconds and a
 		// turn is routinely longer, so holding the response until the answer
@@ -326,4 +417,81 @@ func (a *Adapter) eventHandler(runCtx context.Context, wg *sync.WaitGroup, h cha
 			a.logf.Warnf("googlechat: ingress: write response: %v", err)
 		}
 	})
+}
+
+// learnURL records the URL a verified request was addressed to, for actionURL.
+// Only when none is configured: a configured one is the audience, and is what
+// buttons use.
+func (a *Adapter) learnURL(r *http.Request) {
+	if a.verify.audience != "" {
+		return
+	}
+	u := a.verify.audienceFor(r)
+	if cur := a.learnedURL.Load(); cur == nil || *cur != u {
+		a.learnedURL.Store(&u)
+	}
+}
+
+// answerClick runs a click and answers it with the edit it made to the
+// hosting card, if that edit is ready within clickBudget, and with "{}"
+// otherwise — after which the edit, whenever it comes, goes over REST.
+//
+// The click runs on the run context like a turn does, not on the request's:
+// the response may be written before it finishes, and a press that has reached
+// the daemon must not be cut off by a response deadline.
+func (a *Adapter) answerClick(w http.ResponseWriter, r *http.Request, runCtx context.Context,
+	wg *sync.WaitGroup, h chat.Handler, body []byte, hosting string) {
+	click := &clickResponse{name: hosting}
+	ctx := context.WithValue(runCtx, clickKey{}, click)
+	done := make(chan struct{})
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		defer close(done)
+		a.handleEvent(ctx, h, body)
+	}()
+
+	budget := a.clickWait
+	if budget == 0 {
+		budget = clickBudget
+	}
+	timer := time.NewTimer(budget)
+	defer timer.Stop()
+	select {
+	case <-done:
+	case <-timer.C:
+		a.logf.Warnf("googlechat: ingress: click on %s took over %s; its edit will follow over REST", hosting, budget)
+	case <-r.Context().Done():
+	}
+
+	msg := click.close()
+	resp, inBand := []byte("{}"), false
+	if msg != nil {
+		if b, err := updateMessageResponse(msg); err != nil {
+			// Unreachable for a chatv1.Message; the edit is not lost, because
+			// it goes over REST below.
+			a.logf.Errorf("googlechat: ingress: encode click response for %s: %v", hosting, err)
+		} else {
+			resp, inBand = b, true
+		}
+	}
+	err := r.Context().Err()
+	if err == nil {
+		w.Header().Set("Content-Type", "application/json")
+		_, err = w.Write(resp)
+	}
+	if err != nil {
+		a.logf.Warnf("googlechat: ingress: write click response: %v", err)
+	}
+	if msg != nil && (err != nil || !inBand) {
+		// The edit was captured but did not go out in the response. It has
+		// been taken from the REST path, so it has to be sent from here or not
+		// at all — and a decision recorded nowhere is the thing the capture
+		// was meant to make faster, not to lose.
+		pctx, cancel := context.WithTimeout(context.WithoutCancel(runCtx), clickBudget)
+		defer cancel()
+		if perr := a.msg.patch(pctx, hosting, msg, patchMask); perr != nil {
+			a.logf.Errorf("googlechat: ingress: click edit %s over REST: %v", hosting, platformErr(perr))
+		}
+	}
 }

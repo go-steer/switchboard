@@ -32,20 +32,27 @@
 //     clamped to Chat's limits before the API call — never Text *and* CardsV2
 //     on one message, which would render the same content twice.
 //
-// No card here carries a button, or any other widget a user can operate. A
-// live click on one reached nothing: the app's connection settings route four
-// triggers (message, app command, added-to-space, removed-from-space) and a
-// click is not among them, so Chat answered it with "Switchboard is unable to
-// process your request" and no event arrived (#28). That is a limit of the
-// add-on dialect, the one this gateway targets; the legacy Chat-API dialect does
-// deliver clicks over the same Pub/Sub transport, which is known from operating
-// Chat rather than measured here. No button renders for legacy either, and could
-// not be conditional anyway: the decoder normalizes both dialects away
-// (event.go), and an agent-initiated post has no inbound event to infer one
-// from. See docs/DESIGN.md §3.3 for why the add-on dialect is the one worth
-// designing against. Where the welcome's row used to sit, the accepted values
-// are named in the text instead. Decoding a click is still implemented, for the
-// HTTP ingress in #29 — see event.go.
+// A card carries buttons only when it is given an action URL, and the adapter
+// gives one only on the HTTP ingress (#29). Over Pub/Sub a live click reached
+// nothing: the app's connection settings route four triggers (message, app
+// command, added-to-space, removed-from-space) and a click is not among them,
+// so Chat answered it with "Switchboard is unable to process your request" and
+// no event arrived (#28). That is a limit of the add-on dialect, the one this
+// gateway targets; the legacy Chat-API dialect does deliver clicks over the
+// same Pub/Sub transport, which is known from operating Chat rather than
+// measured here. The gate is the ingress and not the dialect because it cannot
+// be the dialect: the decoder normalizes both away (event.go), and an
+// agent-initiated post has no inbound event to infer one from. See
+// docs/DESIGN.md §3.3 for why the add-on dialect is the one worth designing
+// against.
+//
+// The URL is not decoration. In the add-on HTTP runtime a button's
+// onClick.action.function must be the full HTTPS endpoint URL — a bare
+// function name fails client-side with no request sent at all — so a card
+// builder that does not know the endpoint cannot render a working button, and
+// renders none (docs/DESIGN.md §3.4). The button's identity rides in
+// action.parameters (event.go), which is what keeps one encoding serving both
+// dialects.
 package googlechat
 
 import (
@@ -300,16 +307,18 @@ func activityIcon(text string) string {
 // welcomeCard greets a space the app was just added to. It is the one card with
 // a header: this is the only message that has to introduce the app itself.
 //
-// choices names the progress modes in the text. It was a row of buttons until
-// #28 established that a click never reaches this app, which made the row a
-// control that could only ever fail. The values still come from the handler
-// rather than a literal here, so this package learns no router vocabulary
-// either way, and #29 is where the row can come back.
-func welcomeCard(choices []string) *chatv1.GoogleAppsCardV1Card {
+// choices names the progress modes in the text, always, and as a row of buttons
+// too when actionURL is set — that is, on the HTTP ingress, the one a click
+// can reach (#29). The text stays when the buttons are there: it is what the
+// notification and a client that cannot render the card show. The values come
+// from the handler rather than a literal here, so this package learns no router
+// vocabulary either way.
+func welcomeCard(choices []string, actionURL string) *chatv1.GoogleAppsCardV1Card {
 	card := widgetCard(
 		htmlWidget("Mention me in a thread and I'll relay the turn to the agent. "+
 			"Every reply lands back in the same thread, and a thread is one conversation."),
 		iconTextWidget(iconWelcome, progressHint(choices)),
+		commandRow("progress", choices, actionURL),
 	)
 	if card == nil {
 		return nil
@@ -356,6 +365,143 @@ func nonBlank(vals []string) []string {
 		}
 	}
 	return kept
+}
+
+// ---------------------------------------------------------------------------
+// Buttons
+// ---------------------------------------------------------------------------
+
+const (
+	// maxButtons caps one row. A decision has at most a handful of answers
+	// and a command a handful of values; a row longer than this wraps into
+	// something nobody reads as one choice.
+	maxButtons = 8
+	// maxButtonText bounds a label in runes. Chat truncates a long label on
+	// screen anyway, so this is a backstop rather than a layout decision.
+	maxButtonText = 75
+)
+
+// actionButton builds a button whose click posts an event to actionURL with
+// params attached. Returns nil without a URL: a button that cannot be
+// delivered is the thing #28 removed, and must not come back by accident.
+func actionButton(label, actionURL string, params ...*chatv1.GoogleAppsCardV1ActionParameter) *chatv1.GoogleAppsCardV1Button {
+	label = strings.TrimSpace(label)
+	if actionURL == "" || label == "" {
+		return nil
+	}
+	return &chatv1.GoogleAppsCardV1Button{
+		Text: clampRunes(label, maxButtonText),
+		OnClick: &chatv1.GoogleAppsCardV1OnClick{
+			Action: &chatv1.GoogleAppsCardV1Action{
+				// The full endpoint URL, not a function name: the add-on HTTP
+				// runtime fails a bare name client-side, with no request sent.
+				Function:   actionURL,
+				Parameters: params,
+			},
+		},
+	}
+}
+
+// buttonRow wraps buttons in a widget, dropping nils. Returns nil when fewer
+// than min survive — the caller's call whether one button is a row.
+func buttonRow(min int, buttons ...*chatv1.GoogleAppsCardV1Button) *chatv1.GoogleAppsCardV1Widget {
+	kept := make([]*chatv1.GoogleAppsCardV1Button, 0, len(buttons))
+	for _, b := range buttons {
+		if b != nil && len(kept) < maxButtons {
+			kept = append(kept, b)
+		}
+	}
+	if len(kept) == 0 || len(kept) < min {
+		return nil
+	}
+	return &chatv1.GoogleAppsCardV1Widget{
+		ButtonList: &chatv1.GoogleAppsCardV1ButtonList{Buttons: kept},
+	}
+}
+
+// commandButton re-invokes a gateway command with one argument, exactly as if
+// the presser had typed it.
+func commandButton(label, command, arg, actionURL string) *chatv1.GoogleAppsCardV1Button {
+	return actionButton(label, actionURL,
+		&chatv1.GoogleAppsCardV1ActionParameter{Key: paramCommand, Value: command},
+		&chatv1.GoogleAppsCardV1ActionParameter{Key: paramArg, Value: arg},
+	)
+}
+
+// commandRow is one button per accepted value of a command, or nil when there
+// is no URL, no command, or nothing to choose between.
+func commandRow(command string, choices []string, actionURL string) *chatv1.GoogleAppsCardV1Widget {
+	if command == "" || actionURL == "" {
+		return nil
+	}
+	vals := nonBlank(choices)
+	buttons := make([]*chatv1.GoogleAppsCardV1Button, 0, len(vals))
+	for _, v := range vals {
+		buttons = append(buttons, commandButton(v, command, v, actionURL))
+	}
+	return buttonRow(2, buttons...)
+}
+
+// ackCard renders a command acknowledgment, with a button per accepted value
+// of the command when there is a URL to send the click to. The row is what
+// the ack confirming a change gained back from #28's removal: the next change
+// is a click rather than another typed command.
+func ackCard(text, command string, choices []string, actionURL string) *chatv1.GoogleAppsCardV1Card {
+	return widgetCard(iconTextWidget(iconAck, text), commandRow(command, choices, actionURL))
+}
+
+// decisionCard renders a question the router is asking (chat.Decision): the
+// body, then one button per answer. Returns nil without a URL, so the reply
+// goes as text — which already names the answers in prose (chat.DecisionText),
+// and is what a Pub/Sub deployment posts.
+//
+// A reply with no Decision on it is the question being settled: the router
+// edits it to record how it ended, and the card it renders here has no
+// buttons, which is how they come down. Still a card rather than text, so that
+// the edit answering a click can be returned in the click's own response
+// (http.go) as the same kind of message it replaces.
+//
+// One button is not a choice, and a Decision whose answers do not survive
+// rendering as at least two buttons is rendered without any — the body still
+// lists them.
+//
+// Broad answers get no confirmation step: Chat has no native one, and
+// building one out of a card swap is #29's follow-up rather than this.
+func decisionCard(text string, d *chat.Decision, actionURL string) *chatv1.GoogleAppsCardV1Card {
+	if actionURL == "" {
+		return nil
+	}
+	body := htmlWidget(text)
+	if body == nil {
+		return nil
+	}
+	if !d.Deciding() {
+		return widgetCard(body)
+	}
+	buttons := make([]*chatv1.GoogleAppsCardV1Button, 0, len(d.Options))
+	for _, o := range d.Options {
+		if o.Value == "" {
+			continue // unanswerable: the press would come back naming nothing
+		}
+		label := o.Label
+		if strings.TrimSpace(label) == "" {
+			label = o.Value
+		}
+		buttons = append(buttons, actionButton(label, actionURL,
+			&chatv1.GoogleAppsCardV1ActionParameter{Key: paramDecision, Value: d.ID},
+			&chatv1.GoogleAppsCardV1ActionParameter{Key: paramOption, Value: o.Value},
+		))
+	}
+	return widgetCard(body, buttonRow(2, buttons...))
+}
+
+// clampRunes bounds s to n runes, never splitting one.
+func clampRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n-1]) + "…"
 }
 
 // ---------------------------------------------------------------------------

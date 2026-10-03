@@ -57,19 +57,24 @@ const (
 	legacyTypeAppCommand = "APP_COMMAND"
 )
 
-// Action parameter keys on a card button. A click reaches HandleCommand as
-// though the invoker had typed the command, so the parameters are exactly a
-// command's verb and its single argument — and they are where the identity has
+// Action parameter keys on a card button. They are where a click's identity has
 // to live, because an add-on that extends Chat never populates
 // commonEventObject.invokedFunction. The legacy dialect carries the same keys
 // in common.parameters, so one encoding serves both.
 //
-// Decode-only today: no card this gateway sends has a button, since a click
-// never reaches an add-on (#28) — see kindButton below. The writer comes back
-// with #29.
+// Two kinds of button, told apart by which keys they carry. A command button
+// reaches HandleCommand as though the invoker had typed the command, so its
+// parameters are exactly a command's verb and its single argument. A decision
+// button answers a chat.Decision, and carries the decision's ID and the chosen
+// option's value back verbatim as a chat.Press.
+//
+// Buttons render only over the HTTP ingress (#29): over Pub/Sub a click never
+// reaches an add-on (#28) — see kindButton below.
 const (
-	paramCommand = "switchboard_command"
-	paramArg     = "switchboard_arg"
+	paramCommand  = "switchboard_command"
+	paramArg      = "switchboard_arg"
+	paramDecision = "switchboard_decision"
+	paramOption   = "switchboard_option"
 )
 
 // senderTypeBot marks a message authored by an app (including this one). Chat
@@ -100,16 +105,17 @@ const (
 	// kindCommand is a gateway control command (slash or quick command).
 	kindCommand
 	// kindButton is a click on a button on one of the gateway's own cards. It
-	// carries a command like kindCommand, but also the message that hosts the
-	// card, so the card can be updated in place afterwards.
+	// carries a command like kindCommand, or an answer to a decision, and also
+	// the message that hosts the card, so the card can be updated in place
+	// afterwards.
 	//
-	// Unreached today, in both directions and in both dialects: no card this
-	// gateway sends has a button, because a click never arrives for an add-on
-	// (#28). Legacy Chat-API apps do get clicks over Pub/Sub — known from
-	// operating Chat, not measured here — but the gateway renders no button for
-	// them either, and could not render one only for them; see cards.go.
-	// Decoding is kept for the HTTP interaction endpoint (#29), which is the
-	// ingress that delivers clicks to the dialect this gateway targets.
+	// Buttons are rendered only by a deployment on the HTTP interaction
+	// endpoint (#29), the one ingress that delivers a click to the add-on
+	// dialect this gateway targets; over Pub/Sub a click never arrives for an
+	// add-on (#28). Legacy Chat-API apps do get clicks over Pub/Sub — known from
+	// operating Chat, not measured here — but rendering cannot be conditional on
+	// the dialect (see cards.go), so they get buttons exactly when the ingress
+	// is HTTP too.
 	kindButton
 	// kindWelcome is the app being added to a space.
 	kindWelcome
@@ -119,6 +125,11 @@ const (
 // fields relevant to its kind are populated.
 type inbound struct {
 	kind eventKind
+
+	// addon is true for an event in the Workspace add-on dialect. Nothing
+	// downstream of the decoder branches on it except the HTTP ingress, which
+	// has to answer a click in the envelope of the dialect that sent it.
+	addon bool
 
 	// space and thread locate the conversation (thread may be empty in a
 	// flat space); caller is the sender's users/NNN resource name.
@@ -288,6 +299,7 @@ func normalizeAddon(ev *wireEvent) inbound {
 		return inbound{}
 	}
 	in := inbound{
+		addon:  true,
 		space:  spaceNameOf(c.Space),
 		caller: userName(c.User),
 		email:  userEmail(c.User),

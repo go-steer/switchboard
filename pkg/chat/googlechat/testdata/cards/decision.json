@@ -1,0 +1,73 @@
+{
+  "sections": [
+    {
+      "widgets": [
+        {
+          "textParagraph": {
+            "text": "🔐 The agent wants to run \u003cb\u003ebash\u003c/b\u003e: `kubectl rollout restart deploy/api`\u003cbr\u003e\u003cbr\u003e• Deny\u003cbr\u003e• Allow once\u003cbr\u003e• Allow commands like this for the session"
+          }
+        },
+        {
+          "buttonList": {
+            "buttons": [
+              {
+                "onClick": {
+                  "action": {
+                    "function": "https://switchboard.example.com/chat",
+                    "parameters": [
+                      {
+                        "key": "switchboard_decision",
+                        "value": "core-agent/s1#p7"
+                      },
+                      {
+                        "key": "switchboard_option",
+                        "value": "deny"
+                      }
+                    ]
+                  }
+                },
+                "text": "Deny"
+              },
+              {
+                "onClick": {
+                  "action": {
+                    "function": "https://switchboard.example.com/chat",
+                    "parameters": [
+                      {
+                        "key": "switchboard_decision",
+                        "value": "core-agent/s1#p7"
+                      },
+                      {
+                        "key": "switchboard_option",
+                        "value": "allow_once"
+                      }
+                    ]
+                  }
+                },
+                "text": "Allow once"
+              },
+              {
+                "onClick": {
+                  "action": {
+                    "function": "https://switchboard.example.com/chat",
+                    "parameters": [
+                      {
+                        "key": "switchboard_decision",
+                        "value": "core-agent/s1#p7"
+                      },
+                      {
+                        "key": "switchboard_option",
+                        "value": "allow_session_verb"
+                      }
+                    ]
+                  }
+                },
+                "text": "Allow commands like this for the session"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

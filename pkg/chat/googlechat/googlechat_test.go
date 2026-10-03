@@ -664,9 +664,8 @@ func (h *fakeHandler) HandleCommand(_ context.Context, c chat.Command) (string, 
 	return h.ack, h.err
 }
 
-// HandlePress is here to satisfy chat.Handler. This adapter has no interactive
-// surface yet (#29), so nothing in this package should ever call it — which is
-// what the recording is for.
+// HandlePress records a press, so a test can assert what a decision button's
+// click handed the router — and that nothing else did.
 func (h *fakeHandler) HandlePress(_ context.Context, p chat.Press) error {
 	h.presses = append(h.presses, p)
 	return h.err
@@ -1072,11 +1071,10 @@ func TestDispatchAckCarriesNoButtons(t *testing.T) {
 	}
 }
 
-// TestDispatchButtonClick covers the round trip a click would make if one ever
-// arrived: no dialog, no synchronous response — the click runs the command and
-// the hosting card is rewritten. Nothing sends this event today, since no card
-// the gateway posts has a button (#28); the path is kept, and kept tested, for
-// the HTTP interaction endpoint in #29.
+// TestDispatchButtonClick covers a command button's round trip without the
+// HTTP response around it: the click runs the command and the hosting card is
+// rewritten. Over the HTTP ingress that rewrite rides in the click's response
+// (http_test.go); here, with no response to ride in, it goes over REST.
 func TestDispatchButtonClick(t *testing.T) {
 	f := &fakeMessenger{}
 	h := &choiceHandler{}

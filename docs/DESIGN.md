@@ -247,11 +247,10 @@ session the thread holds. A refusal is posted, not swallowed — a press that
 vanishes reads as one that worked — and the buttons are left standing, because
 someone else in the room may be entitled to answer. There is no value meaning
 "nobody": leaving `--approvals` off already means that. Being in the router
-rather than an adapter, it is a Slack control only for as long as Slack is the
-only platform delivering a press: the add-on framework routes no click trigger
-to a Chat app (§3.3), so `--approvers` narrows nothing there until the HTTP
-interaction endpoint lands (#29, designed in §3.4), and covers it with no
-further work when it does.
+rather than an adapter, it covers every platform that delivers a press: Slack,
+and Google Chat on the HTTP interaction endpoint (#29, §3.4), which it picked up
+with no further work. Over Pub/Sub the add-on framework routes no click trigger
+to a Chat app (§3.3), so there it still narrows nothing.
 
 None of this is the backend's authorization moving here. Switchboard is gating a
 surface it invented, on the identity it already asserts; core-agent still decides
@@ -615,10 +614,9 @@ still out there and the split costs one normalizer, but the add-on dialect is
 what this gateway is designed against.
 
 Callback buttons are therefore what an **HTTP interaction endpoint** buys
-([#29](https://github.com/go-steer/switchboard/issues/29)). Only the *rendering*
-of a button was dropped, and dropped for both dialects, so the decode and
-dispatch path is unreached in either one today; it is kept and still tested
-because #29 is the ingress it is waiting for.
+([#29](https://github.com/go-steer/switchboard/issues/29)), and they render on
+that ingress only — for both dialects, since rendering cannot tell them apart
+(§3.4).
 
 When a click does arrive, add-ons never report an **invoked function name** back
 to the app, so a button's identity travels in `action.parameters` — which the
@@ -721,10 +719,33 @@ Responses use the add-on envelope —
 not the legacy `actionResponse` with `cardsV2`. `RenderActions` is specifically
 the dialog lifecycle, and switchboard renders no dialogs.
 
-**What shipped, and three things the build settled.** The transport is in
+**What shipped, and what the build settled.** The transport is in
 (`pkg/chat/googlechat/http.go`): the mode flag, the listener, the verification
-above, and a `200 {}` written before the turn runs. Buttons are not — that is
-the rest of #29, and the paragraph above is still its design.
+above, and a `200 {}` written before the turn runs. So are the buttons: the
+card builders take an action URL and render none without one, and the adapter
+has one only on this ingress — `--googlechat-endpoint-url`, or else the URL the
+first verified request was addressed to, which is trustworthy exactly because a
+token minted for it checked out. Permission prompts render as a card with a
+button per answer; the welcome and the command ack get their value rows back.
+
+**A click is answered in-band.** The router records a decision by calling
+`Update` on the question, as it does for Slack, and should not learn that one
+platform can answer a click in its response. So the click runs with a capture in
+its context, keyed to the hosting message: an edit to that message is held for
+the response instead of sent over REST, and goes back as `updateMessageAction`.
+Everything else a press does — a refusal, a notice beside the question — goes
+over REST as before. The response waits ten seconds at most (the server's
+`WriteTimeout` is fifteen); a slower press is answered `{}`, which Google
+documents as the acknowledgment for an interaction whose result comes later,
+and its edit falls through to REST. An edit captured but not delivered — the
+connection gone before the write — is sent over REST from there rather than
+lost. A **legacy** click is acknowledged like any other event and answered over
+REST: its response envelope is not the add-on one, and nothing here has
+measured it.
+
+Broad answers get no confirmation on Chat yet. Slack's buttons carry a native
+"are you sure"; Chat has none, and building one from a card swap is follow-up
+work.
 
 The turn *does* run after the response here, which is the opposite of "anything
 that must happen happens before the write" — deliberately, and only because
