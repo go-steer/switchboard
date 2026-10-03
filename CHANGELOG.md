@@ -55,6 +55,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   HTTP deployment would drop every command while the fixtures stayed green.
 
 ### Fixed
+- Bumped `google.golang.org/grpc` to v1.83.1 (GO-2026-6348, heap exhaustion
+  via HTTP/2 DATA frame fragmentation, reachable through the Pub/Sub
+  subscriber; `govulncheck` was failing the build against v1.83.0).
 - The Google Chat decoder reads a command ID spelled as a whole-number float
   (`"appCommandId": 100.0`), which is how proto-JSON — and so the HTTP ingress
   #29 is building towards — serializes the integer Pub/Sub delivers as `100`.
