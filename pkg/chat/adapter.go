@@ -156,6 +156,25 @@ type Reply struct {
 	// adapter that can should render from here and let Text be the fallback
 	// its platform shows in notifications.
 	Decision *Decision
+
+	// Key identifies this reply across processes, so that posting it twice —
+	// once before a crash, once after — can be recognized as one post. Empty
+	// for a reply that has no stable identity, which posts as it always has.
+	//
+	// An adapter whose platform deduplicates on a caller-supplied ID (Google
+	// Chat's requestId) passes the key there, and a repeat is a no-op on the
+	// platform's side. One whose platform cannot should still attach the key
+	// somewhere it can find again (Slack message metadata) for Verify to use.
+	// A reply split across several messages keys each part.
+	Key string
+
+	// Verify asks the adapter to check whether a reply with this Key is
+	// already in the conversation, and post only what is missing. The router
+	// sets it only for a reply that might have been posted by a process that
+	// then died — so an adapter with native deduplication can ignore it, and
+	// one without pays the lookup only then. Best effort: a lookup that fails
+	// posts anyway, and the worst case is a duplicate message.
+	Verify bool
 }
 
 // Usage is the token and cost accounting for the turn a Reply carries. It is

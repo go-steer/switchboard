@@ -103,6 +103,10 @@ type sessionRecord struct {
 	// Relayed, and neither watermark lets a replayed event be posted twice.
 	Relayed int64 `json:"relayed"`
 	Noticed int64 `json:"noticed,omitempty"`
+	// Attempted is the highest seq an answer post was started for, written
+	// before the post. Answers past Relayed and up to it are the ones that
+	// may already be in the thread, and are verified before being posted.
+	Attempted int64 `json:"attempted,omitempty"`
 	// Touched is the last traffic in either direction.
 	Touched time.Time `json:"touched"`
 	// Asked is the questions this conversation has on screen and unanswered.
@@ -335,9 +339,10 @@ func (e *sessionEntry) record() sessionRecord {
 		Adopted: e.adopted,
 		// delivered, not relayed: relayed moves before the post is made, so a
 		// post cut off by shutdown would otherwise be recorded as made.
-		Relayed: e.delivered.Load(),
-		Noticed: e.noticed.Load(),
-		Touched: time.Unix(0, e.touched.Load()).UTC(),
+		Relayed:   e.delivered.Load(),
+		Noticed:   e.noticed.Load(),
+		Attempted: e.attempted.Load(),
+		Touched:   time.Unix(0, e.touched.Load()).UTC(),
 	}
 	e.qmu.Lock()
 	for id, a := range e.asked {
@@ -384,6 +389,11 @@ func entryFromRecord(rec sessionRecord, channel string) (*sessionEntry, error) {
 	e.seq.Store(rec.Relayed)
 	e.relayed.Store(rec.Relayed)
 	e.delivered.Store(rec.Relayed)
+	e.attempted.Store(rec.Attempted)
+	// Anything the dead process started posting and did not see finish.
+	if rec.Attempted > rec.Relayed {
+		e.verifyThrough.Store(rec.Attempted)
+	}
 	e.noticed.Store(max(rec.Noticed, rec.Relayed))
 	e.touched.Store(rec.Touched.UnixNano())
 	// A new process is a new connection: whatever turn was in flight was not

@@ -82,6 +82,7 @@ var _ chat.Adapter = (*Adapter)(nil)
 // Adapter is the Slack implementation of chat.Adapter.
 type Adapter struct {
 	api        *slack.Client
+	scopeOnce  sync.Once // warnVerify's one-time note about the history scopes
 	sm         *socketmode.Client
 	mode       CallerMode
 	richBlocks bool
@@ -334,6 +335,18 @@ func (a *Adapter) Send(ctx context.Context, r chat.Reply) (chat.MessageRef, erro
 		return chat.MessageRef{}, nil // nothing worth posting
 	}
 
+	// A reply that may already be in the thread is looked for first; see
+	// onceonly.go. posted stays nil — post everything — when not asked, or
+	// when the thread could not be read.
+	var posted map[string]string
+	if r.Verify && r.Key != "" {
+		posted = a.postedKeys(ctx, channel, thread, r.Key, len(chunkMessage(rendered, slackTextLimit)))
+		if ts, ok := posted[partKey(r.Key, -1)]; ok {
+			a.logf.Infof("slack: reply %s is already in %s; not posting it again", r.Key, r.Conversation)
+			return chat.MessageRef{Conversation: landedKey(channel, thread, ts), ID: ts}, nil
+		}
+	}
+
 	// A question with answers is posted as buttons whatever RichBlocks says.
 	// That flag is an opinion about how prose should look; this is the
 	// difference between a question somebody can answer and one they can only
@@ -354,7 +367,11 @@ func (a *Adapter) Send(ctx context.Context, r chat.Reply) (chat.MessageRef, erro
 		a.logf.Warnf("slack: decision blocks rejected for %s (%v); retrying as text", r.Conversation, err)
 	}
 
-	if a.richBlocks {
+	// Some of a chunked reply is already in the thread: finish it as chunks.
+	// Trying blocks first would post the whole reply again on top of the
+	// parts that are there, if the blocks render now succeeds where it was
+	// rejected before.
+	if a.richBlocks && len(posted) == 0 {
 		blocks := sanitizeBlocks(withUsageFooter(renderBlocks(r.Text, toMrkdwn), r.Usage))
 		if blocks != nil {
 			// The text fallback is for notifications/old clients only; clamp it
@@ -364,6 +381,7 @@ func (a *Adapter) Send(ctx context.Context, r chat.Reply) (chat.MessageRef, erro
 				slack.MsgOptionBlocks(toSlackBlocks(blocks)...),
 				slack.MsgOptionText(clamp(rendered, maxSectionText), false),
 			)
+			opts = append(opts, metadataOpt(partKey(r.Key, -1))...)
 			_, ts, err := a.api.PostMessageContext(ctx, channel, opts...)
 			if err == nil {
 				return chat.MessageRef{Conversation: landedKey(channel, thread, ts), ID: ts}, nil
@@ -376,11 +394,23 @@ func (a *Adapter) Send(ctx context.Context, r chat.Reply) (chat.MessageRef, erro
 	}
 
 	var ref chat.MessageRef // first posted message, returned to the caller
-	for _, chunk := range chunkMessage(rendered, slackTextLimit) {
+	for i, chunk := range chunkMessage(rendered, slackTextLimit) {
 		if strings.TrimSpace(chunk) == "" {
 			continue
 		}
+		key := ""
+		if r.Key != "" {
+			key = partKey(r.Key, i)
+		}
+		if ts, ok := posted[key]; ok && key != "" {
+			// This part made it out before; the rest of the reply follows it.
+			if ref.ID == "" {
+				ref = chat.MessageRef{Conversation: landedKey(channel, thread, ts), ID: ts}
+			}
+			continue
+		}
 		opts := append(threadOpt(thread), slack.MsgOptionText(chunk, false))
+		opts = append(opts, metadataOpt(key)...)
 		_, ts, err := a.api.PostMessageContext(ctx, channel, opts...)
 		if err != nil {
 			return ref, fmt.Errorf("slack: post to %s: %w", r.Conversation, platformErr(err))

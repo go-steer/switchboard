@@ -63,6 +63,8 @@ package googlechat
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/http"
@@ -99,7 +101,10 @@ const patchMask = "text,cardsV2"
 // narrowed to an interface so Send/Update/Delete are testable with a fake and
 // the adapter never depends on a live Chat service in unit tests.
 type messenger interface {
-	create(ctx context.Context, parent string, msg *chatv1.Message) (*chatv1.Message, error)
+	// create posts msg. A non-empty requestID makes the post idempotent on
+	// Chat's side: "specifying an existing request ID returns the message
+	// created with that ID instead of creating a new message".
+	create(ctx context.Context, parent string, msg *chatv1.Message, requestID string) (*chatv1.Message, error)
 	patch(ctx context.Context, name string, msg *chatv1.Message, mask string) error
 	delete(ctx context.Context, name string) error
 }
@@ -537,7 +542,22 @@ func choicesOf(h chat.Handler, name string) []string {
 // goes as Chat text split across as many in-thread posts as it needs so nothing
 // is truncated. An empty reply posts nothing.
 func (a *Adapter) Send(ctx context.Context, r chat.Reply) (chat.MessageRef, error) {
-	return a.post(ctx, r.Conversation, a.cardFor(r), toChatText(strings.TrimSpace(r.Text)))
+	return a.postKeyed(ctx, r.Conversation, a.cardFor(r), toChatText(strings.TrimSpace(r.Text)), r.Key)
+}
+
+// requestID turns a reply's key, and which of its messages this is, into a
+// Chat request ID. Hashed, because the key is built from a session reference
+// and a seq and Chat documents no character set for the field; prefixed, so
+// it is recognizably ours in a request log. Empty for an unkeyed reply.
+//
+// Chat deduplicates on it natively, so Reply.Verify is not consulted here: a
+// repeated post with the same ID returns the message the first one created.
+func requestID(key, part string) string {
+	if key == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(key + "\x00" + part))
+	return "switchboard-" + hex.EncodeToString(sum[:16])
 }
 
 // cardFor picks the card that renders this reply, or nil for the text path.
@@ -565,6 +585,13 @@ func (a *Adapter) cardFor(r chat.Reply) *chatv1.GoogleAppsCardV1Card {
 // reply — while any other failure is returned, so a missing space or a denied
 // post reaches the caller classified.
 func (a *Adapter) post(ctx context.Context, conv string, card *chatv1.GoogleAppsCardV1Card, text string) (chat.MessageRef, error) {
+	return a.postKeyed(ctx, conv, card, text, "")
+}
+
+// postKeyed is post with an idempotency key (chat.Reply.Key): each message it
+// creates carries a request ID derived from the key and the message's place in
+// the reply, so the same reply posted again creates nothing new.
+func (a *Adapter) postKeyed(ctx context.Context, conv string, card *chatv1.GoogleAppsCardV1Card, text, key string) (chat.MessageRef, error) {
 	space, thread, ok := splitConversation(conv)
 	if !ok {
 		return chat.MessageRef{}, fmt.Errorf("googlechat: malformed conversation key %q", conv)
@@ -579,7 +606,13 @@ func (a *Adapter) post(ctx context.Context, conv string, card *chatv1.GoogleApps
 		if thread != "" {
 			msg.Thread = &chatv1.Thread{Name: thread}
 		}
-		created, err := a.msg.create(ctx, space, msg)
+		// The card shares its request ID with the first text part. Which of
+		// the two renders a reply takes can differ between processes — a
+		// usage footer present in one and not the other, a card that fits
+		// once and is rejected once — and with separate IDs a replay could
+		// post the card on top of text parts already posted, or the reverse.
+		// With one, Chat answers the second with the first.
+		created, err := a.msg.create(ctx, space, msg, requestID(key, "part-0"))
 		if err == nil {
 			return chat.MessageRef{Conversation: landedKey(conv, space, thread, created), ID: created.Name}, nil
 		}
@@ -593,12 +626,12 @@ func (a *Adapter) post(ctx context.Context, conv string, card *chatv1.GoogleApps
 	}
 
 	var first chat.MessageRef
-	for _, part := range chunk(text, chatTextLimit) {
+	for i, part := range chunk(text, chatTextLimit) {
 		msg := &chatv1.Message{Text: part}
 		if thread != "" {
 			msg.Thread = &chatv1.Thread{Name: thread}
 		}
-		created, err := a.msg.create(ctx, space, msg)
+		created, err := a.msg.create(ctx, space, msg, requestID(key, fmt.Sprintf("part-%d", i)))
 		if err != nil {
 			return first, fmt.Errorf("googlechat: post to %s: %w", conv, platformErr(err))
 		}
@@ -743,8 +776,11 @@ func (e classifiedError) Unwrap() []error { return []error{e.err, e.class} }
 // restMessenger is the production messenger backed by the Chat REST service.
 type restMessenger struct{ svc *chatv1.Service }
 
-func (m restMessenger) create(ctx context.Context, parent string, msg *chatv1.Message) (*chatv1.Message, error) {
+func (m restMessenger) create(ctx context.Context, parent string, msg *chatv1.Message, requestID string) (*chatv1.Message, error) {
 	call := m.svc.Spaces.Messages.Create(parent, msg)
+	if requestID != "" {
+		call = call.RequestId(requestID)
+	}
 	// The reply option only applies when replying into a specific thread; a
 	// top-level post (no thread) omits it and starts a new thread.
 	if msg.Thread != nil && msg.Thread.Name != "" {

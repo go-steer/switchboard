@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -448,5 +449,93 @@ func TestAKeptPlaceholderIsNotRecorded(t *testing.T) {
 	e.beginTurnInFlight()
 	if got := e.record().Placeholder; got != "ts-kept" {
 		t.Errorf("Placeholder = %q with a turn in flight, want the live placeholder", got)
+	}
+}
+
+// attemptSender records each reply and, at the moment of the post, what the
+// state file says was attempted — which is the order noteAttempt promises:
+// written down first, posted second.
+type attemptSender struct {
+	*fakeSender
+	store       *fileStore
+	mu          sync.Mutex
+	sent        []chat.Reply
+	attemptedAt []int64
+}
+
+func (s *attemptSender) Send(ctx context.Context, r chat.Reply) (chat.MessageRef, error) {
+	if r.Key != "" {
+		st, _ := s.store.load()
+		s.mu.Lock()
+		s.sent = append(s.sent, r)
+		s.attemptedAt = append(s.attemptedAt, st.Sessions["C0:1"].Attempted)
+		s.mu.Unlock()
+	}
+	return s.fakeSender.Send(ctx, r)
+}
+
+// TestAnAnswerIsKeyedAndItsAttemptIsWrittenFirst: every answer carries its
+// session-and-seq key, and the attempt is on disk before the post leaves —
+// with no persister running, so it is noteAttempt's own synchronous write.
+func TestAnAnswerIsKeyedAndItsAttemptIsWrittenFirst(t *testing.T) {
+	d := &boundDaemon{resumed: make(chan string, 16)}
+	r, fake := boundRouter(t, d)
+	s, err := openFileStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.setStore(s)
+	out := &attemptSender{fakeSender: fake, store: s}
+	r.out = out
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := r.Handle(ctx, chat.Message{Conversation: "C0:1", Channel: "C0", Caller: "alice@example.com", Text: "status?"}); err != nil {
+		t.Fatal(err)
+	}
+	<-d.resumed
+	d.publish(agentFrame(4, "all green"))
+	select {
+	case <-fake.replies:
+	case <-time.After(2 * time.Second):
+		t.Fatal("no answer")
+	}
+	out.mu.Lock()
+	defer out.mu.Unlock()
+	if len(out.sent) != 1 || out.sent[0].Key != "core-agent/fresh#4" || out.sent[0].Verify {
+		t.Fatalf("sent = %+v, want one answer keyed core-agent/fresh#4, not verified", out.sent)
+	}
+	if out.attemptedAt[0] != 4 {
+		t.Errorf("state file said attempted=%d at the moment of the post, want 4: written first", out.attemptedAt[0])
+	}
+}
+
+// TestOnlyAnAnswerThatMayHaveLandedIsVerified: the dead process recorded that
+// it started posting the answer at seq 5 and never saw it finish. After the
+// restart that answer is posted with Verify, so an adapter checks before
+// posting; the answer at seq 7, which nobody had started, is posted plainly.
+func TestOnlyAnAnswerThatMayHaveLandedIsVerified(t *testing.T) {
+	d := &boundDaemon{resumed: make(chan string, 16)}
+	d.publish(agentFrame(5, "the one in doubt"), agentFrame(7, "certainly new"))
+	r, fake := boundRouter(t, d)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	r.restore(ctx, routerState{Version: stateVersion, Sessions: map[string]sessionRecord{"C0:1": {
+		Session: "core-agent/s1", Owner: "alice@example.com", Relayed: 3, Attempted: 5, Touched: time.Now(),
+	}}}, time.Now())
+
+	got := map[string]bool{}
+	for range 2 {
+		select {
+		case rep := <-fake.replies:
+			got[rep.Key] = rep.Verify
+		case <-time.After(2 * time.Second):
+			t.Fatalf("answers so far: %v", got)
+		}
+	}
+	if v, ok := got["core-agent/s1#5"]; !ok || !v {
+		t.Errorf("answer at 5: verify=%v present=%v; want it checked before posting", v, ok)
+	}
+	if v, ok := got["core-agent/s1#7"]; !ok || v {
+		t.Errorf("answer at 7: verify=%v present=%v; want it posted without a lookup", v, ok)
 	}
 }
