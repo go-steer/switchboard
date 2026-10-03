@@ -142,6 +142,13 @@ type ChannelConfig struct {
 	// including back to ["channel"] — so a narrowed default is not a floor, and
 	// the startup banner counts both.
 	Approvers []string `json:"approvers,omitempty"`
+
+	// StandingApprovers gates the answer that outlives the session
+	// (approval.Decision.Standing) on top of Approvers: a standing press has
+	// to satisfy both, so this narrows and never widens. Replaces the wider
+	// list like Approvers does, and like it can say ["channel"], which here
+	// means "no tighter than the approver list" (#85).
+	StandingApprovers []string `json:"standing_approvers,omitempty"`
 }
 
 // loadConfig reads and validates a config file.
@@ -447,6 +454,13 @@ func channelsFrom(cfg *Config, def channelSettings, platform string, mode chat.C
 			}
 			s.approvers = p
 		}
+		if c.StandingApprovers != nil {
+			p, err := parseStandingList(c.StandingApprovers, mode)
+			if err != nil {
+				return nil, fmt.Errorf("channels[%q].standing_approvers: %w", id, err)
+			}
+			s.standing = p
+		}
 		out[id] = s
 	}
 	return out, nil
@@ -502,6 +516,7 @@ func configureRouter(r *Router, ac *approval.Client, def channelSettings, byChan
 	r.setShowUsage(def.showUsage)
 	r.setApprovals(ac, def.approvals)
 	r.setApprovers(def.approvers)
+	r.setStandingApprovers(def.standing)
 	r.setChannels(byChannel)
 }
 
@@ -550,6 +565,42 @@ func approverSpread(byChannel map[string]channelSettings) (open, named int) {
 		}
 	}
 	return open, named
+}
+
+// standingSpread counts the channels that relay prompts and set a standing
+// list of their own, by what it says: open ("channel", any approver may make
+// a grant permanent), named, or none. Explicit blocks only — every block
+// inherits the default, and counting inheritance as "their own" would both
+// inflate the line and hide the one case it exists for, a channel widening a
+// narrowed default back to "channel".
+func standingSpread(cfg *Config, byChannel map[string]channelSettings) (open, named, none int) {
+	for id, c := range cfg.Channels {
+		s, ok := byChannel[id]
+		if c.StandingApprovers == nil || !ok || !s.approvals {
+			continue
+		}
+		switch {
+		case s.standing.none:
+			none++
+		case s.standing.open():
+			open++
+		default:
+			named++
+		}
+	}
+	return open, named, none
+}
+
+// unreachableChannels counts the channels relaying prompts where no approver
+// can also give a standing answer — see unreachableStanding.
+func unreachableChannels(byChannel map[string]channelSettings) int {
+	n := 0
+	for _, s := range byChannel {
+		if s.approvals && unreachableStanding(s.approvers, s.standing) {
+			n++
+		}
+	}
+	return n
 }
 
 // hasFlag reports whether any of these flag names was given on argv. Used for

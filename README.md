@@ -275,8 +275,8 @@ would match nothing while looking like it had narrowed the channel. `name` is a
 comment for whoever reads the file next, since JSON has none; nothing reads it.
 A block
 inherits every setting it does not mention from `defaults`, and `defaults`
-inherits from the flags. Four settings are scopable: `approvals`, `approvers`,
-`progress_mode`, `show_usage`. The two render modes (`slack_rich_blocks`,
+inherits from the flags. Five settings are scopable: `approvals`, `approvers`,
+`standing_approvers`, `progress_mode`, `show_usage`. The two render modes (`slack_rich_blocks`,
 `googlechat_cards`) are process-wide — the adapter reads them when it is built,
 before there is a channel to ask about.
 
@@ -651,6 +651,36 @@ This is a gateway-side gate on a surface switchboard invented, not a
 re-implementation of the backend's authorization: core-agent still decides what
 the caller may do once the answer reaches it. There is no `--approvers` value
 meaning "nobody" — leaving `--approvals` off already does that.
+
+**Standing grants can be gated separately.** One answer is not bounded by the
+room it was pressed in: `allow-always` saves a grant to the daemon that is still
+in force after the thread, the incident and the session are gone. Room
+membership is a fair test of who may approve one call and says nothing about who
+should write that. `--standing-approvers` (or `$SWITCHBOARD_STANDING_APPROVERS`,
+or `standing_approvers` in the config file, per channel too) names who may give
+it:
+
+```sh
+--approvers channel --standing-approvers "ana@example.com"
+```
+
+Anyone in the room can approve a call, deny it, or grant the rest of the
+session; only Ana can save a grant. Somebody else pressing *Always allow* is
+told **Not a standing approver** and can still answer for the request itself.
+The list only narrows — a standing press has to pass `--approvers` as well, so
+naming someone here who is not an approver does not let them in (a run whose
+two lists share nobody says so at startup, since its *Always allow* buttons can
+never work). `nobody` switches permanent grants from chat off while leaving
+one-shot approvals on. It defaults to `channel`, which means no tighter than
+`--approvers`, and the startup banner says which posture a run has:
+
+```
+2026-10-03T09:00:00.000Z INFO  switchboard: approvals: an answer that outlives the session (allow-always) needs one of 1 named standing approver(s), who must also be approvers
+```
+
+The session grants (`allow-session`, `allow-session-verb`,
+`allow-session-tool`) are not standing: they die with the session that holds
+them, so the room they were pressed in is still the room they apply to.
 
 Six answers exist, and switchboard offers the ones that mean what they say for
 the prompt in front of you:

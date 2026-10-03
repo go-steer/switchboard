@@ -682,3 +682,19 @@ func TestNoClientTimeoutSurvivesToCutAStream(t *testing.T) {
 		t.Errorf("the caller's own client was mutated: Timeout = %v", shared.Timeout)
 	}
 }
+
+// TestStanding: only a grant that outlives the session is standing, and a
+// decision this package does not recognise is gated as standing rather than
+// waved through as the narrower kind (#85).
+func TestStanding(t *testing.T) {
+	for _, d := range Decisions() {
+		if want := d == AllowAlways; d.Standing() != want {
+			t.Errorf("%q.Standing() = %v, want %v", d, d.Standing(), want)
+		}
+	}
+	for _, d := range []Decision{"", "allow-forever", "ALLOW-ONCE"} {
+		if !d.Standing() {
+			t.Errorf("%q.Standing() = false; an unrecognised decision must fail closed", d)
+		}
+	}
+}

@@ -32,6 +32,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   says so at startup. Broad
   answers get no "are you sure" step on Chat yet, unlike Slack: Chat has no
   native confirmation.
+- `--standing-approvers` gates the one answer whose reach is not bounded by the
+  room it was pressed in (#85): `allow-always`, which saves a grant to the
+  daemon that outlives the session. Under the default `--approvers channel`,
+  anyone who could post in a room could also write that standing grant; now a
+  run can let the room approve calls while naming who may make one permanent.
+  A standing press must pass both lists, so this only narrows, and someone it
+  refuses is told **Not a standing approver** and can still answer for the
+  request. Also `$SWITCHBOARD_STANDING_APPROVERS` (an empty value is refused,
+  like `$SWITCHBOARD_APPROVERS`) and `standing_approvers` in the config file,
+  per channel too. `nobody` turns permanent grants from chat off and keeps
+  one-shot approvals. Defaults to `channel` — no tighter than `--approvers` —
+  so nothing changes on upgrade, and the approvals banner now says on every
+  start whether a standing grant needs more than any other answer, and warns
+  when no approver is also a standing approver.
 - Google Chat can receive over **HTTP** instead of Pub/Sub (#29):
   `--googlechat-ingress http` serves `POST /chat` on `--googlechat-listen`, and
   the Chat app's connection settings name that URL instead of a topic. Same

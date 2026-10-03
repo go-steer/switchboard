@@ -276,6 +276,29 @@ func (d Decision) Allows() bool {
 	return false
 }
 
+// Standing reports whether the decision writes a grant that outlives the
+// session — one that is still in force after the thread, the incident and the
+// process that raised it are gone. Today that is AllowAlways and nothing else.
+//
+// Narrower than Option.Broad on purpose. The session grants are broad, since
+// they outlive the request, but they die with the session that holds them, so
+// the room the press happened in is still the room they apply to. A standing
+// grant is the one press whose reach is not bounded by anything the person
+// pressing could see, and it is the one a gateway may want to gate more
+// tightly than a one-shot answer (#85).
+//
+// Written as the list of decisions that are *not* standing, so that one this
+// package does not recognise is gated as the wider kind rather than quietly
+// waved through as the narrower — the same fail-closed reasoning as Allows,
+// pointed the other way because here the safe answer is "yes".
+func (d Decision) Standing() bool {
+	switch d {
+	case Deny, AllowOnce, AllowSession, AllowSessionVerb, AllowSessionTool:
+		return false
+	}
+	return true
+}
+
 // Option is one answer offered for a specific prompt: the value to send back
 // and the label to put on it.
 type Option struct {
