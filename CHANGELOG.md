@@ -17,15 +17,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
   A click is answered in its own response: the edit recording how the
   question ended goes back as an add-on `updateMessageAction`, so the card
-  changes the moment it is pressed. A press slower than ten seconds is
-  acknowledged with `{}` and its edit follows over REST; a refused or stale
+  changes the moment it is pressed — and the same edit is sent over REST right
+  after, because nothing confirms the response landed or that Chat accepted
+  the card in it. A press slower than ten seconds is acknowledged with `{}`
+  and its edit follows over REST; a refused or stale
   press leaves the question alone and says why beside it. A legacy-dialect
   click is acknowledged and answered over REST.
 
   Each button sends its click to the endpoint's full URL — Chat's add-on
   runtime fails a bare function name without sending anything — so the gateway
   uses `--googlechat-endpoint-url`, or learns the URL from the first verified
-  event; until then a card that would carry buttons goes as text. Broad
+  event; until then a card that would carry buttons goes as text. A run with
+  approvals on whose Chat answers cannot be buttons (Pub/Sub, or cards off)
+  says so at startup. Broad
   answers get no "are you sure" step on Chat yet, unlike Slack: Chat has no
   native confirmation.
 - Google Chat can receive over **HTTP** instead of Pub/Sub (#29):

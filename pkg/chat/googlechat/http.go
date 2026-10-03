@@ -103,20 +103,44 @@ type clickKey struct{}
 // clickResponse is the edit a click caused to the message hosting its card,
 // held for the click's HTTP response instead of being sent over REST.
 //
-// It exists because the response is the better channel and the router does
+// It exists because the response is the faster channel and the router does
 // not know there is one. An approval must visibly do something the moment it
-// is pressed (docs/DESIGN.md §3.4), and a REST patch racing the response is a
-// round-trip later at best. But the router records a decision by calling
-// Update, exactly as it does for Slack, and it should not learn that one
-// platform can answer a click in-band — so the capture sits in rewrite, keyed
-// to the one message the click came from, and everything else the press does
-// (a notice beside the question, a refusal) goes out over REST as usual.
+// is pressed (docs/DESIGN.md §3.4), and a REST patch is a round-trip later at
+// best. But the router records a decision by calling Update, exactly as it
+// does for Slack, and it should not learn that one platform can answer a click
+// in-band — so the capture sits in rewrite, keyed to the one message the click
+// came from, and everything else the press does (a notice beside the question,
+// a refusal) goes out over REST as usual.
+//
+// Faster, not authoritative. Nothing tells the handler whether Chat received
+// the response or accepted the card in it — net/http buffers the write, so it
+// "succeeds" past a deadline or a dropped connection — and an edit that is
+// lost leaves a settled question with live buttons that every later press
+// answers with nothing visible. So the captured edit is also sent over REST
+// once the response is written (answerClick), through rewrite's ordinary path
+// with its card-rejection fallback. A patch is idempotent, and the in-band copy
+// is the one the presser sees first.
 type clickResponse struct {
 	name string // the hosting message; only its edits are captured
 
 	mu     sync.Mutex
-	msg    *chatv1.Message
+	edit   *clickEdit
 	closed bool
+}
+
+// clickEdit is one captured edit, kept in rewrite's terms so it can be
+// replayed through rewrite.
+type clickEdit struct {
+	card *chatv1.GoogleAppsCardV1Card
+	text string
+}
+
+// message renders the edit as the Message an updateMessageAction carries.
+func (e *clickEdit) message() *chatv1.Message {
+	if cards := singleCard(e.card); cards != nil {
+		return &chatv1.Message{CardsV2: cards}
+	}
+	return &chatv1.Message{Text: e.text}
 }
 
 // take captures an edit to name, reporting whether it did. Once the response
@@ -132,20 +156,16 @@ func (c *clickResponse) take(name string, card *chatv1.GoogleAppsCardV1Card, tex
 		return false
 	}
 	// The latest edit wins, as it would over REST.
-	if cards := singleCard(card); cards != nil {
-		c.msg = &chatv1.Message{CardsV2: cards}
-	} else {
-		c.msg = &chatv1.Message{Text: text}
-	}
+	c.edit = &clickEdit{card: card, text: text}
 	return true
 }
 
 // close ends capturing and returns what was captured, if anything.
-func (c *clickResponse) close() *chatv1.Message {
+func (c *clickResponse) close() *clickEdit {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.closed = true
-	return c.msg
+	return c.edit
 }
 
 // clickFrom returns the click response ctx is answering, or nil.
@@ -434,7 +454,9 @@ func (a *Adapter) learnURL(r *http.Request) {
 
 // answerClick runs a click and answers it with the edit it made to the
 // hosting card, if that edit is ready within clickBudget, and with "{}"
-// otherwise — after which the edit, whenever it comes, goes over REST.
+// otherwise — after which the edit, whenever it comes, goes over REST. An
+// edit that did ride in the response is sent over REST as well, right after
+// it; see clickResponse.
 //
 // The click runs on the run context like a turn does, not on the request's:
 // the response may be written before it finishes, and a press that has reached
@@ -464,34 +486,33 @@ func (a *Adapter) answerClick(w http.ResponseWriter, r *http.Request, runCtx con
 	case <-r.Context().Done():
 	}
 
-	msg := click.close()
-	resp, inBand := []byte("{}"), false
-	if msg != nil {
-		if b, err := updateMessageResponse(msg); err != nil {
-			// Unreachable for a chatv1.Message; the edit is not lost, because
-			// it goes over REST below.
+	edit := click.close()
+	resp := []byte("{}")
+	if edit != nil {
+		if b, err := updateMessageResponse(edit.message()); err != nil {
+			// Unreachable for a chatv1.Message; the edit still lands, over
+			// REST below.
 			a.logf.Errorf("googlechat: ingress: encode click response for %s: %v", hosting, err)
 		} else {
-			resp, inBand = b, true
+			resp = b
 		}
 	}
-	err := r.Context().Err()
-	if err == nil {
+	if r.Context().Err() == nil {
 		w.Header().Set("Content-Type", "application/json")
-		_, err = w.Write(resp)
+		if _, err := w.Write(resp); err != nil {
+			a.logf.Warnf("googlechat: ingress: write click response: %v", err)
+		}
 	}
-	if err != nil {
-		a.logf.Warnf("googlechat: ingress: write click response: %v", err)
-	}
-	if msg != nil && (err != nil || !inBand) {
-		// The edit was captured but did not go out in the response. It has
-		// been taken from the REST path, so it has to be sent from here or not
-		// at all — and a decision recorded nowhere is the thing the capture
-		// was meant to make faster, not to lose.
+	if edit != nil {
+		// And over REST, every time: see clickResponse for why the response
+		// cannot be trusted to have landed. On the run context rather than
+		// the click's, so rewrite takes its ordinary path — capture closed,
+		// card-rejection fallback intact — and bounded, since a hung platform
+		// call here holds the handler open.
 		pctx, cancel := context.WithTimeout(context.WithoutCancel(runCtx), clickBudget)
 		defer cancel()
-		if perr := a.msg.patch(pctx, hosting, msg, patchMask); perr != nil {
-			a.logf.Errorf("googlechat: ingress: click edit %s over REST: %v", hosting, platformErr(perr))
+		if err := a.rewrite(pctx, hosting, edit.card, edit.text); err != nil {
+			a.logf.Errorf("googlechat: ingress: click edit %s over REST: %v", hosting, err)
 		}
 	}
 }

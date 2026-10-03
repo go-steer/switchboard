@@ -612,8 +612,71 @@ func TestIngressAnswersAClickWithItsEdit(t *testing.T) {
 		t.Errorf("edited message = %+v, want the settled decision card", msg)
 	}
 	assertNothingClickable(t, "settled", msg.CardsV2[0].Card)
-	if len(f.patches) != 0 {
-		t.Errorf("patches = %+v; the edit went in the response, so REST must not send it again", f.patches)
+	// And over REST as well, with the same card: nothing tells the handler
+	// whether Chat received the response or accepted the card in it, and a
+	// lost edit leaves a settled question with live buttons.
+	if len(f.patches) != 1 || f.patches[0].name != "spaces/AAA/messages/Q1" {
+		t.Fatalf("patches = %+v, want the in-band edit replayed over REST once", f.patches)
+	}
+	if got, want := cardText(f.patches[0].card), cardText(msg.CardsV2[0].Card); got != want {
+		t.Errorf("REST replay = %q, want the same card the response carried, %q", got, want)
+	}
+}
+
+// TestIngressStillEditsWhenTheResponseIsLost: Chat hanging up before the
+// response is written must not cost the edit. It is the case the REST replay
+// exists for, and the one a buffered Write cannot detect on its own.
+func TestIngressStillEditsWhenTheResponseIsLost(t *testing.T) {
+	f := &fakeMessenger{}
+	a := newIngressAdapter(t, f)
+	a.cards = CardsStatus
+	h := &pressHandler{a: a}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	r := postEvent(testClickBody).WithContext(ctx)
+	r.Header.Set("Authorization", "Bearer good-token")
+	rec := httptest.NewRecorder()
+	var wg sync.WaitGroup
+	a.eventHandler(context.Background(), &wg, h).ServeHTTP(rec, r)
+	wg.Wait()
+
+	if len(f.patches) != 1 || f.patches[0].card == nil {
+		t.Fatalf("patches = %+v, want the edit sent over REST", f.patches)
+	}
+	assertNothingClickable(t, "settled", f.patches[0].card)
+}
+
+// TestIngressAnswersACommandButtonInBand: the welcome's and the ack's buttons
+// take the same in-band path as a decision's — the ack replaces the card that
+// was clicked, with its row of values still on it.
+func TestIngressAnswersACommandButtonInBand(t *testing.T) {
+	f := &fakeMessenger{}
+	a := newIngressAdapter(t, f)
+	a.cards = CardsStatus
+	h := &choiceHandler{}
+	h.ack = "Progress mode for this channel set to *stream*."
+	h.choices = []string{"off", "stream"}
+
+	body := `{"chat": {"user": {"name": "users/7"}, "space": {"name": "spaces/AAA"},
+		"buttonClickedPayload": {"message": {"name": "spaces/AAA/messages/W1", "thread": {"name": "spaces/AAA/threads/T1"}}}},
+		"commonEventObject": {"parameters": {"switchboard_command": "progress", "switchboard_arg": "stream"}}}`
+	r := postEvent(body)
+	r.Header.Set("Authorization", "Bearer good-token")
+	rec := httptest.NewRecorder()
+	var wg sync.WaitGroup
+	a.eventHandler(context.Background(), &wg, h).ServeHTTP(rec, r)
+	wg.Wait()
+
+	if len(h.cmds) != 1 || h.cmds[0].Name != "progress" || strings.Join(h.cmds[0].Args, ",") != "stream" {
+		t.Fatalf("cmds = %+v, want progress stream", h.cmds)
+	}
+	msg, ok := clickEnvelope(t, rec.Body.Bytes())
+	if !ok || len(msg.CardsV2) != 1 {
+		t.Fatalf("response = %s, want the ack card in an updateMessageAction", rec.Body)
+	}
+	if b := buttonsOf(msg.CardsV2[0].Card); len(b) != 2 || b[0].OnClick.Action.Function != testAudience {
+		t.Errorf("ack buttons = %+v, want the value row aimed at the endpoint", b)
 	}
 }
 
@@ -703,12 +766,16 @@ func TestIngressLearnsItsURLForButtons(t *testing.T) {
 	}
 
 	// An unverified request teaches it nothing: the URL is only trustworthy
-	// because a token minted for it checked out.
+	// because a token minted for it checked out. A genuine token replayed at
+	// another Host fails on the audience, and must not plant that Host.
 	b := newIngressAdapter(t, f)
 	b.verify.audience = ""
 	bad := postEvent(`{}`)
 	bad.Host = "attacker.example.com"
-	serveOne(t, b, &fakeHandler{}, bad)
+	bad.Header.Set("Authorization", "Bearer good-token")
+	if rec := serveOne(t, b, &fakeHandler{}, bad); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want the replayed token refused on its audience", rec.Code)
+	}
 	if got := b.actionURL(); got != "" {
 		t.Errorf("actionURL after a rejected request = %q, want none", got)
 	}

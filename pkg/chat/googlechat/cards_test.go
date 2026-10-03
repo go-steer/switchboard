@@ -267,6 +267,30 @@ func TestDecisionCardEdgeCases(t *testing.T) {
 	}
 }
 
+// TestALongQuestionKeepsItsOutcome: a prompt's detail can push the body past
+// one widget's budget, and the settled edit puts the outcome after all of it.
+// A clamp would cut exactly the line recording who decided; the body spills
+// instead, and the outcome is still on the card.
+func TestALongQuestionKeepsItsOutcome(t *testing.T) {
+	detail := strings.Repeat("<a&b> ", 600) // escaping grows every rune of this
+	text := "Permission needed: `" + detail + "`\n\n✅ Allowed, this once — ana@example.com"
+	card := decisionCard(text, nil, testAudience)
+	if card == nil {
+		t.Fatal("no card")
+	}
+	got := cardText(card)
+	if !strings.Contains(got, "ana@example.com") {
+		t.Errorf("the outcome was cut from a long question's settled card")
+	}
+	for _, s := range card.Sections {
+		for _, w := range s.Widgets {
+			if w.TextParagraph != nil && len(w.TextParagraph.Text) > maxWidgetText {
+				t.Errorf("a widget carries %d bytes, over the %d budget", len(w.TextParagraph.Text), maxWidgetText)
+			}
+		}
+	}
+}
+
 // TestCommandRowReinvokesTheCommand: the welcome's and the ack's buttons are
 // the command typed out, one per accepted value.
 func TestCommandRowReinvokesTheCommand(t *testing.T) {

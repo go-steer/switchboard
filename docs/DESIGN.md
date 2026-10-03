@@ -737,9 +737,14 @@ Everything else a press does — a refusal, a notice beside the question — goe
 over REST as before. The response waits ten seconds at most (the server's
 `WriteTimeout` is fifteen); a slower press is answered `{}`, which Google
 documents as the acknowledgment for an interaction whose result comes later,
-and its edit falls through to REST. An edit captured but not delivered — the
-connection gone before the write — is sent over REST from there rather than
-lost. A **legacy** click is acknowledged like any other event and answered over
+and its edit falls through to REST. The in-band edit is the fast copy, not
+the authoritative one: nothing tells the handler whether Chat received the
+response or accepted the card in it (`net/http` buffers the write, so it
+"succeeds" past a deadline or a dropped connection), and a lost edit leaves a
+settled question with live buttons that every later press answers with
+nothing visible. So the captured edit is replayed over REST right after the
+response, through `rewrite`'s ordinary path with its card-rejection fallback;
+a patch is idempotent, and the presser sees the in-band copy first. A **legacy** click is acknowledged like any other event and answered over
 REST: its response envelope is not the add-on one, and nothing here has
 measured it.
 

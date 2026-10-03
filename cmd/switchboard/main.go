@@ -523,6 +523,15 @@ func runServe(args []string) (err error) {
 					"of switchboard rewrites Host")
 			}
 		}
+		// A permission prompt nobody can answer from the room is still worth
+		// posting — it says the agent is blocked, and on what — but an
+		// operator who turned approvals on for a Chat deployment should not
+		// have to discover from a thread that the buttons cannot exist here.
+		if wantApprovals && inbound && (ingressMode != googlechat.IngressHTTP || cardMode == googlechat.CardsOff) {
+			logf.Warnf("approvals: Google Chat renders the answers as buttons only with " +
+				"--googlechat-ingress http and cards on; this run posts permission prompts as " +
+				"text, and they have to be answered somewhere else")
+		}
 	default:
 		return fmt.Errorf("invalid --platform %q (want \"slack\" or \"googlechat\")", *platform)
 	}

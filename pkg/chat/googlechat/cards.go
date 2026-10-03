@@ -471,12 +471,12 @@ func decisionCard(text string, d *chat.Decision, actionURL string) *chatv1.Googl
 	if actionURL == "" {
 		return nil
 	}
-	body := htmlWidget(text)
-	if body == nil {
+	body := decisionBody(text)
+	if len(body) == 0 {
 		return nil
 	}
 	if !d.Deciding() {
-		return widgetCard(body)
+		return widgetCard(body...)
 	}
 	buttons := make([]*chatv1.GoogleAppsCardV1Button, 0, len(d.Options))
 	for _, o := range d.Options {
@@ -492,7 +492,25 @@ func decisionCard(text string, d *chat.Decision, actionURL string) *chatv1.Googl
 			&chatv1.GoogleAppsCardV1ActionParameter{Key: paramOption, Value: o.Value},
 		))
 	}
-	return widgetCard(body, buttonRow(2, buttons...))
+	return widgetCard(append(body, buttonRow(2, buttons...))...)
+}
+
+// decisionBody renders a question's text as one or more paragraphs, spilling
+// rather than clamping. A permission prompt carries up to 1500 runes of
+// agent-supplied detail, which HTML escaping and multi-byte text can push past
+// one widget's budget — and the settled edit appends the outcome after all of
+// it, so a clamp would cut exactly the line recording who decided, while the
+// buttons still came down. Split at half the budget because the split is on
+// Chat markup and the budget is on the HTML it becomes, which escaping grows;
+// htmlWidget's clamp stays behind it as a backstop.
+func decisionBody(text string) []*chatv1.GoogleAppsCardV1Widget {
+	var out []*chatv1.GoogleAppsCardV1Widget
+	for _, part := range chat.ChunkText(strings.TrimSpace(text), maxWidgetText/2) {
+		if w := htmlWidget(part); w != nil {
+			out = append(out, w)
+		}
+	}
+	return out
 }
 
 // clampRunes bounds s to n runes, never splitting one.
