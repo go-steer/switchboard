@@ -7,7 +7,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
-- `docs/slack-app-manifest.yaml`: the Slack app as a manifest — Socket Mode,
+- `deploy/slack/app-manifest.yaml`: the Slack app as a manifest — Socket Mode,
   `app_mention`, interactivity, the `/switchboard` command, and the bot scopes
   the adapter's API calls need, including the optional `*:history` scopes for
   restart verification. Paste it to create the app or to update an existing

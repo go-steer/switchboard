@@ -57,7 +57,7 @@ Slack half. Design rationale is in [DESIGN.md](DESIGN.md).
 ## Create the app
 
 The quick way: **Create New App → From an app manifest**, pick the workspace,
-and paste [`slack-app-manifest.yaml`](slack-app-manifest.yaml). It sets up
+and paste [`deploy/slack/app-manifest.yaml`](../deploy/slack/app-manifest.yaml). It sets up
 everything below except the two tokens — then generate the app-level token
 (step 1) and install the app (step 6). For an app that already exists, paste
 the same file under **App Manifest** in its settings: Slack shows what changes
