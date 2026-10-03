@@ -358,6 +358,10 @@ type Router struct {
 	metrics *metrics
 	logf    logging.Logf
 
+	// parkWait overrides parkRespondTimeout; zero means the constant. A test
+	// seam.
+	parkWait time.Duration
+
 	// defaults are the channel-scopable settings as they apply to a channel
 	// with nothing said about it, and byChannel is what a config file said
 	// about the ones it named (#71). Both are written once at startup — by
