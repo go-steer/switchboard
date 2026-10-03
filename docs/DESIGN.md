@@ -945,7 +945,12 @@ ends the read with what earlier pages found, and a reply not found is posted.
 so a hung state volume now stalls answer delivery, not only the background
 persister — the price of knowing, after a crash, which answers are in doubt.
 Slack metadata stores the key hashed, as Chat's request IDs do: metadata is
-readable by any app in the workspace with a history scope. The questions still on screen
+readable by any app in the workspace with a history scope.
+
+Verified live (2026-10-03, against a real workspace): Slack stores the metadata
+a bot posts with `chat:write` alone — no manifest declaration — and returns it
+from `conversations.replies` once the history scopes are granted; the adapter's
+own verified re-send found the existing message and posted nothing. The questions still on screen
 are carried across, so the revived prompt watcher does not ask them again; a
 placeholder a turn had up is taken down, its ticker having died with the
 process; and a stale adopted session is re-measured from its head, as adoption

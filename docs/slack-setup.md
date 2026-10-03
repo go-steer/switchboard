@@ -56,7 +56,16 @@ Slack half. Design rationale is in [DESIGN.md](DESIGN.md).
 
 ## Create the app
 
-At <https://api.slack.com/apps> → **Create New App** → **From scratch**:
+The quick way: **Create New App → From an app manifest**, pick the workspace,
+and paste [`slack-app-manifest.yaml`](slack-app-manifest.yaml). It sets up
+everything below except the two tokens — then generate the app-level token
+(step 1) and install the app (step 6). For an app that already exists, paste
+the same file under **App Manifest** in its settings: Slack shows what changes
+before saving, and a scope it adds takes effect at the next **Reinstall to
+Workspace**. The manifest is kept in step with the scope table below, so the
+table is the explanation and the file is the thing to apply.
+
+By hand, at <https://api.slack.com/apps> → **Create New App** → **From scratch**:
 
 1. **Socket Mode** → enable. Slack generates an **app-level token** (`xapp-…`)
    with the `connections:write` scope. Copy it now; it is not shown again.

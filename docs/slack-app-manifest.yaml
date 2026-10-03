@@ -1,0 +1,60 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Slack app manifest for switchboard. Paste it into the app's settings at
+# https://api.slack.com/apps → your app → App Manifest (or use it with
+# "Create New App → From an app manifest"), then reinstall the app so new
+# scopes reach the bot token. See docs/slack-setup.md.
+#
+# Kept next to the code on purpose: the scopes below are derived from the API
+# calls pkg/chat/slack makes, and a scope the code starts needing should change
+# here in the same PR. The app-level token (connections:write, for Socket Mode)
+# is not part of a manifest — generate it under Basic Information.
+display_information:
+  name: switchboard
+  description: Chat gateway for core-agent
+features:
+  bot_user:
+    display_name: switchboard
+    always_online: true
+  # Optional: the native /switchboard command (the mention form needs nothing).
+  slash_commands:
+    - command: /switchboard
+      description: Configure switchboard for this channel
+      usage_hint: progress <off|indicator|status|stream>
+      should_escape: false
+oauth_config:
+  scopes:
+    bot:
+      - app_mentions:read # receive app_mention
+      - chat:write # post, edit and delete replies and progress messages
+      - users:read # users.info, to resolve the caller (not needed with --caller-id id)
+      - users:read.email # the caller's email (not needed with --caller-id id)
+      - commands # the /switchboard slash command above
+      # Optional: let a restarted gateway (--state-dir) check a thread for an
+      # answer it may already have posted, instead of posting it again.
+      - channels:history
+      - groups:history
+      - im:history
+      - mpim:history
+settings:
+  event_subscriptions:
+    bot_events:
+      - app_mention
+  # Required for --approvals: without it buttons render and presses never arrive.
+  interactivity:
+    is_enabled: true
+  socket_mode_enabled: true
+  org_deploy_enabled: false
+  token_rotation_enabled: false
