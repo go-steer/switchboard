@@ -606,7 +606,13 @@ func (a *Adapter) postKeyed(ctx context.Context, conv string, card *chatv1.Googl
 		if thread != "" {
 			msg.Thread = &chatv1.Thread{Name: thread}
 		}
-		created, err := a.msg.create(ctx, space, msg, requestID(key, "card"))
+		// The card shares its request ID with the first text part. Which of
+		// the two renders a reply takes can differ between processes — a
+		// usage footer present in one and not the other, a card that fits
+		// once and is rejected once — and with separate IDs a replay could
+		// post the card on top of text parts already posted, or the reverse.
+		// With one, Chat answers the second with the first.
+		created, err := a.msg.create(ctx, space, msg, requestID(key, "part-0"))
 		if err == nil {
 			return chat.MessageRef{Conversation: landedKey(conv, space, thread, created), ID: created.Name}, nil
 		}
@@ -625,7 +631,7 @@ func (a *Adapter) postKeyed(ctx context.Context, conv string, card *chatv1.Googl
 		if thread != "" {
 			msg.Thread = &chatv1.Thread{Name: thread}
 		}
-		created, err := a.msg.create(ctx, space, msg, requestID(key, fmt.Sprintf("text-%d", i)))
+		created, err := a.msg.create(ctx, space, msg, requestID(key, fmt.Sprintf("part-%d", i)))
 		if err != nil {
 			return first, fmt.Errorf("googlechat: post to %s: %w", conv, platformErr(err))
 		}

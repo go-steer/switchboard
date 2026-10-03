@@ -929,7 +929,23 @@ rides in message metadata and a verified reply reads the thread
 That lookup needs history scopes the minimal app lacks; without them, or for a
 message Slack accepted but is not yet returning, the reply posts and the worst
 case is one duplicate. Tool notices and placeholders stay at-least-once: they
-are ephemeral, and a repeated "running `bash`" harms nobody. The questions still on screen
+are ephemeral, and a repeated "running `bash`" harms nobody.
+
+What it rests on, and what it costs. The key's stability rests on the daemon
+never reissuing a seq within a session; a daemon that did would have Chat
+answer a new answer with an old message, silently. The key is also stable
+across *renders*: a card and the first text part share one request ID on Chat,
+and on Slack a reply found partly posted is finished as chunks rather than
+re-rendered as blocks, because which render a reply takes can differ between
+processes (a usage footer present in one and not the other). On Slack the
+lookup reads the thread oldest-first, capped at five pages, and Slack throttles
+`conversations.replies` hard for apps outside its Marketplace; a page refused
+ends the read with what earlier pages found, and a reply not found is posted.
+`noteAttempt` writes the whole snapshot with an fsync on the relay goroutine,
+so a hung state volume now stalls answer delivery, not only the background
+persister — the price of knowing, after a crash, which answers are in doubt.
+Slack metadata stores the key hashed, as Chat's request IDs do: metadata is
+readable by any app in the workspace with a history scope. The questions still on screen
 are carried across, so the revived prompt watcher does not ask them again; a
 placeholder a turn had up is taken down, its ticker having died with the
 process; and a stale adopted session is re-measured from its head, as adoption

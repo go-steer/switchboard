@@ -35,6 +35,9 @@ type threadSlack struct {
 	posts   []map[string]any // as conversations.replies would return them
 	reads   int
 	noScope bool // conversations.replies answers missing_scope
+	// pageThenLimit serves everything as page one with more to come, then
+	// refuses page two as rate-limited.
+	pageThenLimit bool
 }
 
 func (s *threadSlack) server(t *testing.T) *httptest.Server {
@@ -68,6 +71,14 @@ func (s *threadSlack) server(t *testing.T) *httptest.Server {
 		if s.noScope {
 			body = map[string]any{"ok": false, "error": "missing_scope"}
 		}
+		if s.pageThenLimit {
+			if r.FormValue("cursor") == "" {
+				body["has_more"] = true
+				body["response_metadata"] = map[string]any{"next_cursor": "page2"}
+			} else {
+				body = map[string]any{"ok": false, "error": "ratelimited"}
+			}
+		}
 		s.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(body)
@@ -97,8 +108,11 @@ func TestAKeyedReplyCarriesItsKey(t *testing.T) {
 	}
 	md, _ := s.posts[0]["metadata"].(map[string]any)
 	payload, _ := md["event_payload"].(map[string]any)
-	if md["event_type"] != metaEventType || payload[metaKey] != partKey("core-agent/s1#7", 0) {
-		t.Errorf("metadata = %v, want the part key under %s", md, metaEventType)
+	if md["event_type"] != metaEventType || payload[metaKey] != metaValue(partKey("core-agent/s1#7", 0)) {
+		t.Errorf("metadata = %v, want the hashed part key under %s", md, metaEventType)
+	}
+	if strings.Contains(fmt.Sprint(md), "core-agent/s1") {
+		t.Errorf("metadata = %v; the session reference is readable by other apps and must be hashed", md)
 	}
 }
 
@@ -137,7 +151,7 @@ func TestAVerifiedChunkedReplyPostsOnlyTheMissingParts(t *testing.T) {
 	}
 	// The first part made it out under the dead process.
 	s.posts = append(s.posts, map[string]any{"ts": "199.000", "metadata": map[string]any{
-		"event_type": metaEventType, "event_payload": map[string]any{metaKey: partKey("k#9", 0)},
+		"event_type": metaEventType, "event_payload": map[string]any{metaKey: metaValue(partKey("k#9", 0))},
 	}})
 
 	ref, err := a.Send(context.Background(), chat.Reply{Conversation: "C0:100.5", Text: long, Key: "k#9", Verify: true})
@@ -150,6 +164,26 @@ func TestAVerifiedChunkedReplyPostsOnlyTheMissingParts(t *testing.T) {
 	}
 	if ref.ID != "199.000" {
 		t.Errorf("ref = %+v, want the first part, which was already there", ref)
+	}
+}
+
+// TestAPartlyPostedReplyIsFinishedAsChunksEvenWithRichBlocks: with some parts
+// in the thread, the blocks render is not tried — succeeding now where it was
+// rejected before, it would post the whole reply on top of them.
+func TestAPartlyPostedReplyIsFinishedAsChunksEvenWithRichBlocks(t *testing.T) {
+	s := &threadSlack{}
+	a := newTestAdapter(s.server(t).URL)
+	a.richBlocks = true
+	long := strings.Repeat("word ", slackTextLimit/5+50)
+	parts := chunkMessage(toMrkdwn(long), slackTextLimit)
+	s.posts = append(s.posts, map[string]any{"ts": "199.000", "metadata": map[string]any{
+		"event_type": metaEventType, "event_payload": map[string]any{metaKey: metaValue(partKey("k#9", 0))},
+	}})
+	if _, err := a.Send(context.Background(), chat.Reply{Conversation: "C0:100.5", Text: long, Key: "k#9", Verify: true}); err != nil {
+		t.Fatal(err)
+	}
+	if posts, _ := s.count(); posts != len(parts) {
+		t.Errorf("thread holds %d message(s), want %d: the remaining chunks, no blocks copy", posts, len(parts))
 	}
 }
 
@@ -178,5 +212,23 @@ func TestAVerifiedReplyPostsWhenTheThreadCannotBeRead(t *testing.T) {
 	}
 	if scope != 1 {
 		t.Errorf("the missing-scope note was logged %d time(s), want once: %q", scope, warned)
+	}
+}
+
+// TestALaterPageFailingKeepsWhatWasFound: page one found the reply, page two
+// was rate-limited. What was found stands — the reply is not posted again.
+func TestALaterPageFailingKeepsWhatWasFound(t *testing.T) {
+	s := &threadSlack{pageThenLimit: true}
+	a := newTestAdapter(s.server(t).URL)
+	r := chat.Reply{Conversation: "C0:100.5", Text: "all green", Key: "core-agent/s1#7"}
+	if _, err := a.Send(context.Background(), r); err != nil {
+		t.Fatal(err)
+	}
+	r.Verify = true
+	if _, err := a.Send(context.Background(), r); err != nil {
+		t.Fatal(err)
+	}
+	if posts, reads := s.count(); posts != 1 || reads != 2 {
+		t.Errorf("posts = %d, reads = %d; want the reply found on page one and not reposted", posts, reads)
 	}
 }

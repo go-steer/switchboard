@@ -1296,3 +1296,27 @@ func TestAKeyedReplyPostedTwiceIsOneMessage(t *testing.T) {
 		t.Errorf("an unkeyed reply sent request ID %q", got)
 	}
 }
+
+// TestACardReplayAfterATextFallbackIsDeduplicated: the first process's card
+// was rejected and the reply went out as text; the next process's card render
+// differs (no usage footer, say) and would be accepted. Sharing the first text
+// part's request ID is what makes Chat answer it with the text already posted.
+func TestACardReplayAfterATextFallbackIsDeduplicated(t *testing.T) {
+	f := &fakeMessenger{cardErr: apiErr(http.StatusBadRequest)}
+	a := newTestAdapter(f)
+	a.cards = CardsRich
+	r := chat.Reply{Conversation: "spaces/AAA:spaces/AAA/threads/T1", Text: "# Done\n\nall green", Key: "core-agent/s1#7"}
+	if _, err := a.Send(context.Background(), r); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.creates) != 1 || f.creates[0].card != nil {
+		t.Fatalf("creates = %+v, want the text fallback", f.creates)
+	}
+	f.cardErr = nil // the next process's card is accepted
+	if _, err := a.Send(context.Background(), r); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.creates) != 1 || f.deduped != 1 {
+		t.Errorf("creates = %d, deduped = %d; want the card answered with the text already posted", len(f.creates), f.deduped)
+	}
+}

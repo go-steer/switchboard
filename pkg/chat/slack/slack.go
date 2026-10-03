@@ -340,7 +340,7 @@ func (a *Adapter) Send(ctx context.Context, r chat.Reply) (chat.MessageRef, erro
 	// when the thread could not be read.
 	var posted map[string]string
 	if r.Verify && r.Key != "" {
-		posted = a.postedKeys(ctx, channel, thread, r.Key)
+		posted = a.postedKeys(ctx, channel, thread, r.Key, len(chunkMessage(rendered, slackTextLimit)))
 		if ts, ok := posted[partKey(r.Key, -1)]; ok {
 			a.logf.Infof("slack: reply %s is already in %s; not posting it again", r.Key, r.Conversation)
 			return chat.MessageRef{Conversation: landedKey(channel, thread, ts), ID: ts}, nil
@@ -367,7 +367,11 @@ func (a *Adapter) Send(ctx context.Context, r chat.Reply) (chat.MessageRef, erro
 		a.logf.Warnf("slack: decision blocks rejected for %s (%v); retrying as text", r.Conversation, err)
 	}
 
-	if a.richBlocks {
+	// Some of a chunked reply is already in the thread: finish it as chunks.
+	// Trying blocks first would post the whole reply again on top of the
+	// parts that are there, if the blocks render now succeeds where it was
+	// rejected before.
+	if a.richBlocks && len(posted) == 0 {
 		blocks := sanitizeBlocks(withUsageFooter(renderBlocks(r.Text, toMrkdwn), r.Usage))
 		if blocks != nil {
 			// The text fallback is for notifications/old clients only; clamp it

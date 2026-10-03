@@ -16,6 +16,8 @@ package slack
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"strings"
 
@@ -43,9 +45,11 @@ const metaEventType = "switchboard_reply"
 // metaKey is the payload field carrying the key.
 const metaKey = "key"
 
-// maxVerifyPages bounds the thread read. A reply being verified was posted
-// moments before a crash, so it is near the end of the thread; a thread longer
-// than this many pages is read as far as the cap and then posted into.
+// maxVerifyPages bounds the thread read. conversations.replies returns a
+// thread oldest first, so the cap reads the oldest pages; a reply in a thread
+// longer than this is not found and is posted again. Slack also rate-limits
+// this method, and tightly for apps outside the Marketplace — a page refused
+// for that ends the read with what earlier pages found.
 const maxVerifyPages = 5
 
 // partKey is the key for one message of a reply: the reply's own key for a
@@ -65,17 +69,32 @@ func metadataOpt(key string) []slack.MsgOption {
 	}
 	return []slack.MsgOption{slack.MsgOptionMetadata(slack.SlackMetadata{
 		EventType:    metaEventType,
-		EventPayload: map[string]any{metaKey: key},
+		EventPayload: map[string]any{metaKey: metaValue(key)},
 	})}
 }
 
-// postedKeys returns the switchboard keys already present in a thread, with
-// the timestamp of the message carrying each. A nil map means the thread could
-// not be read and nothing is known: the caller posts as if verification had
-// not been asked for.
-func (a *Adapter) postedKeys(ctx context.Context, channel, thread, prefix string) map[string]string {
+// metaValue is what a part key is stored as: hashed, because metadata is
+// readable by any app in the workspace with a history scope, and a session
+// reference is nobody else's business. The same hash Google Chat's request
+// IDs get, for the same reason.
+func metaValue(key string) string {
+	sum := sha256.Sum256([]byte(key))
+	return "switchboard-" + hex.EncodeToString(sum[:16])
+}
+
+// postedKeys returns which of a reply's part keys are already present in a
+// thread, with the timestamp of the message carrying each, keyed by part key.
+// A nil map means not even the first page could be read and nothing is known:
+// the caller posts as if verification had not been asked for. A later page
+// that fails ends the read with what was found so far.
+func (a *Adapter) postedKeys(ctx context.Context, channel, thread, key string, parts int) map[string]string {
 	if thread == "" {
 		return nil // a reply that roots its own thread has nothing to look in
+	}
+	// The hashes this reply's parts would carry, back to the part keys.
+	want := map[string]string{metaValue(partKey(key, -1)): partKey(key, -1)}
+	for i := 0; i < parts; i++ {
+		want[metaValue(partKey(key, i))] = partKey(key, i)
 	}
 	found := map[string]string{}
 	params := &slack.GetConversationRepliesParameters{
@@ -88,13 +107,17 @@ func (a *Adapter) postedKeys(ctx context.Context, channel, thread, prefix string
 		msgs, hasMore, cursor, err := a.api.GetConversationRepliesContext(ctx, params)
 		if err != nil {
 			a.warnVerify(err)
-			return nil
+			if page == 0 {
+				return nil
+			}
+			return found
 		}
 		for _, m := range msgs {
 			if m.Metadata.EventType != metaEventType {
 				continue
 			}
-			if k, _ := m.Metadata.EventPayload[metaKey].(string); strings.HasPrefix(k, prefix) {
+			v, _ := m.Metadata.EventPayload[metaKey].(string)
+			if k, ok := want[v]; ok {
 				found[k] = m.Timestamp
 			}
 		}
