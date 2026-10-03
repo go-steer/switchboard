@@ -211,7 +211,7 @@ func (r *Router) reserveBind(conv string, sess daemon.Session) error {
 	// An entry already relaying this very session is this same binding in use —
 	// a caller posting a second update into a thread it bound earlier, after
 	// someone replied in it. Re-binding that is a no-op rather than a conflict.
-	if e, ok := r.sessions[conv]; ok && !runningSession(e, sess) {
+	if r.otherSession(conv, sess) {
 		return errConversationBound
 	}
 	ref := sessionRef(sess)
@@ -266,7 +266,7 @@ func (r *Router) CommitBind(conv string, sess daemon.Session, since int64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	delete(r.reserving, sessionRef(sess))
-	if e, ok := r.sessions[conv]; ok && !runningSession(e, sess) {
+	if r.otherSession(conv, sess) {
 		r.logf.Warnf("bind %s: not bound to %s: the conversation acquired a session first",
 			conv, sessionRef(sess))
 		return
@@ -276,6 +276,7 @@ func (r *Router) CommitBind(conv string, sess daemon.Session, since int64) {
 			// Same session, later post: move the resume point up rather than
 			// leave the thread pointed at where the incident was an hour ago.
 			r.bindings[conv] = binding{sess: sess, since: since}
+			r.markDirty()
 			return
 		}
 		// Landed in a thread that belongs to a different session. Taking it
@@ -292,6 +293,7 @@ func (r *Router) CommitBind(conv string, sess daemon.Session, since int64) {
 	r.boundTo[sessionRef(sess)] = conv
 	r.logf.Infof("bind %s -> session %s from seq %d", conv, sessionRef(sess), since)
 	r.evictBindings()
+	r.markDirty()
 }
 
 // evictBindings holds the map to maxBindings, oldest first. The caller holds
@@ -312,6 +314,7 @@ func (r *Router) evictBindings() {
 		delete(r.bindings, oldest)
 		delete(r.boundTo, sessionRef(b.sess))
 		r.metrics.bindDropped()
+		r.markDirty()
 		r.logf.Warnf("bind %s: evicted (over %d bindings); a reply there will start a fresh session",
 			oldest, maxBindings)
 	}
@@ -332,6 +335,7 @@ func (r *Router) unbind(conv string) {
 		}
 	}
 	r.metrics.bindDropped()
+	r.markDirty()
 }
 
 // errNoticeBindLost is what a thread is told when the session it was bound to

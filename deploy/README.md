@@ -152,12 +152,34 @@ cosign verify ghcr.io/go-steer/switchboard:0.4.0 \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
 
+## Durable state
+
+By default the conversation → session map is in memory, so every restart
+starts every thread over and strands its old session on the daemon. The
+`durable-state` component keeps it on a volume (#86): a restart re-attaches
+each thread to the session it had and delivers anything the agent said while
+switchboard was down. Add it to an overlay:
+
+```yaml
+components:
+  - ../../components/durable-state
+```
+
+It adds a 1Gi `ReadWriteOnce` PersistentVolumeClaim (`switchboard-state`,
+so the cluster needs a default StorageClass or a `storageClassName` patched
+in), mounts it at `/var/lib/switchboard`, and sets
+`SWITCHBOARD_STATE_DIR` to that path. The variable rather than the config
+file because it is where the component mounts the volume, not a choice to
+edit; a `state_dir` in `config.json` would be outranked by it.
+
 ## Notes
 
-- **One replica.** A conversation maps to a core-agent session held in an
-  in-memory map; a second replica would split the map and double-consume
-  the platform stream. `strategy: Recreate` avoids overlap on rollout.
-  Multi-replica waits on a durable session map (DESIGN.md).
+- **One replica.** A conversation maps to one core-agent session, held in
+  memory or — with durable state — in one file with one writer; either way
+  a second replica would split the routing table and double-consume the
+  platform stream. `strategy: Recreate` avoids overlap on rollout, and with
+  durable state also keeps the old pod from writing the file after the new
+  one has read it. Multi-replica waits on a shared store.
 - **Health + metrics.** `"metrics_addr": ":9090"` serves `/healthz` (backing
   the liveness + readiness probes) and `/metrics` (Prometheus) on the
   named `metrics` port. That port is switchboard's only inbound surface;

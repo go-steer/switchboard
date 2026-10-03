@@ -29,6 +29,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/go-steer/switchboard/internal/logging"
 	"github.com/go-steer/switchboard/internal/version"
@@ -214,6 +215,12 @@ func runServe(args []string) (err error) {
 	logFormat := fs.String("log-format", string(logging.Text),
 		"log rendering: \"text\" (timestamped lines for a terminal) or \"json\" (one object "+
 			"per line for a collector)")
+	stateDir := fs.String("state-dir", "",
+		"persist the conversation → session routing table here, so a restart re-attaches "+
+			"every thread to the session it had instead of starting over; empty = memory only")
+	idleTTLFlag := fs.String("session-idle-ttl", "",
+		"release a conversation's daemon streams after this long without traffic; it "+
+			"re-attaches on its next message (needs --state-dir; default 12h with it, \"0\" = never)")
 	auditLogDest := fs.String("audit-log", "",
 		"append one JSON line per turn and per approval press — conversation, asserted "+
 			"caller, session and platform message ID, never the text — to this file, or "+
@@ -269,6 +276,8 @@ func runServe(args []string) (err error) {
 	res.str("ingress-token-env", "", cfg.IngressTokenEnv, ingressTokenEnv)
 	res.str("log-format", "SWITCHBOARD_LOG_FORMAT", cfg.LogFormat, logFormat)
 	res.str("audit-log", "SWITCHBOARD_AUDIT_LOG", cfg.AuditLog, auditLogDest)
+	res.str("state-dir", "SWITCHBOARD_STATE_DIR", cfg.StateDir, stateDir)
+	res.str("session-idle-ttl", "SWITCHBOARD_SESSION_IDLE_TTL", cfg.SessionIdleTTL, idleTTLFlag)
 	// The channel-scopable four resolve into the same variables, and then again
 	// per channel below: what lands here is the posture for a channel the file
 	// says nothing about.
@@ -696,8 +705,69 @@ func runServe(args []string) (err error) {
 		}
 	}
 
+	idleTTL, err := resolveIdleTTL(*idleTTLFlag, *stateDir)
+	if err != nil {
+		return err
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	// The routing table, restored before anything is dispatched so the first
+	// message in a thread finds the session it had (#86). Restored on ctx
+	// because the relays it re-attaches run on it, as every relay does.
+	switch {
+	case *stateDir == "" && inbound:
+		logf.Infof("state: conversations are held in memory; a restart starts every thread over (--state-dir)")
+	case *stateDir == "":
+	case !inbound:
+		logf.Warnf("--state-dir persists conversations, and an outbound-only run has none")
+	default:
+		store, err := openFileStore(*stateDir)
+		if err != nil {
+			return err
+		}
+		st, err := store.load()
+		if err != nil && !errors.Is(err, errStateUnreadable) {
+			// Permissions, I/O: nothing is known about the file, and moving a
+			// good one aside would lose it. Stop and say so.
+			return fmt.Errorf("state: %w", err)
+		}
+		if err != nil {
+			// Set aside rather than refused: a run that will not start over a
+			// corrupt file is a crash loop that loses every thread anyway.
+			moved, merr := store.setAside(time.Now())
+			if merr != nil {
+				return fmt.Errorf("state: %v, and it could not be moved aside: %w", err, merr)
+			}
+			logf.Errorf("state: %v; moved it to %s and starting with no conversations", err, moved)
+			st = routerState{Version: stateVersion}
+		}
+		router.setStore(store)
+		// Before restore: the TTL is also how far back a restored thread's
+		// traffic counts as recent enough to re-attach at boot.
+		router.setIdleTTL(idleTTL)
+		revived, dormant := router.restore(ctx, st, time.Now())
+		// Written once now, which is the check that the directory is
+		// writable: a volume mounted read-only or owned by someone else
+		// would otherwise start cleanly and lose every write to an ERROR
+		// line, which is durable state that is not durable.
+		if err := router.trySaveState(); err != nil {
+			return fmt.Errorf("state: cannot write %s: %w", store.where(), err)
+		}
+		logf.Infof("state: routing table persisted to %s; restored %d conversation(s): %d re-attached now, %d on their next message",
+			store.where(), revived+dormant, revived, dormant)
+		go router.runPersister(ctx)
+		if idleTTL > 0 {
+			logf.Infof("state: a conversation idle for %s releases its daemon streams and re-attaches on its next message (--session-idle-ttl)", idleTTL)
+			go router.runReaper(ctx)
+		} else {
+			logf.Infof("state: idle conversations keep their daemon streams open (--session-idle-ttl 0)")
+		}
+		// The last word on what the table looked like, written after the
+		// adapter has stopped dispatching, whatever the persister had pending.
+		defer router.saveState()
+	}
 
 	// Serve the optional listeners: /metrics + /healthz, and the outbound
 	// ingress. A bind failure cancels ctx (stop closes the Done channel,
@@ -847,4 +917,27 @@ func parseAppCommands(s string) (map[int64]string, error) {
 		out[id] = verb
 	}
 	return out, nil
+}
+
+// resolveIdleTTL reads --session-idle-ttl against --state-dir (#87). Empty is
+// the default: defaultIdleTTL with a state dir, off without one. Reaping
+// without a durable record would throw away the only note that a conversation
+// had a session, so naming a TTL with no state dir is refused rather than
+// quietly ignored — the operator asked for something this run cannot do
+// safely.
+func resolveIdleTTL(flagVal, stateDir string) (time.Duration, error) {
+	if flagVal == "" {
+		if stateDir == "" {
+			return 0, nil
+		}
+		return defaultIdleTTL, nil
+	}
+	ttl, err := time.ParseDuration(flagVal)
+	if err != nil || ttl < 0 {
+		return 0, fmt.Errorf("invalid --session-idle-ttl %q (want a duration like \"12h\", or \"0\" for never)", flagVal)
+	}
+	if ttl > 0 && stateDir == "" {
+		return 0, fmt.Errorf("--session-idle-ttl needs --state-dir: releasing an idle conversation without a durable record of its session would leak that session on the daemon")
+	}
+	return ttl, nil
 }

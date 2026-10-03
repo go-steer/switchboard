@@ -397,6 +397,23 @@ type Router struct {
 	mu       sync.Mutex
 	sessions map[string]*sessionEntry
 
+	// dormant holds the conversations that have a session but no live entry:
+	// restored from the state file and not yet re-attached (#86). A dormant
+	// record is the conversation's session as surely as a live entry is, so
+	// session() revives it before anything would open a new one, and a bind
+	// treats it as taken. Guarded by mu.
+	dormant map[string]sessionRecord
+
+	// store persists the routing table, and dirty schedules a write; both nil
+	// when --state-dir is unset, which keeps everything in memory as before.
+	store  stateStore
+	dirty  chan struct{}
+	saveMu sync.Mutex // one snapshot-and-write at a time; see trySaveState
+
+	// idleTTL releases a conversation's streams after this long without
+	// traffic (#87); zero never does. Set once at startup.
+	idleTTL time.Duration
+
 	// The conversations whose session switchboard did not create, recorded by
 	// the outbound ingress and consulted by session() before it creates one
 	// (#38). Guarded by mu, like sessions, because every rule about a binding
@@ -486,6 +503,10 @@ type sessionEntry struct {
 	// Set before ready is closed, like sess.
 	owner string
 
+	// touched is the last traffic on the conversation, as UnixNano: what the
+	// state file records and the revive window is measured against (#86).
+	touched atomic.Int64
+
 	// stop ends this entry's relay goroutine. The relay otherwise runs for the
 	// life of the process, which is right for a session that keeps answering;
 	// an entry that is discarded (a binding the daemon has lost) has to take its
@@ -501,6 +522,11 @@ type sessionEntry struct {
 	channel string       // platform channel, for resolving the channel's progress mode
 	seq     atomic.Int64 // highest agent-event seq seen, fed back as `since` on resume
 	relayed atomic.Int64 // highest seq whose answer was posted, for exactly-once delivery across reconnects
+	// delivered is relayed once the post has actually been made — relayed
+	// moves first, to keep a reconnect from posting twice. delivered is what
+	// the state file records, so a post cut off by shutdown is retried by the
+	// next process rather than recorded as done (#86).
+	delivered atomic.Int64
 	// noticed is the same watermark for tool activity, kept separate from
 	// relayed on purpose. They dedupe different things — one guards the answer,
 	// the other guards a progress notice — and sharing a counter means a tool
@@ -961,6 +987,11 @@ type askRecord struct {
 	// kind is the prompt's approval.Kind, kept because one kind's answer can
 	// take a turn's time to come back (respondDeadline).
 	kind string
+	// posted is set once the question is actually in the thread. Only posted
+	// questions are persisted: a claim whose send was cut off by a crash
+	// would otherwise be restored as asked, and the revived watcher would
+	// never post it at all (#86).
+	posted bool
 }
 
 // claimAsk reports whether this prompt is one the thread has not been shown
@@ -991,6 +1022,15 @@ func (e *sessionEntry) askKind(id string) string {
 		return rec.kind
 	}
 	return ""
+}
+
+// markPosted records that a claimed question reached the thread.
+func (e *sessionEntry) markPosted(id string) {
+	e.qmu.Lock()
+	defer e.qmu.Unlock()
+	if rec := e.asked[id]; rec != nil {
+		rec.posted = true
+	}
 }
 
 // releaseAsk undoes a claim whose question never made it into the thread.
@@ -1348,6 +1388,7 @@ func NewRouter(client *daemon.Client, out sender, progress ProgressMode, m *metr
 		tickInterval: progressTickInterval,
 		tickMaxAge:   progressTickMaxAge,
 		sessions:     make(map[string]*sessionEntry),
+		dormant:      make(map[string]sessionRecord),
 		bindings:     make(map[string]binding),
 		boundTo:      make(map[string]string),
 		reserving:    make(map[string]string),
@@ -1416,6 +1457,7 @@ func (r *Router) setProgress(channel string, mode ProgressMode) {
 	r.omu.Lock()
 	r.overrides[channel] = mode
 	r.omu.Unlock()
+	r.markDirty()
 }
 
 // HandleCommand processes a gateway control command and returns a short
@@ -1517,6 +1559,7 @@ func (r *Router) Handle(ctx context.Context, msg chat.Message) (err error) {
 	// before the agent frame carrying that turn's text, so for the moment
 	// between the two the entry reads as idle while the figures it is holding
 	// are the ones that answer is about to print.
+	entry.touch()
 	if !entry.turnInFlight() && !entry.awaitingAnswer() {
 		entry.resetUsage()
 	}
@@ -2194,9 +2237,24 @@ func (r *Router) postToolResults(ctx context.Context, e *sessionEntry, conv stri
 func (r *Router) session(ctx context.Context, conv, channel, caller string) (*sessionEntry, error) {
 	r.mu.Lock()
 	if e, ok := r.sessions[conv]; ok {
+		// Touched under the lock the reaper sweeps under, so a message
+		// arriving for an idle conversation either finds it still live and
+		// marks it busy, or finds it already dormant and revives it below —
+		// never a live entry whose relay is about to be stopped (#87).
+		e.touch()
 		r.mu.Unlock()
 		<-e.ready
 		return e, e.err
+	}
+	// A conversation with a recorded session picks it back up rather than
+	// opening another (#86): the relay resumes from the last answer delivered,
+	// and the session the daemon has been holding is the one that knows the
+	// thread. A record that cannot be read is dropped and the conversation
+	// starts fresh, which is all that was possible before there were records.
+	if rec, ok := r.dormant[conv]; ok {
+		if e := r.reviveLocked(ctx, conv, channel, rec); e != nil {
+			return e, nil
+		}
 	}
 	// This goroutine owns creation; publish a not-yet-ready entry so
 	// concurrent turns on the same conversation wait rather than
@@ -2215,10 +2273,13 @@ func (r *Router) session(ctx context.Context, conv, channel, caller string) (*se
 		// end up in the thread.
 		e.seq.Store(since)
 		e.relayed.Store(since)
+		e.delivered.Store(since)
 		e.noticed.Store(since)
+		e.touch()
 		r.metrics.sessionOpened()
 		r.startRelay(ctx, conv, e, "")
 		close(e.ready)
+		r.markDirty()
 		r.logf.Infof("session %s: adopted %s from seq %d", conv, sessionRef(b.sess), since)
 		return e, nil
 	}
@@ -2235,10 +2296,80 @@ func (r *Router) session(ctx context.Context, conv, channel, caller string) (*se
 		return e, e.err
 	}
 	e.owner = caller
+	e.touch()
 	r.metrics.sessionOpened()
 	r.startRelay(ctx, conv, e, caller)
 	close(e.ready)
+	r.markDirty()
 	return e, nil
+}
+
+// reviveLocked re-attaches a dormant conversation: the record becomes a live
+// entry and its relay resumes from the last answer delivered. The caller holds
+// r.mu, and on success it is released here; on failure — a record that cannot
+// be read — the record is dropped, the lock is still held, and nil is
+// returned.
+func (r *Router) reviveLocked(ctx context.Context, conv, channel string, rec sessionRecord) *sessionEntry {
+	delete(r.dormant, conv)
+	e, err := entryFromRecord(rec, channel)
+	if err != nil {
+		r.logf.Warnf("session %s: unreadable record (%v); opening a new session", conv, err)
+		return nil
+	}
+	stale := time.Since(rec.Touched) > r.reviveWindow()
+	e.touch()
+	r.sessions[conv] = e
+	r.mu.Unlock()
+	if rec.Adopted && stale {
+		// An adopted session the thread stopped following long ago has been
+		// working the whole time; resuming from where the thread left off
+		// would replay all of it at once. The same head re-measure adoption
+		// makes, for the same reason (adoptFrom).
+		since := r.adoptFrom(ctx, conv, binding{sess: e.sess, since: rec.Relayed})
+		e.seq.Store(since)
+		e.relayed.Store(since)
+		e.delivered.Store(since)
+		e.noticed.Store(max(since, e.noticed.Load()))
+	}
+	r.metrics.sessionOpened()
+	r.startRelay(ctx, conv, e, e.owner)
+	close(e.ready)
+	r.markDirty()
+	r.logf.Infof("session %s: re-attached %s from seq %d", conv, sessionRef(e.sess), e.seq.Load())
+	if rec.Placeholder != "" {
+		go func() {
+			pctx, cancel := platformContext(ctx)
+			defer cancel()
+			if err := r.out.Delete(pctx, chat.MessageRef{Conversation: conv, ID: rec.Placeholder}); err != nil {
+				r.logf.Warnf("session %s: clear the placeholder a restart left: %v", conv, err)
+			}
+		}()
+	}
+	return e
+}
+
+// liveOrRevived returns the conversation's session if it has one, live or
+// dormant, and never opens a new one: ok is false when there is nothing to
+// return. What a press needs — a question can only answer to the session that
+// asked it.
+func (r *Router) liveOrRevived(ctx context.Context, conv, channel string) (*sessionEntry, bool) {
+	r.mu.Lock()
+	if e, ok := r.sessions[conv]; ok {
+		// Under the reaper's lock, as session() does, so a sweep cannot
+		// release the entry between here and the press that is about to use
+		// it (#87).
+		e.touch()
+		r.mu.Unlock()
+		<-e.ready
+		return e, e.err == nil
+	}
+	if rec, ok := r.dormant[conv]; ok {
+		if e := r.reviveLocked(ctx, conv, channel, rec); e != nil {
+			return e, true
+		}
+	}
+	r.mu.Unlock()
+	return nil, false
 }
 
 // adoptFrom is the seq an adopted session's relay starts from.
@@ -2303,6 +2434,7 @@ func (r *Router) discard(conv string, e *sessionEntry, unbind bool) bool {
 	}
 	e.stopTicker()
 	r.metrics.sessionClosed()
+	r.markDirty()
 	return true
 }
 
@@ -2545,6 +2677,7 @@ func (r *Router) relay(ctx context.Context, conv string, e *sessionEntry, owner 
 			reply, ok := daemon.AgentText(ev.Data)
 			if reply.Seq > e.seq.Load() {
 				e.seq.Store(reply.Seq)
+				e.touch()
 				progressed = true
 			}
 			// A completed, non-empty model turn is a reply worth relaying
@@ -2556,7 +2689,12 @@ func (r *Router) relay(ctx context.Context, conv string, e *sessionEntry, owner 
 					return nil
 				}
 				e.relayed.Store(reply.Seq)
+				e.touch()
 				r.deliverText(ctx, e, conv, reply.Text)
+				if ctx.Err() == nil {
+					e.delivered.Store(reply.Seq)
+					r.markDirty()
+				}
 				return nil
 			}
 			// Otherwise it may be tool activity — surfaced only in the modes
@@ -2571,6 +2709,7 @@ func (r *Router) relay(ctx context.Context, conv string, e *sessionEntry, owner 
 				}
 				if calls := daemon.ToolCalls(ev.Data); len(calls) > 0 {
 					e.noticed.Store(reply.Seq)
+					r.markDirty()
 					r.postActivity(ctx, e, conv, mode, calls)
 					return nil
 				}
@@ -2582,6 +2721,7 @@ func (r *Router) relay(ctx context.Context, conv string, e *sessionEntry, owner 
 				if mode == ProgressStream {
 					if results := daemon.ToolResults(ev.Data); len(results) > 0 {
 						e.noticed.Store(reply.Seq)
+						r.markDirty()
 						r.postToolResults(ctx, e, conv, results)
 					}
 				}

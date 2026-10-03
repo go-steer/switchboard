@@ -169,6 +169,7 @@ func splitDecisionRef(ref string) (sess, promptID string, ok bool) {
 // postPrompt puts one pending permission prompt into the thread, once.
 func (r *Router) postPrompt(ctx context.Context, conv string, e *sessionEntry, p approval.Prompt) {
 	body := promptText(p)
+	e.touch()
 	if !e.claimAsk(p.ID, body, p.Kind) {
 		// Already on screen. Every resubscription is seeded with everything
 		// still pending, which is what lets this watcher reconnect without a
@@ -199,6 +200,7 @@ func (r *Router) postPrompt(ctx context.Context, conv string, e *sessionEntry, p
 		r.logf.Errorf("perms %s: post prompt %s: %v", conv, p.ID, err)
 		return
 	}
+	e.markPosted(p.ID)
 	r.logf.Infof("perms %s: asked about %s (%s)", conv, p.Tool, p.Kind)
 }
 
@@ -659,7 +661,10 @@ func (r *Router) HandlePress(ctx context.Context, p chat.Press) error {
 		rec.Outcome = auditInvalid
 		return fmt.Errorf("press in %s names no prompt: %q", p.Conversation, p.DecisionID)
 	}
-	e, err := r.boundSession(p.Conversation)
+	e, err := r.boundSession(ctx, p.Conversation, p.Channel)
+	if err == nil {
+		e.touch()
+	}
 	if err != nil {
 		// Nothing bound under this conversation at all — most often a restart
 		// under a thread whose buttons are still on screen, with nobody having
@@ -783,16 +788,14 @@ func turnHeldPress(kind string, err error) bool {
 // one. A press can only ever be an answer to a question switchboard posted
 // into a live conversation, so a miss here means the session went away between
 // the ask and the answer — which is a thing to report, not a session to open.
-func (r *Router) boundSession(conv string) (*sessionEntry, error) {
-	r.mu.Lock()
-	e, ok := r.sessions[conv]
-	r.mu.Unlock()
+func (r *Router) boundSession(ctx context.Context, conv, channel string) (*sessionEntry, error) {
+	// A question asked by a conversation that has since gone idle is still
+	// that conversation's question (#87), so a dormant one is re-attached
+	// rather than the press called stale — and nothing here can open a new
+	// session, which would answer the question as a stranger.
+	e, ok := r.liveOrRevived(ctx, conv, channel)
 	if !ok {
 		return nil, fmt.Errorf("no live session for %s; the question it answers has expired", conv)
-	}
-	<-e.ready
-	if e.err != nil {
-		return nil, e.err
 	}
 	return e, nil
 }

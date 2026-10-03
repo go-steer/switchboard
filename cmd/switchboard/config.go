@@ -73,6 +73,8 @@ type Config struct {
 	CallerID        *string `json:"caller_id,omitempty"`
 	LogFormat       *string `json:"log_format,omitempty"`
 	AuditLog        *string `json:"audit_log,omitempty"`
+	StateDir        *string `json:"state_dir,omitempty"`
+	SessionIdleTTL  *string `json:"session_idle_ttl,omitempty"`
 	MetricsAddr     *string `json:"metrics_addr,omitempty"`
 	IngressAddr     *string `json:"ingress_addr,omitempty"`
 	GoogleProject   *string `json:"google_project,omitempty"`
