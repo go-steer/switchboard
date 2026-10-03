@@ -272,7 +272,9 @@ func TestDecisionCardEdgeCases(t *testing.T) {
 // A clamp would cut exactly the line recording who decided; the body spills
 // instead, and the outcome is still on the card.
 func TestALongQuestionKeepsItsOutcome(t *testing.T) {
-	detail := strings.Repeat("<a&b> ", 600) // escaping grows every rune of this
+	// Escaping grows every rune of this, the ampersands fivefold — more than
+	// any fixed split ratio allows for.
+	detail := strings.Repeat("<a&b> ", 300) + strings.Repeat("&&", 700)
 	text := "Permission needed: `" + detail + "`\n\n✅ Allowed, this once — ana@example.com"
 	card := decisionCard(text, nil, testAudience)
 	if card == nil {

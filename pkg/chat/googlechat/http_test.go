@@ -519,6 +519,9 @@ type pressHandler struct {
 	release chan struct{} // nil: answer at once
 	noEdit  bool          // a refused press: say nothing on the question
 	err     error
+	// afterEdit runs once the edit has been made — a test's hook for what
+	// happens between the edit being captured and the response being written.
+	afterEdit func()
 }
 
 func (h *pressHandler) HandlePress(ctx context.Context, p chat.Press) error {
@@ -529,11 +532,15 @@ func (h *pressHandler) HandlePress(ctx context.Context, p chat.Press) error {
 	if h.noEdit {
 		return h.err
 	}
-	return h.a.Update(ctx, p.Message, chat.Reply{
+	err := h.a.Update(ctx, p.Message, chat.Reply{
 		Conversation: p.Conversation,
 		Text:         "Allow bash?\n\n✅ **Allowed**, this once — " + p.Caller,
 		Kind:         chat.KindDecision,
 	})
+	if h.afterEdit != nil {
+		h.afterEdit()
+	}
+	return err
 }
 
 const testClickBody = `{
@@ -630,10 +637,12 @@ func TestIngressStillEditsWhenTheResponseIsLost(t *testing.T) {
 	f := &fakeMessenger{}
 	a := newIngressAdapter(t, f)
 	a.cards = CardsStatus
-	h := &pressHandler{a: a}
-
+	// Chat hangs up after the edit has been captured for the response and
+	// before the response is written: the capture took the edit off the REST
+	// path, so only the replay can still deliver it.
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
+	defer cancel()
+	h := &pressHandler{a: a, afterEdit: cancel}
 	r := postEvent(testClickBody).WithContext(ctx)
 	r.Header.Set("Authorization", "Bearer good-token")
 	rec := httptest.NewRecorder()

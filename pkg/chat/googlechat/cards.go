@@ -500,16 +500,27 @@ func decisionCard(text string, d *chat.Decision, actionURL string) *chatv1.Googl
 // agent-supplied detail, which HTML escaping and multi-byte text can push past
 // one widget's budget — and the settled edit appends the outcome after all of
 // it, so a clamp would cut exactly the line recording who decided, while the
-// buttons still came down. Split at half the budget because the split is on
-// Chat markup and the budget is on the HTML it becomes, which escaping grows;
-// htmlWidget's clamp stays behind it as a backstop.
+// buttons still came down.
+//
+// The split is on Chat markup and the budget is on the HTML it becomes, and
+// escaping has no fixed ratio — an "&" is five bytes once rendered — so a piece
+// whose HTML is still over budget is split again, smaller, until it fits.
+// htmlWidget's clamp stays behind that as a backstop that should never fire.
 func decisionBody(text string) []*chatv1.GoogleAppsCardV1Widget {
 	var out []*chatv1.GoogleAppsCardV1Widget
-	for _, part := range chat.ChunkText(strings.TrimSpace(text), maxWidgetText/2) {
-		if w := htmlWidget(part); w != nil {
-			out = append(out, w)
+	var fit func(s string, size int)
+	fit = func(s string, size int) {
+		for _, part := range chat.ChunkText(s, size) {
+			if len(toCardHTML(strings.TrimSpace(part))) > maxWidgetText && size > 64 {
+				fit(part, size/2)
+				continue
+			}
+			if w := htmlWidget(part); w != nil {
+				out = append(out, w)
+			}
 		}
 	}
+	fit(strings.TrimSpace(text), maxWidgetText)
 	return out
 }
 

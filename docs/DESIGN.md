@@ -744,7 +744,14 @@ response or accepted the card in it (`net/http` buffers the write, so it
 settled question with live buttons that every later press answers with
 nothing visible. So the captured edit is replayed over REST right after the
 response, through `rewrite`'s ordinary path with its card-rejection fallback;
-a patch is idempotent, and the presser sees the in-band copy first. A **legacy** click is acknowledged like any other event and answered over
+a patch is idempotent, and the presser sees the in-band copy first — the
+response is flushed before the replay starts, or the "fast" copy would wait
+behind the slow one. The cost is a second write per answered click against
+Chat's per-space write quota, which a busy approval thread shares with its
+progress edits. And because the replay runs after the response, two quick
+clicks on one command row can land their replays out of order, leaving the
+earlier ack on a card whose mode is the later one; an approval cannot, since a
+second press on a settled question changes nothing. A **legacy** click is acknowledged like any other event and answered over
 REST: its response envelope is not the add-on one, and nothing here has
 measured it.
 

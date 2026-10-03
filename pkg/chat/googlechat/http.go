@@ -502,6 +502,13 @@ func (a *Adapter) answerClick(w http.ResponseWriter, r *http.Request, runCtx con
 		if _, err := w.Write(resp); err != nil {
 			a.logf.Warnf("googlechat: ingress: write click response: %v", err)
 		}
+		// Flushed before the replay below, not when the handler returns:
+		// Write only fills net/http's buffer, and holding the in-band edit
+		// behind a REST round trip would make it the slower copy of the two —
+		// and could push it past the server's WriteTimeout altogether.
+		if err := http.NewResponseController(w).Flush(); err != nil {
+			a.logf.Warnf("googlechat: ingress: flush click response: %v", err)
+		}
 	}
 	if edit != nil {
 		// And over REST, every time: see clickResponse for why the response
