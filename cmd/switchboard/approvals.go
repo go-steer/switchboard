@@ -593,12 +593,32 @@ func clampRunes(s string, n int) string {
 // the body — so this cannot attribute an approval to somebody who did not give
 // it, even if the press arrived claiming otherwise.
 func (r *Router) HandlePress(ctx context.Context, p chat.Press) error {
+	// One audit line per press, whatever became of it (#89). The question's
+	// session and prompt come off the press itself, so even a refused press
+	// names what it was trying to answer. Clamped, because they are read
+	// before anything validates them: a refused press's payload is recorded as
+	// it arrived, and arrived unbounded.
+	rec := auditRecord{
+		Kind:         auditPress,
+		Conversation: p.Conversation,
+		Channel:      p.Channel,
+		Caller:       p.Caller,
+		MessageID:    p.Message.ID,
+		Decision:     clampRunes(p.Option, promptNameLimit),
+		Outcome:      auditPressError,
+	}
+	if s, id, ok := splitDecisionRef(p.DecisionID); ok {
+		rec.Session, rec.PromptID = clampRunes(s, promptNameLimit), clampRunes(id, promptNameLimit)
+	}
+	defer func() { r.audit.record(rec) }()
+
 	// Resolved from the press's own channel rather than from the session's, and
 	// before the prompt is located, for the same reason the approver check below
 	// is: a channel this gateway does not relay prompts into gets one answer, and
 	// it is not one that reveals whether a prompt exists.
 	settings := r.settingsFor(p.Channel)
 	if r.approvals == nil || !settings.approvals {
+		rec.Outcome = auditDisabled
 		return errors.New("permission prompts are not enabled on this gateway")
 	}
 	d := approval.Decision(p.Option)
@@ -606,6 +626,7 @@ func (r *Router) HandlePress(ctx context.Context, p chat.Press) error {
 		// Our own buttons, so this is a mangled payload rather than a person
 		// doing something unexpected. Refusing beats guessing: the nearest
 		// wrong guess is an approval.
+		rec.Outcome = auditInvalid
 		return fmt.Errorf("press on %s carried an answer that is not a decision: %q", p.Conversation, p.Option)
 	}
 	if !settings.approvers.allows(p.Caller) {
@@ -615,6 +636,7 @@ func (r *Router) HandlePress(ctx context.Context, p chat.Press) error {
 		// buttons stay up — somebody else in the room may be allowed to answer,
 		// and a press that vanishes reads as one that worked.
 		r.logf.Warnf("perms %s: press by %q is not an approver", p.Conversation, p.Caller)
+		rec.Outcome = auditNotApprover
 		return r.surfaceNotice(ctx, p.Conversation, noticeNotApprover)
 	}
 	if d.Standing() && !settings.standing.allows(p.Caller) {
@@ -629,10 +651,12 @@ func (r *Router) HandlePress(ctx context.Context, p chat.Press) error {
 		if settings.standing.none {
 			notice = noticeNoStandingGrants
 		}
+		rec.Outcome = auditNotStanding
 		return r.surfaceNotice(ctx, p.Conversation, notice)
 	}
 	sess, promptID, ok := splitDecisionRef(p.DecisionID)
 	if !ok {
+		rec.Outcome = auditInvalid
 		return fmt.Errorf("press in %s names no prompt: %q", p.Conversation, p.DecisionID)
 	}
 	e, err := r.boundSession(p.Conversation)
@@ -643,6 +667,7 @@ func (r *Router) HandlePress(ctx context.Context, p chat.Press) error {
 		// and the buttons stay live, so it is told the same thing a press for a
 		// replaced session is told, for the same reason.
 		r.logf.Warnf("perms %s: press has no session to answer: %v", p.Conversation, err)
+		rec.Outcome = auditStale
 		return r.surfaceNotice(ctx, p.Conversation, noticeStalePress)
 	}
 	if sess != sessionRef(e.sess) {
@@ -653,6 +678,7 @@ func (r *Router) HandlePress(ctx context.Context, p chat.Press) error {
 		// a standing one — to whatever the *new* session happens to have
 		// pending under the same id.
 		r.logf.Warnf("perms %s: press answers %s, which is no longer this conversation's session", p.Conversation, sess)
+		rec.Outcome = auditStale
 		return r.surfaceNotice(ctx, p.Conversation, noticeStalePress)
 	}
 	kind := e.askKind(promptID)
@@ -667,6 +693,7 @@ func (r *Router) HandlePress(ctx context.Context, p chat.Press) error {
 			// the press that settled it got there first, it has already written
 			// a better record and claimSettle declines to replace it.
 			r.logf.Infof("perms %s: %s is no longer pending", p.Conversation, promptID)
+			rec.Outcome = auditSettledElsewhere
 			r.traceDecision(ctx, e, p, promptID, noticeSettled, settledElsewhere)
 			return nil
 		}
@@ -675,8 +702,10 @@ func (r *Router) HandlePress(ctx context.Context, p chat.Press) error {
 		// and without this the person who pressed it watches an agent stay
 		// blocked with nothing anywhere to say the answer did not land.
 		notice := noticePressFailed
+		rec.Outcome, rec.Status = auditFailed, statusOf(err)
 		if errors.Is(err, approval.ErrMaybeApplied) || turnHeldPress(kind, err) {
 			notice = noticeMaybeApplied
+			rec.Outcome = auditMaybeApplied
 		}
 		if nerr := r.surfaceNotice(ctx, p.Conversation, notice); nerr != nil {
 			r.logf.Errorf("perms %s: surface failed press: %v", p.Conversation, nerr)
@@ -693,6 +722,7 @@ func (r *Router) HandlePress(ctx context.Context, p chat.Press) error {
 	// audit line: an identity carrying a blank line and a bolded phrase would
 	// render underneath the real verdict as a second one.
 	approver := clampRunes(strings.Join(strings.Fields(ack.Approver), " "), promptNameLimit)
+	rec.Outcome, rec.Approver = auditApplied, approver
 	outcome := decided(d) + " — " + approver
 	if approver == "" {
 		// The decision applied, but the audit line names nobody — worth a log

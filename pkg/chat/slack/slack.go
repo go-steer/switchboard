@@ -287,6 +287,7 @@ func (a *Adapter) handleMention(ctx context.Context, h chat.Handler, ev *slackev
 			Channel:      ev.Channel,
 			Caller:       a.resolveCaller(ctx, ev.User),
 			Text:         text,
+			MessageID:    ev.TimeStamp,
 		}
 		if err := h.Handle(ctx, msg); err != nil {
 			a.logf.Errorf("slack: handle %s: %v", conv, err)
