@@ -266,6 +266,15 @@ func TestRouterHandleSurfacesErrors(t *testing.T) {
 			mux.HandleFunc("POST /sessions/{app}/{sid}/inject", func(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, "boom", tc.injectCode)
 			})
+			// The session exists; only inject is failing. Without a stream the
+			// relay's subscribe would 404, which reads as the session being
+			// lost (#88) and races the notice under test.
+			mux.HandleFunc("GET /sessions/{app}/{sid}/events", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.WriteHeader(http.StatusOK)
+				w.(http.Flusher).Flush()
+				<-r.Context().Done()
+			})
 
 			srv := httptest.NewServer(mux)
 			defer srv.Close()
@@ -277,8 +286,12 @@ func TestRouterHandleSurfacesErrors(t *testing.T) {
 			fake := &fakeSender{replies: make(chan chat.Reply, 4)}
 			router := NewRouter(dc, fake, ProgressOff, nil, nil)
 
+			// Cancelled before srv.Close runs (defers unwind last-first), so the
+			// relay hangs up its held-open stream rather than blocking Close.
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
 			msg := chat.Message{Conversation: "C0:100.1", Caller: "alice@example.com", Text: "hi"}
-			if err := router.Handle(context.Background(), msg); err == nil {
+			if err := router.Handle(ctx, msg); err == nil {
 				t.Fatal("Handle: want error, got nil")
 			}
 
