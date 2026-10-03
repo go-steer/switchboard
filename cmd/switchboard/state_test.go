@@ -325,12 +325,17 @@ func TestThePersisterWritesAfterAChange(t *testing.T) {
 func TestARevivedConversationDoesNotAskTwice(t *testing.T) {
 	e := &sessionEntry{ready: make(chan struct{}), sess: testSession}
 	e.claimAsk("p1", "**Permission needed**", "bash")
+	e.markPosted("p1")
 	e.claimAsk("p2", "answered already", "bash")
+	e.markPosted("p2")
 	e.claimSettle("p2", settledHere)
+	// Claimed, and its send still in flight (or cut off): not on screen, so
+	// not persisted — restoring it as asked would mean it is never posted.
+	e.claimAsk("p3", "never sent", "bash")
 
 	rec := e.record()
 	if len(rec.Asked) != 1 || rec.Asked[0].ID != "p1" || rec.Asked[0].Kind != "bash" {
-		t.Fatalf("Asked = %+v, want only the unanswered question, with its kind", rec.Asked)
+		t.Fatalf("Asked = %+v, want only the posted, unanswered question, with its kind", rec.Asked)
 	}
 	revived, err := entryFromRecord(rec, "")
 	if err != nil {
@@ -428,5 +433,20 @@ func TestAStateDirThatCannotBeWrittenStopsTheRun(t *testing.T) {
 	}
 	if _, err := s.load(); err == nil || errors.Is(err, errStateUnreadable) {
 		t.Errorf("load of an unreadable-by-permission file = %v; want an error that is not errStateUnreadable", err)
+	}
+}
+
+// TestAKeptPlaceholderIsNotRecorded: a frozen "Working…" left on purpose as the
+// trace of a turn that ended without an answer is part of the thread; only a
+// live one — a ticker running, or a turn in flight — is taken down on revive.
+func TestAKeptPlaceholderIsNotRecorded(t *testing.T) {
+	e := &sessionEntry{ready: make(chan struct{}), sess: testSession}
+	e.progressMsg = chat.MessageRef{ID: "ts-kept"}
+	if got := e.record().Placeholder; got != "" {
+		t.Errorf("Placeholder = %q for a kept trace, want none", got)
+	}
+	e.beginTurnInFlight()
+	if got := e.record().Placeholder; got != "ts-kept" {
+		t.Errorf("Placeholder = %q with a turn in flight, want the live placeholder", got)
 	}
 }

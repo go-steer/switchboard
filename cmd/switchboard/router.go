@@ -987,6 +987,11 @@ type askRecord struct {
 	// kind is the prompt's approval.Kind, kept because one kind's answer can
 	// take a turn's time to come back (respondDeadline).
 	kind string
+	// posted is set once the question is actually in the thread. Only posted
+	// questions are persisted: a claim whose send was cut off by a crash
+	// would otherwise be restored as asked, and the revived watcher would
+	// never post it at all (#86).
+	posted bool
 }
 
 // claimAsk reports whether this prompt is one the thread has not been shown
@@ -1017,6 +1022,15 @@ func (e *sessionEntry) askKind(id string) string {
 		return rec.kind
 	}
 	return ""
+}
+
+// markPosted records that a claimed question reached the thread.
+func (e *sessionEntry) markPosted(id string) {
+	e.qmu.Lock()
+	defer e.qmu.Unlock()
+	if rec := e.asked[id]; rec != nil {
+		rec.posted = true
+	}
 }
 
 // releaseAsk undoes a claim whose question never made it into the thread.
@@ -2341,6 +2355,10 @@ func (r *Router) reviveLocked(ctx context.Context, conv, channel string, rec ses
 func (r *Router) liveOrRevived(ctx context.Context, conv, channel string) (*sessionEntry, bool) {
 	r.mu.Lock()
 	if e, ok := r.sessions[conv]; ok {
+		// Under the reaper's lock, as session() does, so a sweep cannot
+		// release the entry between here and the press that is about to use
+		// it (#87).
+		e.touch()
 		r.mu.Unlock()
 		<-e.ready
 		return e, e.err == nil

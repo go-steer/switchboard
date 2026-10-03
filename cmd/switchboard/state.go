@@ -341,13 +341,20 @@ func (e *sessionEntry) record() sessionRecord {
 	}
 	e.qmu.Lock()
 	for id, a := range e.asked {
-		if a.settled == unsettled {
+		if a.settled == unsettled && a.posted {
 			rec.Asked = append(rec.Asked, askedRecord{ID: id, Text: a.text, Kind: a.kind})
 		}
 	}
 	e.qmu.Unlock()
+	// Only a live placeholder: one a ticker is still rendering, or one for a
+	// turn still in flight. A placeholder left standing on purpose — the
+	// frozen "Working… 2m30s" that is the only trace of a turn that ended
+	// without an answer, or a status trail — is part of the thread, and a
+	// revive must not take it down.
 	e.pmu.Lock()
-	rec.Placeholder = e.progressMsg.ID
+	if e.tickStop != nil || e.turnInFlight() {
+		rec.Placeholder = e.progressMsg.ID
+	}
 	e.pmu.Unlock()
 	return rec
 }
@@ -387,7 +394,7 @@ func entryFromRecord(rec sessionRecord, channel string) (*sessionEntry, error) {
 	if len(rec.Asked) > 0 {
 		e.asked = make(map[string]*askRecord, len(rec.Asked))
 		for _, a := range rec.Asked {
-			e.asked[a.ID] = &askRecord{text: a.Text, kind: a.Kind}
+			e.asked[a.ID] = &askRecord{text: a.Text, kind: a.Kind, posted: true}
 		}
 	}
 	return e, nil

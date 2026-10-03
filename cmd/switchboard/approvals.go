@@ -200,6 +200,7 @@ func (r *Router) postPrompt(ctx context.Context, conv string, e *sessionEntry, p
 		r.logf.Errorf("perms %s: post prompt %s: %v", conv, p.ID, err)
 		return
 	}
+	e.markPosted(p.ID)
 	r.logf.Infof("perms %s: asked about %s (%s)", conv, p.Tool, p.Kind)
 }
 
