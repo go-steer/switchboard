@@ -135,3 +135,29 @@ func TestSendAttachesUsageFooter(t *testing.T) {
 		})
 	}
 }
+
+// TestUpdateAttachesUsageFooter: the router puts a footer on an answer by
+// editing it, when the turn-complete carrying the usage arrives after the
+// answer (core-agent 2.10's order). Update has to render it as Send does.
+func TestUpdateAttachesUsageFooter(t *testing.T) {
+	var body string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/chat.update", func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		body = r.FormValue("blocks")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"channel":"C0","ts":"111.111"}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	a := newTestAdapter(srv.URL)
+	a.richBlocks = true
+	ref := chat.MessageRef{Conversation: "C0:100.5", ID: "111.111"}
+	if err := a.Update(context.Background(), ref, chat.Reply{Conversation: "C0:100.5", Text: "all good", Usage: testUsage}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if !strings.Contains(body, testUsageLine) {
+		t.Errorf("edited blocks carry no usage footer: %s", body)
+	}
+}

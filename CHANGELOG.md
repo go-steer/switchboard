@@ -64,6 +64,26 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   adopt it too.
 
 ### Fixed
+- **The usage footer lands on the answer it belongs to with core-agent 2.10.**
+  That daemon sends a turn's answer *before* the turn-complete carrying its
+  usage, where earlier ones sent it after. The footer stayed banked and was
+  attached to whatever text came next, usually the next prompt's answer. Now
+  the event after the turn-complete decides. A model text is the answer, the
+  older order, and works as before. Anything else, or 1.5s of quiet on the
+  stream, means the answer was already posted. It is then edited to add its
+  footer, on both platforms (Slack's `Update` now renders the footer too). An
+  answer split across messages goes without a footer rather than giving its
+  cost to the next one. A boundary that nothing claims is cleared, and a text
+  arriving after its turn has ended is never read as narration. So no
+  leftover state can cut the next turn short or strand a stopped clock.
+- **No more placeholder that appears and vanishes on every answer.** With the
+  answer arriving ahead of its turn-complete, the gateway read each answer as
+  mid-turn narration for a moment and re-anchored the progress placeholder
+  below it, posting a new one that the turn-complete deleted a second later.
+  Re-anchoring after possible narration now waits 1.5s, so the boundary lands
+  first and nothing is moved. Real narration still pulls the clock below
+  itself, just 1.5s later. An answer known to have ended the turn, or one with
+  a queued message taken up behind it (#42), moves the clock at once.
 - **A Google Chat HTTP-ingress shutdown can no longer misuse its WaitGroup**
   (#93). Shutdown drains the turns requests have started, but `Shutdown`
   gives up on its deadline with handlers still running. A handler that

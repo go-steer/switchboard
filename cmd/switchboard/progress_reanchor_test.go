@@ -546,6 +546,7 @@ func narrationRouter(t *testing.T, dc *daemon.Client, out sender, tick time.Dura
 	r.minBackoff, r.maxBackoff = 5*time.Millisecond, 10*time.Millisecond
 	r.streamGrace = time.Hour
 	r.tickInterval = tick
+	r.reanchorDelay = 0 // these pin the re-anchor itself, not the wait before it
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	return r, ctx

@@ -487,6 +487,31 @@ every turn would be wrong there within minutes. The turn is the *conversational*
 one — a question that drives eight tool calls reports what all nine model calls
 cost, not just the last.
 
+Daemons differ in whether a turn's usage arrives before or after its answer:
+earlier core-agents send the turn's end first, core-agent 2.10 the answer
+first. Both work. When the turn's end arrives, what follows it decides:
+- **A model text next** is the answer, and carries the footer as usual.
+- **Anything else next** (the next prompt, a tool call, auto-continue's empty
+  turn) means the answer was already posted, and it is edited to add the
+  footer.
+- **Nothing for 1.5s** of quiet on the stream also means the answer was
+  already posted.
+
+An answer split across several messages can't be edited that way, so it goes
+without a footer rather than giving its cost to the next answer. One known
+edge: a boundary-first answer that the daemon itself holds back for more than
+1.5s of silence can't be told apart from the 2.10 order. It still ends the turn
+properly, but it arrives without a footer, and if the turn narrated first, the
+footer lands on that narration instead.
+
+core-agent's `auto_continue` (on by default for `--no-repl` and multi-session
+daemons with `--session-db`) is designed to finish turns interrupted by a crash
+or restart. On the daemons tested here (2.9 and 2.10) it was also seen starting
+a short extra turn after a *completed* answer. That shows up in chat as one
+more message ("All requests have been completed.") and costs a second model
+call. A chat-driven daemon may want `agent.auto_continue.enabled: false` in its
+config.
+
 ### When a turn fails
 
 A turn that never answers has to say so, or a thread just goes quiet with a
