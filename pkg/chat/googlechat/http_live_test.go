@@ -20,7 +20,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/go-steer/switchboard/pkg/chat"
@@ -56,7 +55,7 @@ func TestLiveApprovalClickIsAPressAnsweredInBand(t *testing.T) {
 	r := postEvent(liveClick(t, "addon-live-http-approval-click.json"))
 	r.Header.Set("Authorization", "Bearer good-token")
 	rec := httptest.NewRecorder()
-	var wg sync.WaitGroup
+	var wg turnGroup
 	a.eventHandler(context.Background(), &wg, h).ServeHTTP(rec, r)
 	wg.Wait()
 
@@ -93,7 +92,7 @@ func TestLiveProgressClickIsACommandAnsweredInBand(t *testing.T) {
 	r := postEvent(liveClick(t, "addon-live-http-progress-click.json"))
 	r.Header.Set("Authorization", "Bearer good-token")
 	rec := httptest.NewRecorder()
-	var wg sync.WaitGroup
+	var wg turnGroup
 	a.eventHandler(context.Background(), &wg, h).ServeHTTP(rec, r)
 	wg.Wait()
 

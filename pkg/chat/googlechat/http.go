@@ -312,9 +312,9 @@ func (a *Adapter) serveOn(ctx context.Context, ln net.Listener, h chat.Handler) 
 	// A turn outlives the request that started it, so it cannot run on the
 	// request's context — that is cancelled the moment the response is
 	// written. It runs on the run context instead, which means shutdown
-	// cancels it and the WaitGroup below waits for it.
-	var wg sync.WaitGroup
-	mux.Handle(IngressPath, a.eventHandler(ctx, &wg, h))
+	// cancels it and the turn group below waits for it.
+	var turns turnGroup
+	mux.Handle(IngressPath, a.eventHandler(ctx, &turns, h))
 
 	server := &http.Server{
 		Handler:  mux,
@@ -332,6 +332,10 @@ func (a *Adapter) serveOn(ctx context.Context, ln net.Listener, h chat.Handler) 
 	case <-ctx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), chatIngressGrace)
 		defer cancel()
+		// Refused from here, not from drain: the run context is already
+		// cancelled, so a request still being served during Shutdown's grace
+		// would otherwise be answered 200 and start a turn that dies at once.
+		turns.refuseNew()
 		err := server.Shutdown(shutdownCtx)
 		// Shutdown returns once the listener is closed and requests have
 		// drained, but the turns those requests started are on their own
@@ -339,7 +343,7 @@ func (a *Adapter) serveOn(ctx context.Context, ln net.Listener, h chat.Handler) 
 		// abandoning an answer that was about to be posted — and bounding
 		// that wait is what keeps one turn that ignores its cancelled context
 		// from holding the process open until something kills it.
-		a.drain(shutdownCtx, &wg)
+		a.drain(shutdownCtx, &turns)
 		if err != nil {
 			return fmt.Errorf("googlechat: ingress shutdown: %w", err)
 		}
@@ -348,17 +352,56 @@ func (a *Adapter) serveOn(ctx context.Context, ln net.Listener, h chat.Handler) 
 		if errors.Is(err, http.ErrServerClosed) {
 			shutdownCtx, cancel := context.WithTimeout(context.Background(), chatIngressGrace)
 			defer cancel()
-			a.drain(shutdownCtx, &wg)
+			a.drain(shutdownCtx, &turns)
 			return nil
 		}
 		return fmt.Errorf("googlechat: ingress: %w", err)
 	}
 }
 
-// drain waits for the in-flight turns, giving up when ctx does.
-func (a *Adapter) drain(ctx context.Context, wg *sync.WaitGroup) {
+// turnGroup tracks the turns requests have started, and stops new ones once
+// shutdown starts waiting for them (#93). A bare WaitGroup cannot do the
+// second half: Shutdown gives up on its deadline with handlers still running,
+// and one of them reaching Add while drain is in Wait with the counter at zero
+// is WaitGroup misuse, which the runtime may report as a panic. Taking the
+// flag and calling Add under one lock makes "started" and "draining" mutually
+// ordered — a turn is either counted before the wait begins, or refused.
+type turnGroup struct {
+	mu       sync.Mutex
+	draining bool
+	wg       sync.WaitGroup
+}
+
+// start counts a new turn, or reports false once draining has begun, in which
+// case the caller must not start one.
+func (g *turnGroup) start() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.draining {
+		return false
+	}
+	g.wg.Add(1)
+	return true
+}
+
+func (g *turnGroup) done() { g.wg.Done() }
+
+// Wait waits for every counted turn. It does not refuse new ones; drain does.
+func (g *turnGroup) Wait() { g.wg.Wait() }
+
+// refuseNew marks the group draining: every later start reports false.
+func (g *turnGroup) refuseNew() {
+	g.mu.Lock()
+	g.draining = true
+	g.mu.Unlock()
+}
+
+// drain refuses new turns, then waits for the in-flight ones, giving up when
+// ctx does.
+func (a *Adapter) drain(ctx context.Context, turns *turnGroup) {
+	turns.refuseNew()
 	done := make(chan struct{})
-	go func() { wg.Wait(); close(done) }()
+	go func() { turns.Wait(); close(done) }()
 	select {
 	case <-done:
 	case <-ctx.Done():
@@ -373,7 +416,7 @@ func (a *Adapter) drain(ctx context.Context, wg *sync.WaitGroup) {
 //
 // runCtx, not the request context: the response is written before the turn
 // finishes, and the request context is cancelled at that moment.
-func (a *Adapter) eventHandler(runCtx context.Context, wg *sync.WaitGroup, h chat.Handler) http.Handler {
+func (a *Adapter) eventHandler(runCtx context.Context, turns *turnGroup, h chat.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.Header().Set("Allow", http.MethodPost)
@@ -411,7 +454,7 @@ func (a *Adapter) eventHandler(runCtx context.Context, wg *sync.WaitGroup, h cha
 		// answered over REST, which is how that dialect works over Pub/Sub.
 		if in, err := decodeEvent(body); err == nil &&
 			in.kind == kindButton && in.addon && in.messageName != "" {
-			a.answerClick(w, r, runCtx, wg, h, body, in.messageName)
+			a.answerClick(w, r, runCtx, turns, h, body, in.messageName)
 			return
 		}
 
@@ -424,9 +467,12 @@ func (a *Adapter) eventHandler(runCtx context.Context, wg *sync.WaitGroup, h cha
 		// (Cloud Run's default allocation) this goroutine is not reliably
 		// scheduled; switchboard ships as a Deployment, where it is. See
 		// docs/DESIGN.md §3.4.
-		wg.Add(1)
+		if runCtx.Err() != nil || !turns.start() {
+			refuseDraining(w)
+			return
+		}
 		go func() {
-			defer wg.Done()
+			defer turns.done()
 			a.handleEvent(runCtx, h, body)
 		}()
 
@@ -437,6 +483,18 @@ func (a *Adapter) eventHandler(runCtx context.Context, wg *sync.WaitGroup, h cha
 			a.logf.Warnf("googlechat: ingress: write response: %v", err)
 		}
 	})
+}
+
+// refuseDraining answers a request that arrived after shutdown stopped
+// starting turns. 503 rather than the usual 200, because this event was not
+// acted on and a 200 would say it had: the refusal shows up as Chat's own
+// error, where the person can send it again, instead of as a message that
+// silently went nowhere. Nothing was started, so a resend duplicates nothing.
+// Whether Chat itself redelivers an HTTP event after a 5xx is unmeasured, and
+// nothing here relies on it.
+func refuseDraining(w http.ResponseWriter) {
+	w.Header().Set("Retry-After", "1")
+	http.Error(w, "shutting down", http.StatusServiceUnavailable)
 }
 
 // learnURL records the URL a verified request was addressed to, for actionURL.
@@ -462,13 +520,16 @@ func (a *Adapter) learnURL(r *http.Request) {
 // the response may be written before it finishes, and a press that has reached
 // the daemon must not be cut off by a response deadline.
 func (a *Adapter) answerClick(w http.ResponseWriter, r *http.Request, runCtx context.Context,
-	wg *sync.WaitGroup, h chat.Handler, body []byte, hosting string) {
+	turns *turnGroup, h chat.Handler, body []byte, hosting string) {
 	click := &clickResponse{name: hosting}
 	ctx := context.WithValue(runCtx, clickKey{}, click)
 	done := make(chan struct{})
-	wg.Add(1)
+	if runCtx.Err() != nil || !turns.start() {
+		refuseDraining(w)
+		return
+	}
 	go func() {
-		defer wg.Done()
+		defer turns.done()
 		defer close(done)
 		a.handleEvent(ctx, h, body)
 	}()

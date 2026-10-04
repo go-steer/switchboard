@@ -23,6 +23,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   adopt it too.
 
 ### Fixed
+- **A Google Chat HTTP-ingress shutdown can no longer misuse its WaitGroup**
+  (#93). Shutdown drains the turns requests have started, but `Shutdown`
+  gives up on its deadline with handlers still running. A handler that
+  started a turn while the drain was waiting could add to the WaitGroup
+  concurrently with its `Wait`, which the runtime may report as a panic.
+  New turns are now refused from the moment shutdown begins, under the same
+  lock that counts them. Before, a request served during Shutdown's grace got
+  `200` and a turn that died at once on the cancelled context. A refused
+  request is answered `503` with `Retry-After`, so the person sees Chat's
+  error and can resend; nothing was started, so a resend duplicates nothing.
 - **A permission prompt's command renders as code on Google Chat.** The
   question card used the HTML subset the gateway's own cards use. That subset
   has no monospace, so the fenced command showed up between literal ```

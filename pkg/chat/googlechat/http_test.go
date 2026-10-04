@@ -24,6 +24,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -193,7 +194,7 @@ func newIngressAdapter(t *testing.T, f *fakeMessenger) *Adapter {
 // for, which is the whole shape of this ingress: 200 first, work after.
 func serveOne(t *testing.T, a *Adapter, h *fakeHandler, r *http.Request) *httptest.ResponseRecorder {
 	t.Helper()
-	var wg sync.WaitGroup
+	var wg turnGroup
 	rec := httptest.NewRecorder()
 	a.eventHandler(context.Background(), &wg, h).ServeHTTP(rec, r)
 	done := make(chan struct{})
@@ -229,6 +230,96 @@ func TestIngressRoutesAVerifiedMessage(t *testing.T) {
 	}
 	if h.msgs[0].Text != "hello" || h.msgs[0].Caller != "someone@example.com" {
 		t.Fatalf("unexpected turn %+v", h.msgs[0])
+	}
+}
+
+// TestIngressRefusesNewTurnsOnceDraining (#93): Shutdown can give up on its
+// deadline with handlers still running, and one of them starting a turn while
+// drain waits is WaitGroup misuse. Once drain has begun, a request — an event
+// or a click — must start nothing, and say so with a status that lets Chat
+// deliver it to a replacement.
+func TestIngressRefusesNewTurnsOnceDraining(t *testing.T) {
+	for _, tc := range []struct{ name, body string }{
+		{"event", `{"chat": {"user": {"name": "users/5"}, "space": {"name": "spaces/AAA"},
+			"messagePayload": {"message": {"text": "hello", "sender": {"name": "users/5"},
+			"thread": {"name": "spaces/AAA/threads/T1"}}}}}`},
+		{"click", testClickBody},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeMessenger{}
+			a := newIngressAdapter(t, f)
+			a.cards = CardsStatus
+			h := &pressHandler{a: a}
+			var turns turnGroup
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			a.drain(ctx, &turns)
+
+			r := postEvent(tc.body)
+			r.Header.Set("Authorization", "Bearer good-token")
+			rec := httptest.NewRecorder()
+			a.eventHandler(context.Background(), &turns, h).ServeHTTP(rec, r)
+			turns.Wait()
+
+			if rec.Code != http.StatusServiceUnavailable {
+				t.Errorf("status = %d, want 503 for a request after drain began", rec.Code)
+			}
+			if len(h.msgs)+len(h.presses) != 0 {
+				t.Errorf("a turn started after drain began: msgs=%d presses=%d", len(h.msgs), len(h.presses))
+			}
+		})
+	}
+}
+
+// TestIngressRefusesOnACancelledRunContext: shutdown cancels the run context
+// before Shutdown's grace runs out, and a request served in that window must
+// not be answered 200 with a turn that dies at once on the dead context.
+func TestIngressRefusesOnACancelledRunContext(t *testing.T) {
+	f := &fakeMessenger{}
+	a := newIngressAdapter(t, f)
+	h := &fakeHandler{}
+	var turns turnGroup
+	runCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	r := postEvent(`{"chat": {"user": {"name": "users/5"}, "space": {"name": "spaces/AAA"},
+		"messagePayload": {"message": {"text": "hello", "sender": {"name": "users/5"},
+		"thread": {"name": "spaces/AAA/threads/T1"}}}}}`)
+	r.Header.Set("Authorization", "Bearer good-token")
+	rec := httptest.NewRecorder()
+	a.eventHandler(runCtx, &turns, h).ServeHTTP(rec, r)
+	turns.Wait()
+
+	if rec.Code != http.StatusServiceUnavailable || len(h.msgs) != 0 {
+		t.Errorf("status = %d, turns = %d; want 503 and no turn on a cancelled run context", rec.Code, len(h.msgs))
+	}
+}
+
+// TestTurnGroupStartsAndDrainsConcurrently runs starts against a drain under
+// -race: every start either counts before the wait or is refused, so this must
+// neither race nor panic, and drain must not return while a counted turn runs.
+func TestTurnGroupStartsAndDrainsConcurrently(t *testing.T) {
+	for i := 0; i < 200; i++ {
+		var turns turnGroup
+		var running atomic.Int32
+		var wg sync.WaitGroup
+		for j := 0; j < 8; j++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if turns.start() {
+					running.Add(1)
+					time.Sleep(time.Microsecond)
+					running.Add(-1)
+					turns.done()
+				}
+			}()
+		}
+		(&Adapter{}).drain(context.Background(), &turns)
+		if n := running.Load(); n != 0 {
+			t.Fatalf("drain returned with %d counted turns still running", n)
+		}
+		wg.Wait()
 	}
 }
 
@@ -592,7 +683,7 @@ func TestIngressAnswersAClickWithItsEdit(t *testing.T) {
 	r := postEvent(testClickBody)
 	r.Header.Set("Authorization", "Bearer good-token")
 	rec := httptest.NewRecorder()
-	var wg sync.WaitGroup
+	var wg turnGroup
 	a.eventHandler(context.Background(), &wg, h).ServeHTTP(rec, r)
 	wg.Wait()
 
@@ -646,7 +737,7 @@ func TestIngressStillEditsWhenTheResponseIsLost(t *testing.T) {
 	r := postEvent(testClickBody).WithContext(ctx)
 	r.Header.Set("Authorization", "Bearer good-token")
 	rec := httptest.NewRecorder()
-	var wg sync.WaitGroup
+	var wg turnGroup
 	a.eventHandler(context.Background(), &wg, h).ServeHTTP(rec, r)
 	wg.Wait()
 
@@ -673,7 +764,7 @@ func TestIngressAnswersACommandButtonInBand(t *testing.T) {
 	r := postEvent(body)
 	r.Header.Set("Authorization", "Bearer good-token")
 	rec := httptest.NewRecorder()
-	var wg sync.WaitGroup
+	var wg turnGroup
 	a.eventHandler(context.Background(), &wg, h).ServeHTTP(rec, r)
 	wg.Wait()
 
@@ -703,7 +794,7 @@ func TestIngressAcknowledgesASlowClick(t *testing.T) {
 	r := postEvent(testClickBody)
 	r.Header.Set("Authorization", "Bearer good-token")
 	rec := httptest.NewRecorder()
-	var wg sync.WaitGroup
+	var wg turnGroup
 	a.eventHandler(context.Background(), &wg, h).ServeHTTP(rec, r)
 
 	if got := strings.TrimSpace(rec.Body.String()); got != "{}" {
@@ -728,7 +819,7 @@ func TestIngressAcknowledgesAClickThatEditsNothing(t *testing.T) {
 	r := postEvent(testClickBody)
 	r.Header.Set("Authorization", "Bearer good-token")
 	rec := httptest.NewRecorder()
-	var wg sync.WaitGroup
+	var wg turnGroup
 	a.eventHandler(context.Background(), &wg, h).ServeHTTP(rec, r)
 	wg.Wait()
 
@@ -805,7 +896,7 @@ func TestIngressRoutesALegacyClickAsynchronously(t *testing.T) {
 	r := postEvent(body)
 	r.Header.Set("Authorization", "Bearer good-token")
 	rec := httptest.NewRecorder()
-	var wg sync.WaitGroup
+	var wg turnGroup
 	a.eventHandler(context.Background(), &wg, h).ServeHTTP(rec, r)
 	wg.Wait()
 
