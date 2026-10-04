@@ -456,7 +456,7 @@ func (a *Adapter) Update(ctx context.Context, ref chat.MessageRef, r chat.Reply)
 	rendered := toMrkdwn(r.Text)
 
 	if a.richBlocks {
-		blocks := sanitizeBlocks(renderBlocks(r.Text, toMrkdwn))
+		blocks := sanitizeBlocks(withUsageFooter(renderBlocks(r.Text, toMrkdwn), r.Usage))
 		if blocks != nil {
 			_, _, _, err := a.api.UpdateMessageContext(ctx, channel, ref.ID,
 				slack.MsgOptionBlocks(toSlackBlocks(blocks)...),

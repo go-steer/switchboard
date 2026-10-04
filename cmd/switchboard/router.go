@@ -440,6 +440,20 @@ type Router struct {
 	// defaulted in NewRouter and shortened in tests.
 	tickInterval, tickMaxAge time.Duration
 
+	// footDelay is how long a turn-complete waits for an answer behind it; see
+	// scheduleFoot. Zero or less means defaultFootDelay.
+	footDelay time.Duration
+
+	// reanchorDelay is how long narration waits before moving the progress
+	// placeholder below itself. A daemon that sends the answer ahead of its
+	// turn-complete (core-agent 2.10) makes every answer look like narration
+	// for a moment; re-anchoring at once posted a fresh placeholder and had
+	// the boundary delete it a second later — a message that appears and
+	// vanishes on every turn (seen live). Waiting lets the boundary land
+	// first, after which the re-anchor finds nothing to move. Zero re-anchors
+	// at once.
+	reanchorDelay time.Duration
+
 	mu       sync.Mutex
 	sessions map[string]*sessionEntry
 
@@ -692,6 +706,10 @@ type sessionEntry struct {
 	// the answer. Zero value means none is outstanding.
 	pmu         sync.Mutex
 	progressMsg chat.MessageRef
+	// reanchorGen identifies the delayed re-anchor pending for this entry, or
+	// is zero when none is: the timer and flushReanchor each claim it with a
+	// compare-and-swap, so it runs once whichever comes first.
+	reanchorGen atomic.Int64
 
 	// The ticker's state for the turn in flight, under pmu because it renders
 	// into that same progressMsg and must not become a second source of truth
@@ -742,11 +760,131 @@ type sessionEntry struct {
 	// here and deliverText takes the result as the reply's footer.
 	// settled says turn-complete has arrived, which is the only signal that
 	// what is banked is a whole conversational turn rather than a partial one.
-	umu     sync.Mutex
-	usage   daemon.TurnUsage
-	totals  daemon.UsageTotals
-	have    bool
-	settled bool
+	//
+	// unfooted is the turn's latest text posted before its turn-complete, the
+	// message a footer belongs on if the boundary turns out to follow it. "Both
+	// feeding events arrive before the answer" held for the daemon this was
+	// written against; core-agent 2.10 sends the answer first and the
+	// turn-complete after (measured live), which left the footer banked for
+	// whatever text came next — the next prompt's answer, a turn late.
+	umu      sync.Mutex
+	usage    daemon.TurnUsage
+	totals   daemon.UsageTotals
+	have     bool
+	settled  bool
+	unfooted unfootedText
+	// footPending says a turn-complete is waiting to learn which text it
+	// belonged to. The next agent event decides (see resolveFoot); footTimer
+	// decides instead if the stream goes quiet first. It measures quiet, not
+	// time since the boundary: every event the relay processes resets it, so
+	// a relay slowed by its own platform calls cannot make it fire early.
+	footPending bool
+	footTimer   *time.Timer
+	footDelay   time.Duration
+}
+
+// unfootedText is a posted text that may yet turn out to be its turn's answer.
+type unfootedText struct {
+	ref  chat.MessageRef
+	text string
+}
+
+// noteUnfooted records text posted before its turn's boundary, replacing any
+// earlier one: only the last text before the boundary is the answer.
+func (e *sessionEntry) noteUnfooted(ref chat.MessageRef, text string) {
+	e.umu.Lock()
+	defer e.umu.Unlock()
+	e.unfooted = unfootedText{ref: ref, text: text}
+}
+
+// takeUnfootedAnswer hands back the turn's last unfooted text together with
+// its now-settled usage, consuming both — or ok false when there is no such
+// text or no settled usage, leaving the usage banked for a text still to come
+// (the older order, boundary first).
+func (e *sessionEntry) takeUnfootedAnswer() (t unfootedText, u daemon.TurnUsage, ok bool) {
+	e.umu.Lock()
+	defer e.umu.Unlock()
+	if !e.footPending || e.unfooted.ref.ID == "" || !e.settled {
+		return unfootedText{}, daemon.TurnUsage{}, false
+	}
+	t, u = e.unfooted, e.usage
+	e.unfooted, e.usage, e.settled = unfootedText{}, daemon.TurnUsage{}, false
+	e.endFootLocked()
+	return t, u, true
+}
+
+// dropUnfooted forgets the pending text and any footing armed for it: an
+// answer was delivered with the usage, or a new turn began.
+func (e *sessionEntry) dropUnfooted() {
+	e.umu.Lock()
+	defer e.umu.Unlock()
+	e.dropUnfootedLocked()
+}
+
+func (e *sessionEntry) dropUnfootedLocked() {
+	e.unfooted = unfootedText{}
+	e.endFootLocked()
+}
+
+func (e *sessionEntry) endFootLocked() {
+	e.footPending = false
+	if e.footTimer != nil {
+		e.footTimer.Stop()
+		e.footTimer = nil
+	}
+}
+
+// armFoot marks a boundary pending and starts the quiet timer. A second
+// turn-complete replaces the first's.
+func (e *sessionEntry) armFoot(d time.Duration, fire func()) {
+	e.umu.Lock()
+	defer e.umu.Unlock()
+	e.endFootLocked()
+	e.footPending, e.footDelay = true, d
+	e.footTimer = time.AfterFunc(d, fire)
+}
+
+// quietReset restarts the quiet timer while a boundary is pending: the stream
+// is still talking.
+func (e *sessionEntry) quietReset() {
+	e.umu.Lock()
+	defer e.umu.Unlock()
+	if e.footPending && e.footTimer != nil {
+		e.footTimer.Reset(e.footDelay)
+	}
+}
+
+// footIsPending reports whether a turn-complete is waiting on its answer.
+func (e *sessionEntry) footIsPending() bool {
+	e.umu.Lock()
+	defer e.umu.Unlock()
+	return e.footPending
+}
+
+// claimFootByText settles a pending boundary in favour of a text arriving
+// after it: the older, boundary-first order, where this text is the answer
+// and takes the usage the ordinary way. The pending text before it, if any,
+// was narration.
+func (e *sessionEntry) claimFootByText() {
+	e.umu.Lock()
+	defer e.umu.Unlock()
+	if e.footPending {
+		e.unfooted = unfootedText{}
+		e.endFootLocked()
+	}
+}
+
+// clearStaleSettled drops a settled turn's usage that no text has claimed by
+// the time the footing fires: the turn ended with no answer, or a text from a
+// later turn took the usage before this boundary's own (see footLastAnswer).
+// Left set, it would read the next turn's first narration as that turn's end.
+func (e *sessionEntry) clearStaleSettled() {
+	e.umu.Lock()
+	defer e.umu.Unlock()
+	if e.footPending && e.unfooted.ref.ID == "" && e.settled {
+		e.usage, e.settled = daemon.TurnUsage{}, false
+	}
+	e.endFootLocked()
 }
 
 // noteTotals folds one usage-update into the turn in flight by differencing it
@@ -826,6 +964,7 @@ func (e *sessionEntry) resetUsage() {
 	e.umu.Lock()
 	defer e.umu.Unlock()
 	e.usage, e.settled = daemon.TurnUsage{}, false
+	e.dropUnfootedLocked()
 }
 
 // takeUsage reads and clears the turn's accounting, returning nil unless a
@@ -1451,22 +1590,24 @@ func NewRouter(client *daemon.Client, out sender, progress ProgressMode, m *metr
 		progress = ProgressOff
 	}
 	return &Router{
-		client:       client,
-		out:          out,
-		defaults:     channelSettings{progress: progress},
-		metrics:      m,
-		logf:         logf,
-		minBackoff:   reconnectMinBackoff,
-		maxBackoff:   reconnectMaxBackoff,
-		streamGrace:  streamLostGrace,
-		tickInterval: progressTickInterval,
-		tickMaxAge:   progressTickMaxAge,
-		sessions:     make(map[string]*sessionEntry),
-		dormant:      make(map[string]sessionRecord),
-		bindings:     make(map[string]binding),
-		boundTo:      make(map[string]string),
-		reserving:    make(map[string]string),
-		overrides:    make(map[string]ProgressMode),
+		client:        client,
+		out:           out,
+		defaults:      channelSettings{progress: progress},
+		metrics:       m,
+		logf:          logf,
+		minBackoff:    reconnectMinBackoff,
+		maxBackoff:    reconnectMaxBackoff,
+		streamGrace:   streamLostGrace,
+		tickInterval:  progressTickInterval,
+		reanchorDelay: defaultReanchorDelay,
+		footDelay:     defaultFootDelay,
+		tickMaxAge:    progressTickMaxAge,
+		sessions:      make(map[string]*sessionEntry),
+		dormant:       make(map[string]sessionRecord),
+		bindings:      make(map[string]binding),
+		boundTo:       make(map[string]string),
+		reserving:     make(map[string]string),
+		overrides:     make(map[string]ProgressMode),
 	}
 }
 
@@ -2157,7 +2298,11 @@ func (r *Router) deliverText(ctx context.Context, e *sessionEntry, conv, text st
 	// a later turn behind it hands that turn a thread with no placeholder and
 	// no clock. That is the second case. Backlogged text keeps the placeholder,
 	// re-anchoring it below the answer exactly as narration does.
-	ended := settled || !e.signalsEnd.Load() || !e.watchedWhole()
+	// A text arriving when no turn is in flight cannot be narration either:
+	// the boundary has already ended the turn (a boundary-first answer that
+	// lost its usage to a quiet stream), or no human turn began it. Reading it
+	// as narration would re-anchor a stopped clock below it and leave it there.
+	ended := settled || !e.signalsEnd.Load() || !e.watchedWhole() || !e.turnInFlight()
 	final := ended && !e.backlogged()
 	if ended {
 		// The counter is about turns, not placeholders: a completed turn was
@@ -2173,7 +2318,10 @@ func (r *Router) deliverText(ctx context.Context, e *sessionEntry, conv, text st
 	if !r.settingsFor(e.channel).showUsage {
 		usage = nil
 	}
-	_, err := r.out.Send(ctx, chat.Reply{
+	if settled {
+		e.dropUnfooted() // this text is the answer, footed or not
+	}
+	ref, err := r.out.Send(ctx, chat.Reply{
 		Conversation: conv,
 		Text:         text,
 		Usage:        usage,
@@ -2202,7 +2350,66 @@ func (r *Router) deliverText(ctx context.Context, e *sessionEntry, conv, text st
 	// permission to delete the placeholder instead of freezing it, and the
 	// boundary can land while the re-anchor's own Send is still in the air.
 	e.noteSpoke()
-	r.reanchorProgress(ctx, e, conv)
+	if !ended && ref.ID != "" {
+		e.noteUnfooted(ref, text)
+	}
+	if ended {
+		// A backlogged answer (#42): the next turn is already queued and its
+		// clock belongs below this answer now. Nothing to wait for.
+		r.reanchorProgress(ctx, e, conv)
+		return
+	}
+	r.scheduleReanchor(ctx, e, conv)
+}
+
+// defaultReanchorDelay comfortably covers the gap measured live between an
+// answer and the turn-complete behind it (well under a second), and is short
+// next to the fifteen-second tick, so real narration still pulls the clock
+// below itself promptly.
+const defaultReanchorDelay = 1500 * time.Millisecond
+
+// scheduleReanchor re-anchors the placeholder after reanchorDelay, if it is
+// still the placeholder that was there when the narration landed. By then the
+// text may have turned out to be the answer, and the boundary retired the
+// placeholder: nothing to move. Guarded on the placeholder rather than on the
+// turn, because a queued message taken up in the meantime (#42) starts a new
+// turn on this same placeholder, and that is exactly the clock that belongs
+// below the text.
+func (r *Router) scheduleReanchor(ctx context.Context, e *sessionEntry, conv string) {
+	if r.reanchorDelay <= 0 {
+		r.reanchorProgress(ctx, e, conv)
+		return
+	}
+	held := e.currentProgress()
+	if held.ID == "" {
+		return
+	}
+	gen := e.reanchorGen.Add(1)
+	time.AfterFunc(r.reanchorDelay, func() {
+		if ctx.Err() != nil || !e.reanchorGen.CompareAndSwap(gen, 0) || e.currentProgress().ID != held.ID {
+			return
+		}
+		r.reanchorProgress(ctx, e, conv)
+	})
+}
+
+// flushReanchor runs a pending delayed re-anchor now. Called when a queued
+// message is taken up (#42): the next turn has started on this placeholder,
+// so the text it was waiting behind cannot have been the end of anything, and
+// the clock belongs below it before the previous turn's boundary arrives and
+// retires a placeholder still sitting above spoken text.
+func (r *Router) flushReanchor(ctx context.Context, e *sessionEntry, conv string) {
+	if gen := e.reanchorGen.Load(); gen != 0 && e.reanchorGen.CompareAndSwap(gen, 0) {
+		r.reanchorProgress(ctx, e, conv)
+	}
+}
+
+// currentProgress returns the conversation's progress placeholder, or a zero
+// ref when there is none.
+func (e *sessionEntry) currentProgress() chat.MessageRef {
+	e.pmu.Lock()
+	defer e.pmu.Unlock()
+	return e.progressMsg
 }
 
 // reanchorProgress moves the turn's placeholder to the bottom of the thread
@@ -2279,6 +2486,96 @@ func (r *Router) postActivity(ctx context.Context, e *sessionEntry, conv string,
 		// Only stream mode's notices are worth remembering: they are the only
 		// ones that carry per-call state a result can tick off.
 		e.noteToolCalls(ref, calls, turn, detail, seen)
+	}
+}
+
+// defaultFootDelay is how long a turn-complete waits for an answer behind it
+// before deciding the text ahead of it was the answer. A boundary-first daemon
+// sends the answer within moments of the boundary; a model call for anything
+// after it — core-agent's auto_continue turn included — takes longer than this.
+const defaultFootDelay = 1500 * time.Millisecond
+
+// scheduleFoot is called at turn-complete, after the boundary's own handling.
+// Whether the text already posted this turn was its answer depends on the
+// daemon's order, which the boundary alone cannot tell: a boundary-first
+// daemon (core-agent before 2.10) sends the answer after it — even after the
+// next turn's "streaming", measured — and an answer-first one (2.10) already
+// sent it. So the next agent event decides (resolveFoot): a model text is the
+// answer, anything else means the pending text was. If the stream goes quiet
+// for footDelay instead, footLastAnswer decides on the text it has.
+func (r *Router) scheduleFoot(ctx context.Context, e *sessionEntry, conv string) {
+	fire := func() {
+		if ctx.Err() == nil {
+			r.footLastAnswer(ctx, e, conv)
+		}
+	}
+	// Never zero: deciding at the boundary itself would clear the usage a
+	// boundary-first daemon's answer is a moment from claiming.
+	d := r.footDelay
+	if d <= 0 {
+		d = defaultFootDelay
+	}
+	e.armFoot(d, fire)
+}
+
+// resolveFoot is called for every agent event while a boundary is pending. A
+// final model text claims the usage itself (claimFootByText, then deliverText
+// takes it settled); any other event — a user-role message such as an inbox
+// echo or auto_continue's empty prompt, a tool call, a tool result — means no
+// answer is coming after the boundary, so the pending text is settled now. A
+// partial chunk decides nothing: its final event follows.
+//
+// This relies on core-agent echoing a turn's prompt as a user-role agent event
+// before any model output of that turn (it writes it to the eventlog first, and
+// agent frames keep eventlog order). Without the echo, a next turn's first
+// model text arriving inside the quiet window would be read as the previous
+// turn's answer.
+func (r *Router) resolveFoot(ctx context.Context, e *sessionEntry, conv string, finalText, partial bool) {
+	if !e.footIsPending() || partial {
+		return
+	}
+	if finalText {
+		e.claimFootByText()
+		return
+	}
+	r.footLastAnswer(ctx, e, conv)
+}
+
+// footLastAnswer settles a turn whose answer went out ahead of its boundary:
+// the turn is counted as relayed, the usage is consumed — whatever show-usage
+// says, so it cannot linger as a settled turn for the next one to inherit —
+// and, with show-usage on, the answer is edited in place to carry its footer.
+// Only when the text fits one message: an answer split across several is
+// edited as its first part, and rewriting that part with the whole text would
+// duplicate the rest.
+//
+// Over-attribution is possible in one corner, as noteTotals documents for the
+// totals themselves: a turn whose boundary was lost in a stream outage, followed
+// by one that ends with no text, puts both turns' usage on the first's text.
+func (r *Router) footLastAnswer(ctx context.Context, e *sessionEntry, conv string) {
+	t, u, ok := e.takeUnfootedAnswer()
+	if !ok {
+		e.clearStaleSettled()
+		return
+	}
+	r.metrics.recordTurnRelayed()
+	if !r.settingsFor(e.channel).showUsage || u.Empty() {
+		return
+	}
+	fit, ok := r.out.(chat.TextFitter)
+	if !ok || !fit.FitsOneMessage(t.text) {
+		return
+	}
+	err := r.out.Update(ctx, t.ref, chat.Reply{
+		Conversation: conv,
+		Text:         t.text,
+		Usage: &chat.Usage{
+			Model: u.Model, TokensIn: u.TokensIn, TokensOut: u.TokensOut,
+			CostUSD: u.CostUSD, Latency: u.Latency,
+		},
+	})
+	if err != nil {
+		r.logf.Warnf("relay %s: add usage footer: %v", conv, err)
 	}
 }
 
@@ -2590,6 +2887,7 @@ func (r *Router) relay(ctx context.Context, conv string, e *sessionEntry, owner 
 		streaming := false
 		err := r.client.Subscribe(ctx, e.sess, owner, e.seq.Load(), func(ev daemon.Event) error {
 			lastAlive = time.Now()
+			e.quietReset()
 			// The two lifecycle events carrying a turn's accounting arrive
 			// before the agent event holding its answer, so they are banked on
 			// the entry and attached when that answer is delivered. Neither
@@ -2633,6 +2931,11 @@ func (r *Router) relay(ctx context.Context, conv string, e *sessionEntry, owner 
 				// marked in flight forever, and the next outage announced a
 				// lost turn that had finished hours earlier.
 				e.endTurn()
+				// Readable or not, the boundary settles the turn; which text it
+				// belonged to is decided by what follows it. Armed last, after
+				// this handler's own platform calls, so their latency is not
+				// counted as the stream going quiet.
+				r.scheduleFoot(ctx, e, conv)
 				// This turn is accounted for, so the status-update trailing it
 				// is not a second boundary. See the turn-error case.
 				streaming = false
@@ -2673,6 +2976,7 @@ func (r *Router) relay(ctx context.Context, conv string, e *sessionEntry, owner 
 				}
 				e.noteInbox(c)
 				if c.Dequeued() {
+					r.flushReanchor(ctx, e, conv)
 					// A turn has just taken this message up. In the ordinary
 					// case that is the turn switchboard injected moments ago,
 					// already being timed, and this does nothing. The case it
@@ -2782,6 +3086,7 @@ func (r *Router) relay(ctx context.Context, conv string, e *sessionEntry, owner 
 				return nil
 			}
 			reply, ok := daemon.AgentText(ev.Data)
+			r.resolveFoot(ctx, e, conv, ok && !reply.Partial && reply.Text != "" && reply.Seq > e.relayed.Load(), ok && reply.Partial)
 			if reply.Seq > e.seq.Load() {
 				e.seq.Store(reply.Seq)
 				e.touch()
