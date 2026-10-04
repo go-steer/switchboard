@@ -551,7 +551,11 @@ func answerCard(markdown string) (card *chatv1.GoogleAppsCardV1Card) {
 		}
 	}()
 
-	lines := strings.Split(strings.ReplaceAll(markdown, "\r\n", "\n"), "\n")
+	// A card's MARKDOWN renders no tables either; see toChatText. Converted
+	// before the scan, so the result is copied through as the fenced block it
+	// now is.
+	markdown = chat.TablesToCode(strings.ReplaceAll(markdown, "\r\n", "\n"))
+	lines := strings.Split(markdown, "\n")
 	var (
 		sections  []*chatv1.GoogleAppsCardV1Section
 		cur       = &chatv1.GoogleAppsCardV1Section{}

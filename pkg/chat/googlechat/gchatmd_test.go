@@ -194,3 +194,31 @@ func TestClamp(t *testing.T) {
 		t.Fatalf("clamp split a rune: %q", c)
 	}
 }
+
+// A pipe table reaches Chat as aligned columns in a code block: Chat renders
+// no tables, and the raw source's delimiter row read like a blank first row
+// (seen live on the first HTTP-ingress session). Markup in the cells is
+// flattened rather than left to show literally inside the block.
+func TestToChatTextRendersATableAsAlignedCode(t *testing.T) {
+	in := "Clusters:\n\n| Name | **Nodes** |\n| :--- | ---: |\n| ap-agones | 5 |\n| kg-sandbox | 12 |"
+	want := "Clusters:\n\n```\nName        Nodes\n----------  -----\nap-agones       5\nkg-sandbox     12\n```"
+	if got := toChatText(in); got != want {
+		t.Errorf("toChatText:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+// The card path converts too: an answer with a header (so it earns a card)
+// and a table carries the table as a fenced block in a MARKDOWN paragraph.
+func TestAnswerCardRendersATableAsAlignedCode(t *testing.T) {
+	card := answerCard("## Clusters\n\n| Name | Nodes |\n|---|---|\n| ap-agones | 5 |")
+	if card == nil {
+		t.Fatal("no card")
+	}
+	got := cardText(card)
+	if !strings.Contains(got, "```\nName       Nodes\n---------  -----\nap-agones  5\n```") {
+		t.Errorf("card text does not carry the aligned table:\n%s", got)
+	}
+	if strings.Contains(got, "|---|") {
+		t.Errorf("the raw delimiter row survived:\n%s", got)
+	}
+}
