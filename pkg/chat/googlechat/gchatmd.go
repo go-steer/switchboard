@@ -131,20 +131,7 @@ func toChatText(content string) string {
 
 	// Defuse mentions before anything else, so a protected span below can never
 	// shelter a live <users/all>.
-	//
-	// To a fixed point, because a single pass is not enough: dropping the inner
-	// brackets of <<users/all>> leaves an outer pair that re-forms a live
-	// mention, and ReplaceAllStringFunc does not rescan its own output. Each
-	// changing pass strips at least one bracket, so this terminates.
-	for {
-		defused := mentionRE.ReplaceAllStringFunc(text, func(m string) string {
-			return strings.TrimSuffix(strings.TrimPrefix(m, "<"), ">")
-		})
-		if defused == text {
-			break
-		}
-		text = defused
-	}
+	text = defuseMentions(text)
 
 	// 1) Protect fenced code blocks; strip the language tag on a real opening
 	//    fence (one at line start), but never on a mid-line ```span```.
@@ -241,6 +228,25 @@ var (
 		"&", "&amp;", "<", "&lt;", ">", "&gt;", `"`, "&quot;")
 	leadEmojiRE = regexp.MustCompile(`^[\x{1F000}-\x{1FAFF}\x{2190}-\x{2BFF}\x{FE0F}\x{200D}]+\s*`)
 )
+
+// defuseMentions strips the brackets off every Chat mention, so model text
+// can never ping a user or the whole space.
+//
+// To a fixed point, because a single pass is not enough: dropping the inner
+// brackets of <<users/all>> leaves an outer pair that re-forms a live
+// mention, and ReplaceAllStringFunc does not rescan its own output. Each
+// changing pass strips at least one bracket, so this terminates.
+func defuseMentions(text string) string {
+	for {
+		defused := mentionRE.ReplaceAllStringFunc(text, func(m string) string {
+			return strings.TrimSuffix(strings.TrimPrefix(m, "<"), ">")
+		})
+		if defused == text {
+			return text
+		}
+		text = defused
+	}
+}
 
 // toCardHTML converts Chat text markup into the small HTML subset a card's
 // DecoratedText accepts (<b>, <i>, <s>, <a>, <tt>, <br>). It is deliberately a second

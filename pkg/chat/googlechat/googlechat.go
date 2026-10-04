@@ -573,7 +573,15 @@ func (a *Adapter) cardFor(r chat.Reply) *chatv1.GoogleAppsCardV1Card {
 		if a.cards != CardsRich {
 			return nil
 		}
-		return withUsageFooter(answerCard(r.Text), r.Usage)
+		card := answerCard(r.Text)
+		if card == nil && r.Usage != nil {
+			// The footer needs a card to ride, and an unstructured answer
+			// does not earn one on its own — which left every plain answer
+			// without the cost the operator asked to see. With usage on, it
+			// gets a plain one.
+			card = plainAnswerCard(r.Text)
+		}
+		return withUsageFooter(card, r.Usage)
 	}
 	if r.Kind == chat.KindDecision {
 		// A card only where its buttons can be pressed; elsewhere the text,

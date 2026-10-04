@@ -463,10 +463,14 @@ Outside those it is suppressed rather than appended as a line of text, which
 would have to survive the per-message chunker to arrive intact. Switchboard
 warns at startup if `--show-usage` is set with no rich render to attach it to.
 
-On Google Chat that means the footer appears only on answers that earn a card.
-A plain paragraph with no headings, list, or code goes out as text, and carries
-no footer even in `--googlechat-cards rich`. Slack has no such gap: every answer
-is rendered as blocks under `--slack-rich-blocks`.
+On Google Chat a plain answer with no headings or rules would normally go out
+as text. With `--show-usage` on, it is sent as a simple card instead, so the
+footer has something to ride. This applies only when the answer fits in one
+Chat message (about 4,000 characters); a longer plain answer still goes as
+text, split across messages, without the footer. That keeps restart delivery
+exact: a replay sends text, and only a one-message answer can be deduplicated
+against the card it replaces. Slack needs none of this: every answer is
+rendered as blocks under `--slack-rich-blocks`.
 
 Only the finished turn is reported, never a session running total: the footer
 lands on a message that will never be edited again, so a number that changes
