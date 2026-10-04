@@ -495,33 +495,20 @@ func decisionCard(text string, d *chat.Decision, actionURL string) *chatv1.Googl
 	return widgetCard(append(body, buttonRow(2, buttons...))...)
 }
 
-// decisionBody renders a question's text as one or more paragraphs, spilling
-// rather than clamping. A permission prompt carries up to 1500 runes of
-// agent-supplied detail, which HTML escaping and multi-byte text can push past
-// one widget's budget — and the settled edit appends the outcome after all of
-// it, so a clamp would cut exactly the line recording who decided, while the
-// buttons still came down.
+// decisionBody renders a question's markdown as one or more paragraphs,
+// spilling rather than clamping. A permission prompt carries up to 1500 runes
+// of agent-supplied detail, and the settled edit appends the outcome after all
+// of it, so a clamp would cut exactly the line recording who decided, while
+// the buttons still came down.
 //
-// The split is on Chat markup and the budget is on the HTML it becomes, and
-// escaping has no fixed ratio — an "&" is five bytes once rendered — so a piece
-// whose HTML is still over budget is split again, smaller, until it fits.
-// htmlWidget's clamp stays behind that as a backstop that should never fire.
-func decisionBody(text string) []*chatv1.GoogleAppsCardV1Widget {
-	var out []*chatv1.GoogleAppsCardV1Widget
-	var fit func(s string, size int)
-	fit = func(s string, size int) {
-		for _, part := range chat.ChunkText(s, size) {
-			if len(toCardHTML(strings.TrimSpace(part))) > maxWidgetText && size > 64 {
-				fit(part, size/2)
-				continue
-			}
-			if w := htmlWidget(part); w != nil {
-				out = append(out, w)
-			}
-		}
-	}
-	fit(strings.TrimSpace(text), maxWidgetText)
-	return out
+// MARKDOWN text syntax, like an answer card's, because the question's
+// substance is a fenced command: the HTML subset gateway cards use has no
+// monospace, so the fence came out as literal backticks around the command.
+// The router has already made sure the agent's text cannot close that fence
+// (fencedCode in cmd/switchboard), which matters more here than anywhere: what
+// follows a broken fence renders as the gateway's own words on an approval.
+func decisionBody(markdown string) []*chatv1.GoogleAppsCardV1Widget {
+	return markdownWidgets(markdown)
 }
 
 // clampRunes bounds s to n runes, never splitting one.

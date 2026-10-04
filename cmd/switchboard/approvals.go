@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -562,16 +563,16 @@ func promptText(p approval.Prompt) string {
 	var b strings.Builder
 	b.WriteString("**Permission needed**")
 	if p.Tool != "" {
-		b.WriteString(" — `" + clampRunes(p.Tool, promptNameLimit) + "`")
+		b.WriteString(" — `" + inlineCode(clampRunes(p.Tool, promptNameLimit)) + "`")
 	}
 	if detail := strings.TrimSpace(p.Detail); detail != "" {
-		b.WriteString("\n\n```\n" + clampRunes(detail, promptDetailLimit) + "\n```")
+		b.WriteString("\n\n```\n" + fencedCode(clampRunes(detail, promptDetailLimit)) + "\n```")
 	}
 	if p.Source != "" {
 		// Which agent is asking, when it is not the one being talked to. The
 		// difference between approving something you just asked for and
 		// approving something a subagent you forgot about wants.
-		b.WriteString("\n_asked by the `" + clampRunes(p.Source, promptNameLimit) + "` subagent_")
+		b.WriteString("\n_asked by the `" + inlineCode(clampRunes(p.Source, promptNameLimit)) + "` subagent_")
 	}
 	if p.Kind == approval.KindControlPlaneWrite {
 		// The answers here are allow-once and deny, and the gate behind this
@@ -584,6 +585,35 @@ func promptText(p approval.Prompt) string {
 		b.WriteString("\n_If this agent's gate also takes an edited call — mast's write gate does — that answer is given at the agent, not here._")
 	}
 	return b.String()
+}
+
+// The agent-supplied parts of a question sit inside code spans, and a code
+// span is only as good as its contents' inability to close it. A detail
+// carrying ``` would end the fence early and everything after it — a fake
+// "✅ Allowed", a bolded reassurance, a link — would render as the gateway's
+// own words on an approval prompt, with the real command half hidden. Both
+// platforms close a fence on any run of three backticks, so runs are broken
+// with a zero-width space: the command reads exactly as before and can no
+// longer end the block it is shown in. A name has no backticks worth keeping,
+// so in one a backtick becomes a look-alike that closes nothing.
+var (
+	fenceRunRE  = regexp.MustCompile("`{3,}")
+	inlineTicks = strings.NewReplacer("`", "ˋ")
+)
+
+func fencedCode(s string) string {
+	return fenceRunRE.ReplaceAllStringFunc(s, func(run string) string {
+		return strings.Join(strings.Split(run, ""), "\u200b")
+	})
+}
+
+// inlineCode also flattens whitespace, because a code span does not survive a
+// blank line either: in a Chat card's MARKDOWN the paragraph ends there, the
+// span never closes, and what follows renders as prose — the same escape a
+// backtick gives, by another route. The approver line is flattened for the
+// same reason (HandlePress).
+func inlineCode(s string) string {
+	return inlineTicks.Replace(strings.Join(strings.Fields(s), " "))
 }
 
 // clampRunes bounds a string to n runes without splitting one.

@@ -574,7 +574,7 @@ func (a *Adapter) cardFor(r chat.Reply) *chatv1.GoogleAppsCardV1Card {
 	if r.Kind == chat.KindDecision {
 		// A card only where its buttons can be pressed; elsewhere the text,
 		// which names the answers in prose, is the whole of the question.
-		return decisionCard(toChatText(r.Text), r.Decision, a.actionURL())
+		return decisionCard(r.Text, r.Decision, a.actionURL())
 	}
 	return gatewayCard(r.Kind, toChatText(r.Text))
 }
