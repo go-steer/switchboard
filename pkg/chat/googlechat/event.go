@@ -282,7 +282,7 @@ type addonAddedPayload struct {
 // kindIgnore rather than an error: only malformed JSON is an error.
 func decodeEvent(data []byte) (inbound, error) {
 	var ev wireEvent
-	if err := json.Unmarshal(data, &ev); err != nil {
+	if err := json.Unmarshal(normalizeNumbers(data), &ev); err != nil {
 		return inbound{}, fmt.Errorf("googlechat: decode event: %w", err)
 	}
 	if ev.Chat != nil {
