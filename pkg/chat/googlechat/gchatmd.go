@@ -123,7 +123,11 @@ func toChatText(content string) string {
 		return content
 	}
 	ph := newStash()
-	text := content
+	// Chat renders no tables, so a pipe table would arrive as its source, its
+	// `| :--- |` delimiter reading like a blank first row. As aligned columns in
+	// a fenced block it reads as a table on every client, and from here on it
+	// is protected like any other code.
+	text := chat.TablesToCode(content)
 
 	// Defuse mentions before anything else, so a protected span below can never
 	// shelter a live <users/all>.

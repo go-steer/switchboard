@@ -6,6 +6,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- **Markdown tables read as tables on Google Chat.** Chat renders no tables,
+  in text or in a card's `MARKDOWN`, so an agent's pipe table arrived as raw
+  source. Its `| :--- | :--- |` delimiter line read like a blank first row.
+  A table is now laid out as aligned columns in a code block, with a dashed
+  rule under the header and right-aligned columns kept. Cell markup is
+  flattened, because a code block would show it instead of rendering it:
+  paired emphasis loses its markers, a code span keeps its contents verbatim
+  (so `__init__.py` and `2**10` survive), and a link becomes `label (url)`.
+  The match is deliberately narrower than GFM, so prose is never rewritten.
+  Indented tables, list items, a pipe over a setext underline, and a table
+  whose early column is over 48 characters are left as written. Text with no
+  table is unchanged, and a table already inside a code block is left alone.
+  The converter is `chat.TablesToCode`, in the shared package, so Slack can
+  adopt it too.
+
 ### Fixed
 - **A permission prompt's command renders as code on Google Chat.** The
   question card used the HTML subset the gateway's own cards use. That subset

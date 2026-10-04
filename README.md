@@ -209,7 +209,10 @@ posting the text — a rich render never costs a reply.
 
 Regardless of mode, replies are translated into Chat's text dialect
 (`**bold**` → `*bold*`, `[label](url)` → `<url|label>`, headings → bold), so
-markdown from the agent does not arrive with its delimiters showing.
+markdown from the agent does not arrive with its delimiters showing. Chat
+renders no tables, in text or in cards, so a markdown table is laid out as
+aligned columns in a code block, with a rule under the header and cell markup
+flattened.
 
 Full setup, card-preview and event-replay testing, and a demo script:
 [docs/googlechat-setup.md](docs/googlechat-setup.md).
