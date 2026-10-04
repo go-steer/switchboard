@@ -65,16 +65,17 @@ const (
 // Press outcomes. Each is a distinct exit from HandlePress, named for what
 // happened to the answer rather than for the notice the thread was shown.
 const (
-	auditApplied          = "applied"           // the daemon applied it
-	auditDisabled         = "disabled"          // approvals are off for this channel
-	auditInvalid          = "invalid"           // not a decision, or no prompt named
-	auditNotApprover      = "not_approver"      // refused by --approvers
-	auditNotStanding      = "not_standing"      // refused by --standing-approvers
-	auditStale            = "stale"             // the thread no longer has that session
-	auditSettledElsewhere = "settled_elsewhere" // answered already, or expired
-	auditMaybeApplied     = "maybe_applied"     // the daemon took it and did not confirm
-	auditFailed           = "failed"            // it did not reach the daemon
-	auditPressError       = "error"             // anything else
+	auditApplied          = "applied"            // the daemon applied it
+	auditDisabled         = "disabled"           // approvals are off for this channel
+	auditInvalid          = "invalid"            // not a decision, or no prompt named
+	auditNotApprover      = "not_approver"       // refused by --approvers
+	auditNotStanding      = "not_standing"       // refused by --standing-approvers
+	auditStale            = "stale"              // the thread no longer has that session
+	auditSettledElsewhere = "settled_elsewhere"  // answered already, or expired
+	auditRefusedOrSettled = "refused_or_settled" // not pending, or the daemon refused the presser (#106)
+	auditMaybeApplied     = "maybe_applied"      // the daemon took it and did not confirm
+	auditFailed           = "failed"             // it did not reach the daemon
+	auditPressError       = "error"              // anything else
 )
 
 // auditRecord is one line. Field names are a format operators will parse, so

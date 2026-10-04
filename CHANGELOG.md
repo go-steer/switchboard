@@ -6,6 +6,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **A press from someone other than the session's opener is no longer
+  reported as "answered elsewhere"** when the daemon returns 404 (#106).
+  On a daemon that enforces session ACLs, answering a prompt needs write
+  access. Of the identities switchboard asserts, only the opener has it, and
+  anyone else gets the same 404 an ended question gets. Switchboard took that
+  404 as settled: it took the buttons down and logged at INFO, while the turn
+  stayed parked with no way left in the thread to answer it. Now such a press, unless a decision has already been
+  recorded here, leaves the question up. The presser is told it either ended
+  or only the conversation's starter can answer, the log warns and names the
+  opener, and the audit record reads `refused_or_settled`. The opener's own
+  press is unchanged. Letting other approvers answer under ACL enforcement
+  would need the daemon to grant them write access to the session. The
+  trade-off: on a daemon without ACLs, someone else pressing a question that
+  really ended now gets the notice, and the buttons stay up until the opener
+  presses.
+
 ## [v0.5.1] — 2026-10-04
 
 A fix release for the Google Chat buttons v0.5.0 introduced. The HTTP ingress
