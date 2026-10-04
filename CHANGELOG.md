@@ -7,6 +7,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Every Google Chat answer carries the `--show-usage` footer.** The footer
+  rides a card, and an answer with no headings or rules does not get one, so
+  plain answers (most of them) went out as text without the cost the
+  operator had asked to see. With `--show-usage` on, a plain answer is now
+  sent as a simple card of markdown paragraphs with the footer under it, as
+  long as it fits in one Chat message (a longer plain answer still goes as
+  chunked text, without the footer, which keeps restart delivery exact).
+  Without `--show-usage`, nothing changes. Mentions are now defused in every
+  answer card, as they already were in text.
 - **A Broad answer takes two presses on Google Chat, as on Slack** (#92).
   The answers that outlive the request (`allow-session*`, `allow-always`)
   applied on one tap on Chat, while Slack asks first. Chat has no native

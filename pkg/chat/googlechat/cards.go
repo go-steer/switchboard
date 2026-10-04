@@ -178,7 +178,10 @@ func ParseCardMode(s string) (CardMode, bool) {
 // Builder (see docs/googlechat-setup.md §A); that is the evidence this path
 // rests on, since nothing offline can check it.
 func markdownWidgets(md string) []*chatv1.GoogleAppsCardV1Widget {
-	md = strings.TrimSpace(md)
+	// Defused here as the text path does it (toChatText): whether a card's
+	// MARKDOWN would honour a <users/all> is unmeasured, and model text has no
+	// business finding out.
+	md = strings.TrimSpace(defuseMentions(md))
 	if md == "" {
 		return nil
 	}
@@ -685,6 +688,55 @@ func answerCard(markdown string) (card *chatv1.GoogleAppsCardV1Card) {
 		return nil
 	}
 	return card
+}
+
+// plainAnswerCard is an answer with no structure as a card of MARKDOWN
+// paragraphs — what answerCard declines to build, because without a footer to
+// carry it looks exactly like the text it replaces. It is for when there is
+// one (--show-usage).
+//
+// Nil — and the answer goes as text, without the footer — when it has
+// structure (answerCard turned it down for size, and its headers would show
+// as raw #), or when its text form would not fit one message. The second is
+// for effectively-once delivery (#99): the card shares its request id with
+// the text's first part, so a replay that renders text instead — usage is not
+// replayed — is deduplicated only if there is no second part to post again.
+func plainAnswerCard(markdown string) *chatv1.GoogleAppsCardV1Card {
+	markdown = strings.ReplaceAll(markdown, "\r\n", "\n")
+	if hasCardStructure(markdown) || len(toChatText(strings.TrimSpace(markdown))) > chatTextLimit {
+		return nil
+	}
+	w := markdownWidgets(chat.TablesToCode(markdown))
+	if len(w) == 0 || len(w) > maxCardWidgets {
+		return nil
+	}
+	card := &chatv1.GoogleAppsCardV1Card{Sections: []*chatv1.GoogleAppsCardV1Section{{Widgets: w}}}
+	if cardBytes(card) > maxCardBytes {
+		return nil
+	}
+	return card
+}
+
+// hasCardStructure reports whether markdown has a header or a rule outside a
+// fenced block — what answerCard lays out as sections and dividers.
+func hasCardStructure(markdown string) bool {
+	fence := ""
+	for _, line := range strings.Split(markdown, "\n") {
+		if fence != "" {
+			if strings.HasPrefix(strings.TrimSpace(line), fence) {
+				fence = ""
+			}
+			continue
+		}
+		if m := cardFenceLineRE.FindStringSubmatch(line); m != nil {
+			fence = m[1][:3]
+			continue
+		}
+		if cardHeaderLineRE.MatchString(line) || cardHRLineRE.MatchString(line) {
+			return true
+		}
+	}
+	return false
 }
 
 // cardBytes is the card's size on the wire — the JSON of the cardsV2 list, the

@@ -83,31 +83,96 @@ func TestWithUsageFooterNoCard(t *testing.T) {
 	}
 }
 
-// TestSendProseAnswerHasNoFooter pins the gap this has by construction on
-// Chat: answerCard renders nothing for a bare paragraph, so there is no card
-// for the footer to ride and the answer goes out as text without it. Slack has
-// no equivalent case — every answer there is blocks. Documented in the README;
-// closing it would mean promoting prose to a card purely to carry a receipt.
-func TestSendProseAnswerHasNoFooter(t *testing.T) {
-	f := &fakeMessenger{}
-	a := newTestAdapter(f)
-	a.cards = CardsRich
-	reply := chat.Reply{
-		Conversation: "spaces/AAA:spaces/AAA/threads/T1",
-		Text:         "all three replicas are ready",
-		Usage:        testUsage,
+// TestSendProseAnswerCarriesTheFooter: answerCard renders nothing for a bare
+// paragraph, which used to leave every plain answer without the cost an
+// operator turned --show-usage on to see (reported from the live rig). With
+// usage on, a plain answer is promoted to a card so the footer has something
+// to ride; without it, it still goes as text.
+func TestSendProseAnswerCarriesTheFooter(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		usage    *chat.Usage
+		wantCard bool
+	}{
+		{"usage on", testUsage, true},
+		{"usage off", nil, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			f := &fakeMessenger{}
+			a := newTestAdapter(f)
+			a.cards = CardsRich
+			reply := chat.Reply{
+				Conversation: "spaces/AAA:spaces/AAA/threads/T1",
+				Text:         "all three replicas are ready",
+				Usage:        tt.usage,
+			}
+			if _, err := a.Send(context.Background(), reply); err != nil {
+				t.Fatalf("Send: %v", err)
+			}
+			if len(f.creates) != 1 {
+				t.Fatalf("creates = %d, want 1", len(f.creates))
+			}
+			if got := f.creates[0].card != nil; got != tt.wantCard {
+				t.Fatalf("card = %v, want %v", got, tt.wantCard)
+			}
+			if tt.wantCard {
+				got := renderCall(f.creates[0])
+				if !strings.Contains(got, testUsageLine) || !strings.Contains(got, "all three replicas are ready") {
+					t.Errorf("plain answer card = %q, want the answer and the usage line", got)
+				}
+			}
+		})
 	}
-	if _, err := a.Send(context.Background(), reply); err != nil {
-		t.Fatalf("Send: %v", err)
+}
+
+// A structured answer answerCard turned down — for size — is not a plain
+// answer: as a plain card its headers would go out as raw #.
+func TestAStructuredAnswerIsNeverAPlainCard(t *testing.T) {
+	var b strings.Builder
+	b.WriteString("# Title\n\n")
+	for i := 0; i < 90; i++ {
+		b.WriteString("para\n\n")
 	}
-	if len(f.creates) != 1 {
-		t.Fatalf("creates = %d, want 1", len(f.creates))
+	if answerCard(b.String()) != nil {
+		t.Fatal("fixture should be over answerCard's widget budget")
 	}
-	if f.creates[0].card != nil {
-		t.Errorf("prose answer produced a card: %+v", f.creates[0].card)
+	if plainAnswerCard(b.String()) != nil {
+		t.Errorf("a structured answer became a plain card")
 	}
-	if strings.Contains(renderCall(f.creates[0]), testUsageLine) {
-		t.Errorf("prose answer carries the usage line: %q", renderCall(f.creates[0]))
+	if plainAnswerCard("```\n# not a header\n---\n```\nplain") == nil {
+		t.Errorf("a header inside a code block counted as structure")
+	}
+}
+
+// Effectively-once (#99): the card shares its request id with the text's first
+// part, and a replay renders text (usage is not replayed). So a plain answer is
+// carded only when its text is one part — a longer one would re-post its tail.
+func TestAPlainAnswerIsCardedOnlyWhenItsTextIsOnePart(t *testing.T) {
+	long := strings.Repeat("all three replicas are ready. ", 200) // > chatTextLimit
+	if plainAnswerCard(long) != nil {
+		t.Errorf("an answer longer than one text message became a card")
+	}
+	if plainAnswerCard("short and plain") == nil {
+		t.Errorf("a one-message plain answer did not become a card")
+	}
+}
+
+// A plain card defuses mentions as the text path does.
+func TestAPlainCardDefusesMentions(t *testing.T) {
+	card := plainAnswerCard("ping <users/all> please")
+	if card == nil {
+		t.Fatal("no card")
+	}
+	if got := cardText(card); strings.Contains(got, "<users/all>") {
+		t.Errorf("card carries a live mention: %q", got)
+	}
+}
+
+// An answer too big for one card still goes as text — chunked, without the
+// footer — rather than being cut to fit.
+func TestAnOversizePlainAnswerStaysText(t *testing.T) {
+	if card := plainAnswerCard(strings.Repeat("word ", 20000)); card != nil {
+		t.Errorf("an oversize answer became a card")
 	}
 }
 
