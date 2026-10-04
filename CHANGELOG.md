@@ -6,6 +6,60 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [v0.5.0] — 2026-10-04
+
+A release about what survives. Until now a restart cost every thread its
+session, a Google Chat room could not answer a permission prompt at all, and
+nothing recorded who in chat had told the daemon what. Each of those is now
+something a deployment can rely on rather than work around.
+
+**Conversations outlive the process** (#86, #87). With `--state-dir`, the
+routing table — each thread's session, the identity its relay subscribes as,
+its delivery watermarks — is written to disk, so the next message after a
+restart lands in the session the thread already had, and an answer produced
+during the outage is still delivered. Answers are keyed and the attempt is
+recorded before the post, so across a restart each one reaches the thread
+effectively once: Google Chat drops a repeat natively, and Slack checks only
+the answers actually in doubt (the Slack side was verified live). With durable
+state on, an idle thread's daemon streams are released after
+`--session-idle-ttl` (12h by default) and re-attach on its next message.
+Without `--state-dir` threads are held in memory as before and the banner says
+so; answers still carry their key (a Chat `requestId`, Slack message metadata),
+which changes nothing visible.
+
+**Google Chat can approve** (#29). A second ingress, `--googlechat-ingress
+http`, receives events over a verified HTTPS endpoint instead of Pub/Sub, and on
+it cards carry buttons: a permission prompt becomes a card with an answer per
+button, a press arrives as the person who clicked, `--approvers` applies as it
+does on Slack, and the click's own response carries the edit that records how
+the question ended. Pub/Sub stays the default and stays inert — no click reaches an add-on there. Every request is
+checked against a Google-signed ID token, this endpoint as the audience, and a
+required, pinned `--googlechat-service-account`. Broad answers have no
+"are you sure" step on Chat yet (#92).
+
+**Approvals are narrower and more honest.** `--standing-approvers` (#85) names
+who may press `allow-always`, the one answer that outlives the room it was
+pressed in. An answer to a mast write-gate park waits up to fifteen minutes for
+the resume turn it releases, and is no longer reported as lost when it was not
+— the respond half of #84; the change-set card and edit are still open.
+A thread whose session the daemon lost recovers on the next message whoever
+opened the session, and an ACL refusal is no longer mistaken for a lost
+session (#88).
+
+**`--audit-log` records every turn and press** (#89): one JSON line joining the
+platform's message ID, the asserted caller, the session and the outcome —
+never the message text. Switchboard is the only component that sees both ends
+of that link.
+
+Upgrading needs no configuration change: no new feature is on by default, and
+`--standing-approvers` defaults to `channel`, no tighter than `--approvers`.
+The fixes do change default behaviour — a mast park press waits longer, a lost
+session is dropped with a notice instead of failing every turn, and
+`approval.Client.Respond` now honours the caller's deadline rather than capping
+it at 30 seconds. With approvals on, the banner now states on every start
+whether a standing grant needs more than any other answer.
+`google.golang.org/grpc` moves to v1.83.1 for GO-2026-6348.
+
 ### Added
 - `deploy/slack/app-manifest.yaml`: the Slack app as a manifest — Socket Mode,
   `app_mention`, interactivity, the `/switchboard` command, and the bot scopes
@@ -99,8 +153,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   events, same decoder, same egress — nothing below the adapter can tell which
   transport a turn arrived on. Pub/Sub stays the default, because it exposes no
   inbound surface; this one is a public endpoint, and what it buys is everything
-  needing a synchronous response, which is the card clicks and dialogs the rest
-  of #29 will render.
+  needing a synchronous response: the card clicks this release adds, and the
+  dialogs #29 may add later.
 
   Every request is verified before its payload is read: a Google-signed ID
   token, taken from the `Authorization` header or the body's
@@ -137,8 +191,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   authorization was the subscription's IAM), the ~30-second response budget, and
   what gating buttons on the ingress requires of the card builder. Records that
   HTTP delivery serializes numbers as proto-JSON floats where Pub/Sub sends
-  ints — which today's `commandID` decoder rejects into a silent zero, so an
-  HTTP deployment would drop every command while the fixtures stayed green.
+  ints — which the `commandID` decoder then rejected into a silent zero (fixed
+  below), so an HTTP deployment would have dropped every command while the
+  fixtures stayed green.
 
 ### Fixed
 - An answer to a **mast write-gate park** is no longer cut off by a slow
@@ -177,12 +232,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   caller gets the ordinary failed-turn notice.
 - The Google Chat decoder reads a command ID spelled as a whole-number float
   (`"appCommandId": 100.0`), which is how proto-JSON — and so the HTTP ingress
-  #29 is building towards — serializes the integer Pub/Sub delivers as `100`.
+  — serializes the integer Pub/Sub delivers as `100`.
   `strconv.ParseInt` rejects that spelling, and the decoder deliberately never
   errors, so the ID became `0`, matched no configured command, and the command
-  was dropped with nothing in the logs. No behaviour changes today, because
-  there is no HTTP ingress yet to deliver that spelling; this is the trap
-  removed before the transport that springs it lands. A value that is not
+  was dropped with nothing in the logs. Pub/Sub never sends that spelling;
+  the HTTP ingress in this release does, and this fix landed ahead of it so
+  that every command on it was not silently dropped. A value that is not
   actually an integer (`1.5`) or does not fit (`1e20`) still decodes to `0`.
 
 ### Changed
