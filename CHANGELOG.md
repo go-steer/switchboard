@@ -6,6 +6,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- The Google Chat **HTTP ingress decodes real events** again; in v0.5.0 it
+  dropped every one. Chat's HTTP delivery spells every number as a float
+  (`"offset": -3.6E6`, `"startIndex": 0.0`, `"commandId": 1.0`) and the
+  generated `chat/v1` types refuse a float in an int64 field, so each event
+  failed decode with an `ERROR … decode event` line and got no reply,
+  whatever kind it was. Only `appCommandId` had been made
+  float-tolerant, and every fixture was written with ints. Numbers are now
+  normalized before decoding; Pub/Sub payloads, which already send ints, are
+  left byte-for-byte as they were. Found on the first live HTTP event, which is
+  now a fixture.
+
 ## [v0.5.0] — 2026-10-04
 
 A release about what survives. Until now a restart cost every thread its

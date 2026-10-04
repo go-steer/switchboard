@@ -688,6 +688,20 @@ fixtures all pass — the failure is invisible from inside the repo, which is th
 same reason `--googlechat-log-events` exists. The decoder has to accept the
 float spelling, and the case belongs in the fixtures for both transports.
 
+That paragraph was right about the mechanism and too narrow about its reach.
+The first live HTTP event showed that proto-JSON spells *every* number as a
+float: `commonEventObject.timeZone.offset` arrives as `-3.6E6`, annotation
+`startIndex`/`length` and `membershipCount` as `0.0`, and
+`slashCommand.commandId` as `1.0` where Pub/Sub sends `"1"`. Those land in the
+generated `chat/v1` types, whose int64 fields `encoding/json` refuses to fill
+from a float (and whose `,string` fields refuse even a bare int), so the whole
+event failed decode: v0.5.0's HTTP ingress dropped every event before
+`commandID` was ever reached. `decodeEvent` now runs the payload through
+`normalizeNumbers` first, which rewrites each whole-number float as an integer
+literal (quoted under the `,string` keys) and returns a payload with nothing to
+rewrite as the same bytes, so Pub/Sub decodes as it always did.
+`addon-live-http-slash-command.json` is the captured event that keeps it fixed.
+
 **Authentication has no Pub/Sub analogue.** Over Pub/Sub, authorization *is* the
 subscription's IAM — only Chat publishes, only switchboard pulls, and nothing
 reaches the process that Google did not put there. An HTTP endpoint is reachable
