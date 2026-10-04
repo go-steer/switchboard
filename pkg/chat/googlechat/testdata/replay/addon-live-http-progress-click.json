@@ -1,0 +1,19 @@
+{
+  "kind": "command",
+  "commands": [
+    {
+      "name": "progress",
+      "args": [
+        "stream"
+      ],
+      "channel": "spaces/AAQAXbGkY1s",
+      "caller": "ada@example.com"
+    }
+  ],
+  "patches": [
+    {
+      "target": "spaces/AAQAXbGkY1s/messages/Kv7mPq2xLw9.Kv7mPq2xLw9",
+      "card": "[tune:Progress mode for this channel is <b>status</b>.]"
+    }
+  ]
+}

@@ -1,0 +1,218 @@
+{
+  "commonEventObject": {
+    "userLocale": "en",
+    "hostApp": "CHAT",
+    "platform": "WEB",
+    "timeZone": {
+      "id": "Atlantic/Azores",
+      "offset": -3.6E6
+    },
+    "parameters": {
+      "switchboard_option": "allow-once",
+      "switchboard_decision": "core-agent/01a10664-b664-734b-b1f6-b823bd8f020a#60f01814ec2e051934b43233"
+    }
+  },
+  "authorizationEventObject": {
+    "userOAuthToken": "REDACTED",
+    "userIdToken": "REDACTED",
+    "systemIdToken": "REDACTED",
+    "authorizedScopes": [
+      "https://www.googleapis.com/auth/userinfo.email",
+      "openid"
+    ]
+  },
+  "chat": {
+    "user": {
+      "name": "users/106508980999999999999",
+      "displayName": "Ada Lovelace",
+      "avatarUrl": "https://lh3.googleusercontent.com/a/REDACTED",
+      "email": "ada@example.com",
+      "type": "HUMAN",
+      "domainId": "REDACTED"
+    },
+    "eventTime": "2026-10-04T10:11:09.942015Z",
+    "buttonClickedPayload": {
+      "space": {
+        "name": "spaces/AAQAXbGkY1s",
+        "type": "DM",
+        "singleUserBotDm": true,
+        "spaceThreadingState": "THREADED_MESSAGES",
+        "spaceType": "DIRECT_MESSAGE",
+        "spaceHistoryState": "HISTORY_ON",
+        "lastActiveTime": "2026-10-04T10:10:28.459535Z",
+        "membershipCount": {
+          "joinedDirectHumanUserCount": 1.0
+        },
+        "spaceUri": "https://chat.google.com/dm/AAQAXbGkY1s?cls\u003d11"
+      },
+      "message": {
+        "name": "spaces/AAQAXbGkY1s/messages/Wq6jDs3fNk5.Wq6jDs3fNk5",
+        "sender": {
+          "name": "users/103000000000000000001",
+          "displayName": "Switchboard",
+          "avatarUrl": "https://fonts.gstatic.com/s/i/short-term/release/googlesymbols/hub/default/48px.svg",
+          "type": "BOT"
+        },
+        "createTime": "2026-10-04T10:10:28.459535Z",
+        "thread": {
+          "name": "spaces/AAQAXbGkY1s/threads/Wq6jDs3fNk5",
+          "retentionSettings": {
+            "state": "PERMANENT"
+          }
+        },
+        "space": {
+          "name": "spaces/AAQAXbGkY1s",
+          "type": "DM",
+          "singleUserBotDm": true,
+          "spaceThreadingState": "THREADED_MESSAGES",
+          "spaceType": "DIRECT_MESSAGE",
+          "spaceHistoryState": "HISTORY_ON",
+          "lastActiveTime": "2026-10-04T10:10:28.459535Z",
+          "membershipCount": {
+            "joinedDirectHumanUserCount": 1.0
+          },
+          "spaceUri": "https://chat.google.com/dm/AAQAXbGkY1s?cls\u003d11"
+        },
+        "fallbackText": "*Permission needed* — `bash`\n\n```\ntouch /tmp/sb-approval-test-2\n```\n\n• Deny\n• Allow once\n• Allow for this session\n• Allow every touch this session\n• Allow every bash this session\n• Always allow (saved)",
+        "cardsV2": [
+          {
+            "cardId": "switchboard",
+            "card": {
+              "sections": [
+                {
+                  "widgets": [
+                    {
+                      "textParagraph": {
+                        "text": "\u003cb\u003ePermission needed\u003c/b\u003e — `bash`\u003cbr\u003e\u003cbr\u003e```\ntouch /tmp/sb-approval-test-2\n```\u003cbr\u003e\u003cbr\u003e• Deny\u003cbr\u003e• Allow once\u003cbr\u003e• Allow for this session\u003cbr\u003e• Allow every touch this session\u003cbr\u003e• Allow every bash this session\u003cbr\u003e• Always allow (saved)"
+                      }
+                    },
+                    {
+                      "buttonList": {
+                        "buttons": [
+                          {
+                            "text": "Deny",
+                            "onClick": {
+                              "action": {
+                                "function": "https://switchboard.example.com/chat",
+                                "parameters": [
+                                  {
+                                    "key": "switchboard_decision",
+                                    "value": "core-agent/01a10664-b664-734b-b1f6-b823bd8f020a#60f01814ec2e051934b43233"
+                                  },
+                                  {
+                                    "key": "switchboard_option",
+                                    "value": "deny"
+                                  }
+                                ]
+                              }
+                            }
+                          },
+                          {
+                            "text": "Allow once",
+                            "onClick": {
+                              "action": {
+                                "function": "https://switchboard.example.com/chat",
+                                "parameters": [
+                                  {
+                                    "key": "switchboard_decision",
+                                    "value": "core-agent/01a10664-b664-734b-b1f6-b823bd8f020a#60f01814ec2e051934b43233"
+                                  },
+                                  {
+                                    "key": "switchboard_option",
+                                    "value": "allow-once"
+                                  }
+                                ]
+                              }
+                            }
+                          },
+                          {
+                            "text": "Allow for this session",
+                            "onClick": {
+                              "action": {
+                                "function": "https://switchboard.example.com/chat",
+                                "parameters": [
+                                  {
+                                    "key": "switchboard_decision",
+                                    "value": "core-agent/01a10664-b664-734b-b1f6-b823bd8f020a#60f01814ec2e051934b43233"
+                                  },
+                                  {
+                                    "key": "switchboard_option",
+                                    "value": "allow-session"
+                                  }
+                                ]
+                              }
+                            }
+                          },
+                          {
+                            "text": "Allow every touch this session",
+                            "onClick": {
+                              "action": {
+                                "function": "https://switchboard.example.com/chat",
+                                "parameters": [
+                                  {
+                                    "key": "switchboard_decision",
+                                    "value": "core-agent/01a10664-b664-734b-b1f6-b823bd8f020a#60f01814ec2e051934b43233"
+                                  },
+                                  {
+                                    "key": "switchboard_option",
+                                    "value": "allow-session-verb"
+                                  }
+                                ]
+                              }
+                            }
+                          },
+                          {
+                            "text": "Allow every bash this session",
+                            "onClick": {
+                              "action": {
+                                "function": "https://switchboard.example.com/chat",
+                                "parameters": [
+                                  {
+                                    "key": "switchboard_decision",
+                                    "value": "core-agent/01a10664-b664-734b-b1f6-b823bd8f020a#60f01814ec2e051934b43233"
+                                  },
+                                  {
+                                    "key": "switchboard_option",
+                                    "value": "allow-session-tool"
+                                  }
+                                ]
+                              }
+                            }
+                          },
+                          {
+                            "text": "Always allow (saved)",
+                            "onClick": {
+                              "action": {
+                                "function": "https://switchboard.example.com/chat",
+                                "parameters": [
+                                  {
+                                    "key": "switchboard_decision",
+                                    "value": "core-agent/01a10664-b664-734b-b1f6-b823bd8f020a#60f01814ec2e051934b43233"
+                                  },
+                                  {
+                                    "key": "switchboard_option",
+                                    "value": "allow-always"
+                                  }
+                                ]
+                              }
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        ],
+        "threadReply": true,
+        "retentionSettings": {
+          "state": "PERMANENT"
+        },
+        "messageHistoryState": "HISTORY_ON",
+        "markupSyntax": "MARKUP_SYNTAX_CHAT"
+      }
+    }
+  }
+}

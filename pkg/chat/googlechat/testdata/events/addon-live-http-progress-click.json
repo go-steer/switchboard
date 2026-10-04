@@ -1,0 +1,187 @@
+{
+  "commonEventObject": {
+    "userLocale": "en",
+    "hostApp": "CHAT",
+    "platform": "WEB",
+    "timeZone": {
+      "id": "Atlantic/Azores",
+      "offset": -3.6E6
+    },
+    "parameters": {
+      "switchboard_command": "progress",
+      "switchboard_arg": "stream"
+    }
+  },
+  "authorizationEventObject": {
+    "userOAuthToken": "REDACTED",
+    "userIdToken": "REDACTED",
+    "systemIdToken": "REDACTED",
+    "authorizedScopes": [
+      "https://www.googleapis.com/auth/userinfo.email",
+      "openid"
+    ]
+  },
+  "chat": {
+    "user": {
+      "name": "users/106508980999999999999",
+      "displayName": "Ada Lovelace",
+      "avatarUrl": "https://lh3.googleusercontent.com/a/REDACTED",
+      "email": "ada@example.com",
+      "type": "HUMAN",
+      "domainId": "REDACTED"
+    },
+    "eventTime": "2026-10-04T10:08:52.538108Z",
+    "buttonClickedPayload": {
+      "space": {
+        "name": "spaces/AAQAXbGkY1s",
+        "type": "DM",
+        "singleUserBotDm": true,
+        "spaceThreadingState": "THREADED_MESSAGES",
+        "spaceType": "DIRECT_MESSAGE",
+        "spaceHistoryState": "HISTORY_ON",
+        "lastActiveTime": "2026-10-04T10:08:46.669903Z",
+        "membershipCount": {
+          "joinedDirectHumanUserCount": 1.0
+        },
+        "spaceUri": "https://chat.google.com/dm/AAQAXbGkY1s?cls\u003d11"
+      },
+      "message": {
+        "name": "spaces/AAQAXbGkY1s/messages/Kv7mPq2xLw9.Kv7mPq2xLw9",
+        "sender": {
+          "name": "users/103000000000000000001",
+          "displayName": "Switchboard",
+          "avatarUrl": "https://fonts.gstatic.com/s/i/short-term/release/googlesymbols/hub/default/48px.svg",
+          "type": "BOT"
+        },
+        "createTime": "2026-10-04T10:08:46.669903Z",
+        "thread": {
+          "name": "spaces/AAQAXbGkY1s/threads/Kv7mPq2xLw9",
+          "retentionSettings": {
+            "state": "PERMANENT"
+          }
+        },
+        "space": {
+          "name": "spaces/AAQAXbGkY1s",
+          "type": "DM",
+          "singleUserBotDm": true,
+          "spaceThreadingState": "THREADED_MESSAGES",
+          "spaceType": "DIRECT_MESSAGE",
+          "spaceHistoryState": "HISTORY_ON",
+          "lastActiveTime": "2026-10-04T10:08:46.669903Z",
+          "membershipCount": {
+            "joinedDirectHumanUserCount": 1.0
+          },
+          "spaceUri": "https://chat.google.com/dm/AAQAXbGkY1s?cls\u003d11"
+        },
+        "fallbackText": "Progress mode for this channel is _indicator_. Change it with `progress \u003coff|indicator|status|stream\u003e`.",
+        "cardsV2": [
+          {
+            "cardId": "switchboard",
+            "card": {
+              "sections": [
+                {
+                  "widgets": [
+                    {
+                      "decoratedText": {
+                        "text": "Progress mode for this channel is \u003cb\u003eindicator\u003c/b\u003e. Change it with `progress \u0026lt;off|indicator|status|stream\u0026gt;`.",
+                        "wrapText": true,
+                        "startIcon": {
+                          "materialIcon": {
+                            "name": "tune"
+                          }
+                        }
+                      }
+                    },
+                    {
+                      "buttonList": {
+                        "buttons": [
+                          {
+                            "text": "off",
+                            "onClick": {
+                              "action": {
+                                "function": "https://switchboard.example.com/chat",
+                                "parameters": [
+                                  {
+                                    "key": "switchboard_command",
+                                    "value": "progress"
+                                  },
+                                  {
+                                    "key": "switchboard_arg",
+                                    "value": "off"
+                                  }
+                                ]
+                              }
+                            }
+                          },
+                          {
+                            "text": "indicator",
+                            "onClick": {
+                              "action": {
+                                "function": "https://switchboard.example.com/chat",
+                                "parameters": [
+                                  {
+                                    "key": "switchboard_command",
+                                    "value": "progress"
+                                  },
+                                  {
+                                    "key": "switchboard_arg",
+                                    "value": "indicator"
+                                  }
+                                ]
+                              }
+                            }
+                          },
+                          {
+                            "text": "status",
+                            "onClick": {
+                              "action": {
+                                "function": "https://switchboard.example.com/chat",
+                                "parameters": [
+                                  {
+                                    "key": "switchboard_command",
+                                    "value": "progress"
+                                  },
+                                  {
+                                    "key": "switchboard_arg",
+                                    "value": "status"
+                                  }
+                                ]
+                              }
+                            }
+                          },
+                          {
+                            "text": "stream",
+                            "onClick": {
+                              "action": {
+                                "function": "https://switchboard.example.com/chat",
+                                "parameters": [
+                                  {
+                                    "key": "switchboard_command",
+                                    "value": "progress"
+                                  },
+                                  {
+                                    "key": "switchboard_arg",
+                                    "value": "stream"
+                                  }
+                                ]
+                              }
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        ],
+        "retentionSettings": {
+          "state": "PERMANENT"
+        },
+        "messageHistoryState": "HISTORY_ON",
+        "markupSyntax": "MARKUP_SYNTAX_CHAT"
+      }
+    }
+  }
+}
