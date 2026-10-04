@@ -717,9 +717,10 @@ On Slack the answers are buttons, and the ones that outlive the request ask
 again before applying. The app needs **Interactivity & Shortcuts** enabled for
 Slack to deliver a press at all — it is off by default and easy to miss, so
 [slack-setup.md](docs/slack-setup.md#create-the-app) makes it a step. On Google
-Chat the answers are buttons on the HTTP ingress ([#29]), without Slack's
-second look for the wide ones — Chat has no native confirmation, so that is a
-follow-up — and over Pub/Sub the question arrives as text with the answers
+Chat the answers are buttons on the HTTP ingress ([#29]), and the wide ones
+ask again too: Chat has no native confirmation, so the first press swaps the
+buttons for a line naming what is about to be granted, with **Yes, allow** and
+**Back** (#92). Over Pub/Sub the question arrives as text with the answers
 listed, enough to see that the agent is blocked and on what. Either way the
 choices are in the message body too, so nothing depends on the buttons
 rendering.

@@ -59,6 +59,10 @@
                       {
                         "key": "switchboard_option",
                         "value": "allow_session_verb"
+                      },
+                      {
+                        "key": "switchboard_stage",
+                        "value": "confirm"
                       }
                     ]
                   }

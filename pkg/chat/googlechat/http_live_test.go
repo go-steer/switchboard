@@ -111,3 +111,63 @@ func TestLiveProgressClickIsACommandAnsweredInBand(t *testing.T) {
 		t.Errorf("ack card = %q, want it to name the new mode", cardText(msg.CardsV2[0].Card))
 	}
 }
+
+// The Broad-answer confirmation from the live session (#92): the first press
+// on "Allow for this session" and the Yes that followed. The confirmation is
+// built from the card Chat echoes in the click, so this pins what that echo
+// was measured to carry — the question's paragraph with its MARKDOWN text
+// syntax intact, which is what keeps the command a code block once copied
+// onto the confirmation.
+func TestLiveBroadConfirmationKeepsTheQuestionAndGatesThePress(t *testing.T) {
+	f := &fakeMessenger{}
+	a := newIngressAdapter(t, f)
+	a.cards = CardsStatus
+	h := &pressHandler{a: a}
+
+	confirm := click(t, a, h, liveClick(t, "addon-live-http-broad-confirm-click.json"))
+	if len(h.presses) != 0 {
+		t.Fatalf("the first press on a Broad answer reached the router: %+v", h.presses)
+	}
+	body := confirm.Sections[0].Widgets[0].TextParagraph
+	if body == nil || body.TextSyntax != "MARKDOWN" || !strings.Contains(body.Text, "```\nkubectl config get-contexts\n```") {
+		t.Errorf("the confirmation's question = %+v, want the echoed MARKDOWN paragraph with its fence", body)
+	}
+	if b := buttonsOf(confirm); len(b) != 2 || b[0].Text != "Yes, allow" || b[1].Text != "Back" {
+		t.Errorf("confirmation buttons = %+v", b)
+	}
+
+	r := postEvent(liveClick(t, "addon-live-http-broad-yes-click.json"))
+	r.Header.Set("Authorization", "Bearer good-token")
+	rec := httptest.NewRecorder()
+	var turns turnGroup
+	a.eventHandler(context.Background(), &turns, h).ServeHTTP(rec, r)
+	turns.Wait()
+	if len(h.presses) != 1 || h.presses[0].Option != "allow-session" || h.presses[0].Caller != "ada@example.com" {
+		t.Fatalf("presses = %+v, want one allow-session from the clicker", h.presses)
+	}
+}
+
+// Back, from the same live session: pressed on the confirmation, it must
+// restore the question's six answers, Broad ones still asking first, and
+// reach nobody.
+func TestLiveBackRestoresTheQuestion(t *testing.T) {
+	f := &fakeMessenger{}
+	a := newIngressAdapter(t, f)
+	a.cards = CardsStatus
+	h := &pressHandler{a: a}
+
+	back := click(t, a, h, liveClick(t, "addon-live-http-broad-back-click.json"))
+	if len(h.presses) != 0 {
+		t.Fatalf("Back reached the router: %+v", h.presses)
+	}
+	b := buttonsOf(back)
+	if len(b) != 6 || b[0].Text != "Deny" || b[5].Text != "Always allow (saved)" {
+		t.Fatalf("restored buttons = %d, want the question's six answers", len(b))
+	}
+	if paramsOf(b[1])[paramStage] != "" || paramsOf(b[2])[paramStage] != stageConfirm {
+		t.Errorf("restored row lost which answers ask first: once=%v session=%v", paramsOf(b[1]), paramsOf(b[2]))
+	}
+	if strings.Contains(cardText(back), confirmSuffix) {
+		t.Errorf("Back left the confirmation line on the question")
+	}
+}

@@ -465,8 +465,8 @@ func ackCard(text, command string, choices []string, actionURL string) *chatv1.G
 // rendering as at least two buttons is rendered without any — the body still
 // lists them.
 //
-// Broad answers get no confirmation step: Chat has no native one, and
-// building one out of a card swap is #29's follow-up rather than this.
+// A Broad answer takes two presses: Chat has no native confirmation, so its
+// button swaps the row for one (confirmCard, #92).
 func decisionCard(text string, d *chat.Decision, actionURL string) *chatv1.GoogleAppsCardV1Card {
 	if actionURL == "" {
 		return nil
@@ -478,8 +478,15 @@ func decisionCard(text string, d *chat.Decision, actionURL string) *chatv1.Googl
 	if !d.Deciding() {
 		return widgetCard(body...)
 	}
-	buttons := make([]*chatv1.GoogleAppsCardV1Button, 0, len(d.Options))
-	for _, o := range d.Options {
+	return widgetCard(append(body, decisionRow(d.ID, d.Options, actionURL))...)
+}
+
+// decisionRow is a question's answers as a row of buttons. A Broad answer's
+// button asks for a confirmation step first (#92) rather than pressing: see
+// confirmCard.
+func decisionRow(id string, opts []chat.DecisionOption, actionURL string) *chatv1.GoogleAppsCardV1Widget {
+	buttons := make([]*chatv1.GoogleAppsCardV1Button, 0, len(opts))
+	for _, o := range opts {
 		if o.Value == "" {
 			continue // unanswerable: the press would come back naming nothing
 		}
@@ -487,12 +494,16 @@ func decisionCard(text string, d *chat.Decision, actionURL string) *chatv1.Googl
 		if strings.TrimSpace(label) == "" {
 			label = o.Value
 		}
-		buttons = append(buttons, actionButton(label, actionURL,
-			&chatv1.GoogleAppsCardV1ActionParameter{Key: paramDecision, Value: d.ID},
-			&chatv1.GoogleAppsCardV1ActionParameter{Key: paramOption, Value: o.Value},
-		))
+		params := []*chatv1.GoogleAppsCardV1ActionParameter{
+			{Key: paramDecision, Value: id},
+			{Key: paramOption, Value: o.Value},
+		}
+		if o.Broad {
+			params = append(params, &chatv1.GoogleAppsCardV1ActionParameter{Key: paramStage, Value: stageConfirm})
+		}
+		buttons = append(buttons, actionButton(label, actionURL, params...))
 	}
-	return widgetCard(append(body, buttonRow(2, buttons...))...)
+	return buttonRow(2, buttons...)
 }
 
 // decisionBody renders a question's markdown as one or more paragraphs,
