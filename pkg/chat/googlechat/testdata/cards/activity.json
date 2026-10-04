@@ -9,7 +9,7 @@
                 "name": "settings"
               }
             },
-            "text": "Running `bash`",
+            "text": "Running \u003ctt\u003ebash\u003c/tt\u003e",
             "wrapText": true
           }
         }

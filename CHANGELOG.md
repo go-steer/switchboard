@@ -19,6 +19,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   no buttons and are unaffected.
 
 ### Changed
+- **Commands in tool activity read as code.** In `progress stream`, a tool
+  notice's argument (`Ran `bash` — gcloud config get-value project`) was
+  plain text after the tool name. It is now a code span on both platforms. It
+  passes through the same neutraliser as an approval prompt's names, so a
+  backtick or line break in it cannot end the span. On Google Chat, inline
+  code in the gateway's own cards renders as `<tt>`. Before, the backticks
+  showed literally, because the HTML subset those cards use has no
+  monospace. `<tt>` and `<font face="monospace">` render monospace in a card,
+  while `<code>` and a markdown paragraph's code span do not, measured on a
+  live card.
 - **Markdown tables read as tables on Google Chat.** Chat renders no tables,
   in text or in a card's `MARKDOWN`, so an agent's pipe table arrived as raw
   source. Its `| :--- | :--- |` delimiter line read like a blank first row.

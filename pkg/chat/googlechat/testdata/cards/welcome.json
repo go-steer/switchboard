@@ -18,7 +18,7 @@
                 "name": "waving_hand"
               }
             },
-            "text": "Long turns report progress while they run. Set how much you see with `progress \u0026lt;off|indicator|status|stream\u0026gt;`.",
+            "text": "Long turns report progress while they run. Set how much you see with \u003ctt\u003eprogress \u0026lt;off|indicator|status|stream\u0026gt;\u003c/tt\u003e.",
             "wrapText": true
           }
         }

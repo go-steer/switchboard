@@ -243,7 +243,7 @@ var (
 )
 
 // toCardHTML converts Chat text markup into the small HTML subset a card's
-// DecoratedText accepts (<b>, <i>, <s>, <a>, <br>). It is deliberately a second
+// DecoratedText accepts (<b>, <i>, <s>, <a>, <tt>, <br>). It is deliberately a second
 // pass over toChatText's output rather than a second markdown renderer: with
 // the dialect already normalized the delimiters are unambiguous, and — the
 // reason this exists at all — everything that is not markup gets escaped, so a
@@ -255,10 +255,13 @@ func toCardHTML(text string) string {
 	}
 	ph := newStash()
 
-	// Protect inline code first: its contents are escaped but keep their
-	// backticks, since a card has no monospace style to map them onto.
+	// Protect inline code first: its contents are escaped and set in <tt>.
+	// Measured on a live card (2026-10-04): <tt> and <font face="monospace">
+	// render monospace in a DecoratedText, while <code> and a MARKDOWN
+	// paragraph's `span` do not — before this the backticks showed literally,
+	// around a command that read as prose.
 	text = inlineCodeRE.ReplaceAllStringFunc(text, func(m string) string {
-		return ph.add("`" + htmlEscaper.Replace(strings.Trim(m, "`")) + "`")
+		return ph.add("<tt>" + htmlEscaper.Replace(strings.Trim(m, "`")) + "</tt>")
 	})
 	// Links become anchors; both halves are escaped inside the tag.
 	text = replaceFunc(chatLabelledLinkRE, text, func(s string, loc []int) string {
