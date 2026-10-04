@@ -563,6 +563,14 @@ all — the process was restarted and no longer knows what it asked, the platfor
 did not say which message was pressed, or the edit failed — it is posted beside
 it instead. A press always ends in something to read.
 
+On a daemon that enforces session ACLs, only the person who started the
+conversation can answer its prompts (or a daemon admin). Answering needs write
+access to the session, which its opener has and other approvers do not. The daemon refuses
+anyone else with the same "not found" a question that has ended gets, so the
+two cannot be told apart. A press from someone else that comes back that way
+therefore leaves the question up and says both things. The audit record reads
+`refused_or_settled`, and the log names the session's opener (#106).
+
 **It is off by default, and turning it on is a real grant.** By default anyone
 who can post in the conversation can answer its prompts, and some of those
 answers outlive the request: `allow-always` persists across restarts and applies
@@ -1174,8 +1182,9 @@ one JSON line per turn and per approval press.
 - Every turn is recorded, including the ones that failed (`no_session`,
   `inject_failed`, with the daemon's `status`). Every press is recorded with
   what became of it: `applied`, `not_approver`, `not_standing`, `stale`,
-  `settled_elsewhere`, `maybe_applied`, `failed`, `disabled`, `invalid`. A
-  press's `approver` is who the daemon says it recorded.
+  `settled_elsewhere`, `refused_or_settled`, `maybe_applied`, `failed`,
+  `disabled`, `invalid`. A press's `approver` is who the daemon says it
+  recorded.
 - **Never the message text.** The chat platform is the system of record for
   content, with its own retention and legal posture; the record is the join.
 - Its own sink, deliberately: `stdout` keeps it apart from the operational log

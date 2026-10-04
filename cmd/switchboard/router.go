@@ -1031,6 +1031,17 @@ func (e *sessionEntry) askKind(id string) string {
 	return ""
 }
 
+// knownSettled reports whether a press on this gateway has already recorded
+// the prompt as over: a confirmed decision, or a "no longer pending" that was
+// itself unambiguous (the opener's own press, which nothing could refuse).
+// Either way a later "no longer pending" is known to mean exactly that.
+func (e *sessionEntry) knownSettled(id string) bool {
+	e.qmu.Lock()
+	defer e.qmu.Unlock()
+	rec := e.asked[id]
+	return rec != nil && rec.settled != unsettled
+}
+
 // markPosted records that a claimed question reached the thread.
 func (e *sessionEntry) markPosted(id string) {
 	e.qmu.Lock()

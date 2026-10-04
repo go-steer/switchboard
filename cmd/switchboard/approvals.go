@@ -342,6 +342,11 @@ const (
 	// that took effect.
 	noticeMaybeApplied = "⚠️ The agent took that answer but didn't confirm it. It may already be in force — check the agent rather than pressing again."
 	noticeStalePress   = "⚠️ That question belongs to a session this thread no longer has, so the answer wasn't sent. If the agent is still waiting, it will ask again."
+	// noticeMaybeRefused is a "no longer pending" that cannot be told apart
+	// from the daemon refusing the presser (#106). It names both readings and
+	// leaves the buttons up, because one of them means the agent is still
+	// waiting for an answer somebody else can give.
+	noticeMaybeRefused = "⚠️ The agent didn't take that answer from you. Either the question already ended, or this agent only takes answers from the person who started the conversation — if it's still waiting, they can answer it."
 	// noticeNotApprover is the refusal switchboard makes itself, before the
 	// daemon hears anything. It does not name who may answer instead: the list
 	// is configuration, and reading it back to whoever presses hardest turns a
@@ -696,6 +701,19 @@ func (r *Router) HandlePress(ctx context.Context, p chat.Press) error {
 	defer cancel()
 	ack, err := r.approvals.Respond(rctx, e.sess, p.Caller, promptID, d)
 	if err != nil {
+		if errors.Is(err, approval.ErrNotFound) && mayBeRefused(e, p.Caller, promptID) {
+			// Not necessarily settled. Under core-agent's session ACL, answering
+			// needs write access, which the session's opener has and a fellow
+			// approver does not — and a caller without it is told the same 404
+			// a prompt that is gone gets (#106). Reading that as "answered
+			// elsewhere" took the buttons down with the turn still parked and
+			// nothing logged above INFO. So the question stays up, the presser
+			// is told both readings, and the log says which identity was
+			// refused, because that is the half an operator can act on.
+			r.logf.Warnf("perms %s: %q found %s not pending; it may have been refused rather than settled — a daemon enforcing session ACLs lets only the session's opener (%q) answer", p.Conversation, p.Caller, promptID, e.owner)
+			rec.Outcome = auditRefusedOrSettled
+			return r.surfaceNotice(ctx, p.Conversation, noticeMaybeRefused)
+		}
 		if errors.Is(err, approval.ErrNotFound) {
 			// Someone else got there first, or the prompt timed out. Not a
 			// failure to report as one — the question is settled either way, and
@@ -746,6 +764,16 @@ func (r *Router) HandlePress(ctx context.Context, p chat.Press) error {
 	}
 	r.traceDecision(ctx, e, p, promptID, outcome, settledHere)
 	return nil
+}
+
+// mayBeRefused reports whether a "no longer pending" answer to this press is
+// ambiguous: the presser is not the identity that opened the session, and no
+// press here has already recorded the question as over. Only then can
+// the 404 be core-agent refusing the presser rather than the prompt being
+// gone. An adopted session has no known opener, and its prompt stream is
+// refused under ACL enforcement anyway, so it keeps the settled reading.
+func mayBeRefused(e *sessionEntry, caller, promptID string) bool {
+	return e.owner != "" && caller != e.owner && !e.knownSettled(promptID)
 }
 
 // parkRespondTimeout is how long an answer to a control-plane write may take to

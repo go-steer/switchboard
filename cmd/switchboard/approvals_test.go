@@ -850,6 +850,114 @@ func TestAPromptThatIsNoLongerPendingIsNotAFailure(t *testing.T) {
 	}
 }
 
+// askedBy posts bashPrompt into C1:1 on a session opened by owner, as a real
+// turn would, and returns the entry and the router.
+func askedBy(t *testing.T, owner string) (*permsDaemon, *Router, *fakeSender, func() []string, context.Context) {
+	t.Helper()
+	d := newPermsDaemon(t, bashPrompt)
+	r, fake, logs := permsRouter(t, d)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	e := liveEntry(r, "C1:1")
+	e.owner = owner
+	r.watchPermsIfOffered(ctx, "C1:1", e, capsWith(true))
+	<-fake.replies
+	return d, r, fake, logs, ctx
+}
+
+func (d *permsDaemon) setRespondStatus(status int) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.respondStatus = status
+}
+
+// A "no longer pending" for a press by someone other than the session's opener
+// is not read as settled (#106). core-agent's session ACL lets only the opener
+// write, and refuses anyone else with the 404 a gone prompt gets — so the old
+// reading took the buttons down while the turn stayed parked. The question
+// must stay up, the presser must be told both readings, and the operator log
+// must say who was refused.
+func TestANonOwnersNotPendingIsNotReadAsSettled(t *testing.T) {
+	d, r, fake, logs, ctx := askedBy(t, "owner@example.com")
+	d.setRespondStatus(http.StatusNotFound)
+
+	err := r.HandlePress(ctx, chat.Press{
+		Conversation: "C1:1", Caller: "fellow@example.com",
+		DecisionID: ref("pr1"), Option: "allow-once",
+		Message: chat.MessageRef{Conversation: "C1:1", ID: "ts1"},
+	})
+	if err != nil {
+		t.Fatalf("HandlePress: %v", err)
+	}
+	if ups := fake.updatedCalls(); len(ups) != 0 {
+		t.Errorf("the question was edited %d times (%q); it must stay up for someone who can answer it", len(ups), ups[0].text)
+	}
+	select {
+	case reply := <-fake.replies:
+		if reply.Text != noticeMaybeRefused {
+			t.Errorf("notice = %q, want %q", reply.Text, noticeMaybeRefused)
+		}
+	default:
+		t.Error("the presser was told nothing")
+	}
+	if !hasLine(logs(), "may have been refused") || !hasLine(logs(), "owner@example.com") {
+		t.Errorf("the log does not say the press may have been refused, or by whose session: %v", logs())
+	}
+}
+
+// The opener's own press has nothing to be refused for, so a 404 for it keeps
+// meaning what it always meant.
+func TestTheOwnersNotPendingIsStillSettled(t *testing.T) {
+	d, r, fake, logs, ctx := askedBy(t, "owner@example.com")
+	d.setRespondStatus(http.StatusNotFound)
+
+	if err := r.HandlePress(ctx, chat.Press{
+		Conversation: "C1:1", Caller: "owner@example.com",
+		DecisionID: ref("pr1"), Option: "allow-once",
+		Message: chat.MessageRef{Conversation: "C1:1", ID: "ts1"},
+	}); err != nil {
+		t.Fatalf("HandlePress: %v", err)
+	}
+	ups := fake.updatedCalls()
+	if len(ups) != 1 || !strings.Contains(ups[0].text, noticeSettled) {
+		t.Errorf("edits = %+v, want the question settled", ups)
+	}
+	if hasLine(logs(), "may have been refused") {
+		t.Errorf("the opener's press was read as possibly refused: %v", logs())
+	}
+}
+
+// Once a press here has recorded a decision, a later 404 is known to be the
+// prompt gone — whoever presses — and changes nothing on screen.
+func TestANotPendingAfterADecisionHereIsSettled(t *testing.T) {
+	d, r, fake, logs, ctx := askedBy(t, "owner@example.com")
+	press := func(caller string) {
+		t.Helper()
+		if err := r.HandlePress(ctx, chat.Press{
+			Conversation: "C1:1", Caller: caller,
+			DecisionID: ref("pr1"), Option: "allow-once",
+			Message: chat.MessageRef{Conversation: "C1:1", ID: "ts1"},
+		}); err != nil {
+			t.Fatalf("HandlePress(%s): %v", caller, err)
+		}
+	}
+	press("owner@example.com")
+	d.setRespondStatus(http.StatusNotFound)
+	press("fellow@example.com")
+
+	if ups := fake.updatedCalls(); len(ups) != 1 {
+		t.Errorf("got %d edits, want only the decision's", len(ups))
+	}
+	select {
+	case reply := <-fake.replies:
+		t.Errorf("posted %q after the question was decided", reply.Text)
+	default:
+	}
+	if hasLine(logs(), "may have been refused") {
+		t.Errorf("a press after a recorded decision was read as possibly refused: %v", logs())
+	}
+}
+
 // The decision applied but the audit line names nobody. That is a real answer,
 // not an error — and it is the exact hole an approval trail exists to prevent,
 // so it does not pass unremarked.

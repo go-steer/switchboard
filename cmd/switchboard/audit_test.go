@@ -185,6 +185,38 @@ func TestPressesAreRecordedWithTheirOutcome(t *testing.T) {
 	}
 }
 
+// TestANotPendingIsAuditedByWhoPressed: a "no longer pending" is recorded as
+// settled for the session's opener and as refused_or_settled for anyone else,
+// because under ACL enforcement the second can be the daemon refusing them
+// (#106) — and an operator reading the trail has to be able to tell.
+func TestANotPendingIsAuditedByWhoPressed(t *testing.T) {
+	d := newPermsDaemon(t)
+	d.respondStatus = http.StatusNotFound
+	r, _, _ := permsRouter(t, d)
+	audit, buf := testAudit()
+	r.setAudit(audit)
+	e := liveEntryIn(r, "C1:1", "C1")
+	e.owner = "owner@example.com"
+
+	fellow := pressIn(e, "C1", "pr1")
+	fellow.Caller = "fellow@example.com"
+	_ = r.HandlePress(context.Background(), fellow)
+	owner := pressIn(e, "C1", "pr2")
+	owner.Caller = "owner@example.com"
+	_ = r.HandlePress(context.Background(), owner)
+
+	got := records(t, buf)
+	if len(got) != 2 {
+		t.Fatalf("records = %d, want 2", len(got))
+	}
+	if g := got[0]; g.Outcome != auditRefusedOrSettled || g.Caller != "fellow@example.com" {
+		t.Errorf("fellow's press = %+v, want outcome %s", g, auditRefusedOrSettled)
+	}
+	if g := got[1]; g.Outcome != auditSettledElsewhere || g.Caller != "owner@example.com" {
+		t.Errorf("opener's press = %+v, want outcome %s", g, auditSettledElsewhere)
+	}
+}
+
 // TestOpenAuditLogAppends: a file sink is created owner-and-group readable and
 // appended to, never truncated — a restart must not erase the trail.
 func TestOpenAuditLogAppends(t *testing.T) {
