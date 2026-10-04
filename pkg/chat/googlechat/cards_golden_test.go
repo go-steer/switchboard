@@ -41,7 +41,7 @@ const goldenActionURL = "https://switchboard.example.com/chat"
 // goldenDecisionText and goldenDecision are a permission prompt as the router
 // posts it (cmd/switchboard/approvals.go postPrompt): the question, then its
 // answers in prose, then the answers again as the Decision the buttons render.
-const goldenDecisionText = "🔐 The agent wants to run **bash**: `kubectl rollout restart deploy/api`\n\n" +
+const goldenDecisionText = "**Permission needed** — `bash`\n\n```\nkubectl rollout restart deploy/api\n```\n\n" +
 	"• Deny\n• Allow once\n• Allow commands like this for the session"
 
 var goldenDecision = &chat.Decision{
@@ -136,10 +136,10 @@ func TestCardsGolden(t *testing.T) {
 		{"welcome-buttons", welcomeCard([]string{"off", "indicator", "status", "stream"}, goldenActionURL), 0},
 		{"ack-buttons", ackCard(toChatText("Progress mode for this channel set to *stream*."),
 			"progress", []string{"off", "indicator", "status", "stream"}, goldenActionURL), 0},
-		{"decision", decisionCard(toChatText(goldenDecisionText), goldenDecision, goldenActionURL), 0},
+		{"decision", decisionCard(goldenDecisionText, goldenDecision, goldenActionURL), 0},
 		// The same question once answered: no Decision, so no buttons — the
 		// edit that takes them down, and the record of who decided.
-		{"decision-settled", decisionCard(toChatText(goldenDecisionText+"\n\n✅ **Allowed**, this once — alice@example.com"),
+		{"decision-settled", decisionCard((goldenDecisionText + "\n\n✅ **Allowed**, this once — alice@example.com"),
 			nil, goldenActionURL), 0},
 		{"answer", answerCard(goldenAnswer), 0},
 		// The whole fence has to survive, across as many widgets as it takes.

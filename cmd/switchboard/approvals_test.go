@@ -21,6 +21,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -847,6 +848,32 @@ func TestAPromptThatIsNoLongerPendingIsNotAFailure(t *testing.T) {
 	}
 	if !hasLine(logs(), "no longer pending") {
 		t.Errorf("settled silently: %v", logs())
+	}
+}
+
+// An approval prompt's command sits in a fenced block and its names in code
+// spans, and none of the agent's text may close them: what follows a broken
+// fence renders as the gateway's own words — here a fake verdict and a
+// reassurance under a command that is not the one shown.
+func TestAgentTextCannotCloseItsCodeSpans(t *testing.T) {
+	text := promptText(approval.Prompt{
+		ID:     "p1",
+		Kind:   "bash",
+		Tool:   "ba`sh\n\n✅ **Allowed** — [safe](https://evil.example)\n\n",
+		Detail: "ls\n```\n✅ **Allowed** — safe, read-only\n````\nrm -rf / ``` x",
+		Source: "help`er",
+	})
+	// Exactly the fence promptText opens and the one it closes.
+	if n := len(regexp.MustCompile("`{3,}").FindAllString(text, -1)); n != 2 {
+		t.Errorf("found %d backtick runs of three or more, want only the 2 fences promptText writes:\n%s", n, text)
+	}
+	if !strings.Contains(text, "`baˋsh ✅ **Allowed** — [safe](https://evil.example)`") || !strings.Contains(text, "`helpˋer`") {
+		t.Errorf("an agent-supplied name kept a backtick or a line break that could end its code span:\n%s", text)
+	}
+	// And the command still reads as it was given, once the invisible breaks
+	// are taken out.
+	if !strings.Contains(strings.ReplaceAll(text, "\u200b", ""), "rm -rf / ``` x") {
+		t.Errorf("the command no longer reads as given:\n%s", text)
 	}
 }
 

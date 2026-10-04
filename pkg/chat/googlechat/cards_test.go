@@ -272,13 +272,25 @@ func TestDecisionCardEdgeCases(t *testing.T) {
 // A clamp would cut exactly the line recording who decided; the body spills
 // instead, and the outcome is still on the card.
 func TestALongQuestionKeepsItsOutcome(t *testing.T) {
-	// Escaping grows every rune of this, the ampersands fivefold — more than
-	// any fixed split ratio allows for.
-	detail := strings.Repeat("<a&b> ", 300) + strings.Repeat("&&", 700)
-	text := "Permission needed: `" + detail + "`\n\n✅ Allowed, this once — ana@example.com"
+	// Over one widget's budget as written: 1500 runes of three-byte text in a
+	// fence, the most a prompt's detail can carry, plus the zero-width breaks
+	// fencedCode may have added.
+	detail := strings.Repeat("命令", 750) + strings.Repeat("`\u200b", 400)
+	text := "**Permission needed** — `bash`\n\n```\n" + detail + "\n```\n\n✅ Allowed, this once — ana@example.com"
 	card := decisionCard(text, nil, testAudience)
 	if card == nil {
 		t.Fatal("no card")
+	}
+	paras := 0
+	for _, s := range card.Sections {
+		for _, w := range s.Widgets {
+			if w.TextParagraph != nil {
+				paras++
+			}
+		}
+	}
+	if paras < 2 {
+		t.Errorf("a %d-byte question rendered as %d paragraph(s); it should spill", len(text), paras)
 	}
 	got := cardText(card)
 	if !strings.Contains(got, "ana@example.com") {

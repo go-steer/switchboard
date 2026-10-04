@@ -7,6 +7,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Fixed
+- **A permission prompt's command renders as code on Google Chat.** The
+  question card used the HTML subset the gateway's own cards use. That subset
+  has no monospace, so the fenced command showed up between literal ```
+  lines. The question now renders with Chat's `MARKDOWN` text syntax, the
+  same one answer cards use.
+- **An agent can no longer break out of the code block on an approval
+  prompt**, on either platform. The command is shown in a fenced block, and
+  the tool and subagent names in code spans. A command containing ``` closed
+  the block early, so whatever followed rendered as the gateway's own text: a
+  fake "✅ Allowed", a reassurance, or a link, with the real command partly
+  hidden. A backtick or a blank line in a name did the same to its span. Runs
+  of three or more backticks in the command are now broken with a zero-width
+  space, so the command still reads exactly as given (one cost: a command
+  containing ``` now pastes with invisible characters). In a name, a backtick
+  becomes a look-alike (ˋ) and line breaks are flattened.
 - **A press from someone other than the session's opener is no longer
   reported as "answered elsewhere"** when the daemon returns 404 (#106).
   On a daemon that enforces session ACLs, answering a prompt needs write
