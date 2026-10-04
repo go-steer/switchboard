@@ -7,6 +7,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Fixed
+- **Permission prompts reach the thread on a daemon that enforces session
+  ACLs.** The prompt stream was opened with no asserted caller, as the relay's
+  own credential, which core-agent's ACL does not let read another caller's
+  session; it answers that with the same `404` a missing session gets, and
+  switchboard gave up on the session's prompts for good on the first try
+  (`ERROR … giving up on permission prompts`). The turn then sat parked at the
+  daemon with nothing in the thread to press. The stream is now read as the
+  caller who opened the session — the identity the event relay already
+  subscribes as. Found live on Google Chat, where it was the last thing between
+  `--approvals` and a working button.
 - `--googlechat-log-events` no longer writes credentials into the log. An
   event on the HTTP ingress carries the sender's live OAuth access token and
   two Google-signed ID tokens in `authorizationEventObject`, and the flag
