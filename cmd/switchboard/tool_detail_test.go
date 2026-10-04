@@ -17,6 +17,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -50,27 +51,27 @@ func TestActivityText(t *testing.T) {
 			name:   "one call in flight",
 			calls:  []daemon.ToolCall{call("bash", "kubectl get pods -A")},
 			detail: true,
-			want:   "🔧 Running `bash` — `kubectl get pods -A`",
+			want:   "🔧 Running **bash**\n```\nkubectl get pods -A\n```",
 		},
 		{
 			name:   "one call finished",
 			calls:  []daemon.ToolCall{call("bash", "kubectl get pods -A")},
 			res:    []*daemon.ToolResult{okRes("bash")},
 			detail: true,
-			want:   "✅ Ran `bash` — `kubectl get pods -A`",
+			want:   "✅ Ran **bash**\n```\nkubectl get pods -A\n```",
 		},
 		{
 			name:   "one call failed, with the reason",
 			calls:  []daemon.ToolCall{call("bash", "kubectl get ns --context nope")},
 			res:    []*daemon.ToolResult{failRes("bash", "exit 2")},
 			detail: true,
-			want:   "❌ Ran `bash` (exit 2) — `kubectl get ns --context nope`",
+			want:   "❌ Ran **bash** (exit 2)\n```\nkubectl get ns --context nope\n```",
 		},
 		{
 			name:   "a call with no summarisable argument still renders",
 			calls:  []daemon.ToolCall{call("think", "")},
 			detail: true,
-			want:   "🔧 Running `think`",
+			want:   "🔧 Running **think**",
 		},
 		{
 			// Three shells in one frame: the whole point of the argument summary
@@ -83,10 +84,10 @@ func TestActivityText(t *testing.T) {
 			},
 			res:    []*daemon.ToolResult{okRes("bash"), failRes("bash", "exit 2"), nil},
 			detail: true,
-			want: "🔧 Running 3 tools\n" +
-				"• ✅ `bash` — `kubectl get pods -A`\n" +
-				"• ❌ `bash` (exit 2) — `kubectl get ns --context nope`\n" +
-				"• 🔧 `bash` — `sleep 30`",
+			want: "🔧 Running 3 tools\n\n" +
+				"✅ **bash**\n```\nkubectl get pods -A\n```\n\n" +
+				"❌ **bash** (exit 2)\n```\nkubectl get ns --context nope\n```\n\n" +
+				"🔧 **bash**\n```\nsleep 30\n```",
 		},
 		{
 			name: "a frame whose calls all landed says so in the header",
@@ -96,9 +97,9 @@ func TestActivityText(t *testing.T) {
 			},
 			res:    []*daemon.ToolResult{okRes("read"), okRes("write")},
 			detail: true,
-			want: "✅ Ran 2 tools\n" +
-				"• ✅ `read` — `/etc/hosts`\n" +
-				"• ✅ `write` — `/tmp/out`",
+			want: "✅ Ran 2 tools\n\n" +
+				"✅ **read**\n```\n/etc/hosts\n```\n\n" +
+				"✅ **write**\n```\n/tmp/out\n```",
 		},
 		{
 			name: "the header counts the failures",
@@ -108,9 +109,9 @@ func TestActivityText(t *testing.T) {
 			},
 			res:    []*daemon.ToolResult{okRes("read"), failRes("read", "")},
 			detail: true,
-			want: "❌ Ran 2 tools (1 failed)\n" +
-				"• ✅ `read` — `/etc/hosts`\n" +
-				"• ❌ `read` — `/nope`",
+			want: "❌ Ran 2 tools (1 failed)\n\n" +
+				"✅ **read**\n```\n/etc/hosts\n```\n\n" +
+				"❌ **read**\n```\n/nope\n```",
 		},
 		{
 			// Same name, same argument, same verdict: indistinguishable to a
@@ -122,7 +123,7 @@ func TestActivityText(t *testing.T) {
 				call("bash", "make test"),
 			},
 			detail: true,
-			want:   "🔧 Running `bash` ×3 — `make test`",
+			want:   "🔧 Running **bash** ×3\n```\nmake test\n```",
 		},
 		{
 			name: "same tool, different arguments, stays separate lines",
@@ -131,9 +132,9 @@ func TestActivityText(t *testing.T) {
 				call("bash", "make lint"),
 			},
 			detail: true,
-			want: "🔧 Running 2 tools\n" +
-				"• 🔧 `bash` — `make test`\n" +
-				"• 🔧 `bash` — `make lint`",
+			want: "🔧 Running 2 tools\n\n" +
+				"🔧 **bash**\n```\nmake test\n```\n\n" +
+				"🔧 **bash**\n```\nmake lint\n```",
 		},
 		{
 			// A resolved and an unresolved call of the same shape are different
@@ -145,9 +146,9 @@ func TestActivityText(t *testing.T) {
 			},
 			res:    []*daemon.ToolResult{okRes("bash"), nil},
 			detail: true,
-			want: "🔧 Running 2 tools\n" +
-				"• ✅ `bash` — `make test`\n" +
-				"• 🔧 `bash` — `make test`",
+			want: "🔧 Running 2 tools\n\n" +
+				"✅ **bash**\n```\nmake test\n```\n\n" +
+				"🔧 **bash**\n```\nmake test\n```",
 		},
 		{
 			name:   "terse mode names the tool and nothing else",
@@ -241,9 +242,9 @@ func TestResolveToolMatchesOnCallID(t *testing.T) {
 	if ref.ID != "ts1" {
 		t.Fatalf("edited %q, want the notice that announced the call", ref.ID)
 	}
-	want := "🔧 Running 2 tools\n" +
-		"• 🔧 `bash` — `make test`\n" +
-		"• ❌ `bash` (exit 1) — `make lint`"
+	want := "🔧 Running 2 tools\n\n" +
+		"🔧 **bash**\n```\nmake test\n```\n\n" +
+		"❌ **bash** (exit 1)\n```\nmake lint\n```"
 	if text != want {
 		t.Fatalf("re-render =\n%s\nwant\n%s", text, want)
 	}
@@ -276,14 +277,14 @@ func TestResolveToolFallsBackToTheOldestUnansweredCall(t *testing.T) {
 
 	if _, text, ok := fileResult(e, daemon.ToolResult{Name: "bash"}); !ok {
 		t.Fatal("the first result found no notice")
-	} else if !strings.Contains(text, "• ✅ `bash` — `one`") {
+	} else if !strings.Contains(text, "✅ **bash**\n```\none\n```") {
 		t.Fatalf("the first result did not land on the oldest call:\n%s", text)
 	}
 	// The oldest is answered now, so the second result takes the next line
 	// rather than overwriting the one just filled.
 	if _, text, ok := fileResult(e, daemon.ToolResult{Name: "bash"}); !ok {
 		t.Fatal("the second result found no notice")
-	} else if !strings.Contains(text, "• ✅ `bash` — `two`") {
+	} else if !strings.Contains(text, "✅ **bash**\n```\ntwo\n```") {
 		t.Fatalf("the second result did not fall through to the next call:\n%s", text)
 	}
 	// Both are answered; a third has nowhere to go and must not overwrite.
@@ -433,9 +434,9 @@ func TestApplyToolResultsCoalescesAFrame(t *testing.T) {
 	if len(edits) != 1 {
 		t.Fatalf("got %d edits for one notice, want 1", len(edits))
 	}
-	want := "❌ Ran 2 tools (1 failed)\n" +
-		"• ✅ `bash` — `one`\n" +
-		"• ❌ `bash` (exit 2) — `two`"
+	want := "❌ Ran 2 tools (1 failed)\n\n" +
+		"✅ **bash**\n```\none\n```\n\n" +
+		"❌ **bash** (exit 2)\n```\ntwo\n```"
 	if edits[0].text != want {
 		t.Fatalf("the single edit is not the final state:\n%s\nwant\n%s", edits[0].text, want)
 	}
@@ -461,9 +462,9 @@ func TestApplyToolResultsFilesIdsBeforeGuessingByName(t *testing.T) {
 	if len(edits) != 1 {
 		t.Fatalf("got %d edits for one notice, want 1", len(edits))
 	}
-	want := "❌ Ran 2 tools (1 failed)\n" +
-		"• ✅ `bash` — `one`\n" +
-		"• ❌ `bash` (exit 7) — `two`"
+	want := "❌ Ran 2 tools (1 failed)\n\n" +
+		"✅ **bash**\n```\none\n```\n\n" +
+		"❌ **bash** (exit 7)\n```\ntwo\n```"
 	if edits[0].text != want {
 		t.Fatalf("the frame was filed in arrival order, not ids first:\n%s\nwant\n%s", edits[0].text, want)
 	}
@@ -507,9 +508,9 @@ func TestAFailedEditHealsOnTheNextResult(t *testing.T) {
 	if !ok {
 		t.Fatal("the second result found no notice")
 	}
-	want := "❌ Ran 2 tools (1 failed)\n" +
-		"• ❌ `bash` (exit 2) — `one`\n" +
-		"• ✅ `bash` — `two`"
+	want := "❌ Ran 2 tools (1 failed)\n\n" +
+		"❌ **bash** (exit 2)\n```\none\n```\n\n" +
+		"✅ **bash**\n```\ntwo\n```"
 	if text != want {
 		t.Fatalf("the lost verdict was not carried in:\n%s\nwant\n%s", text, want)
 	}
@@ -567,9 +568,9 @@ func TestStreamModeTicksResultsOffTheNoticeItPosted(t *testing.T) {
 	}
 	close(release)
 	notice := recvReply(t, fake.replies)
-	want := "🔧 Running 2 tools\n" +
-		"• 🔧 `bash` — `kubectl get pods -A`\n" +
-		"• 🔧 `bash` — `kubectl get ns --context nope`"
+	want := "🔧 Running 2 tools\n\n" +
+		"🔧 **bash**\n```\nkubectl get pods -A\n```\n\n" +
+		"🔧 **bash**\n```\nkubectl get ns --context nope\n```"
 	if notice.Text != want {
 		t.Fatalf("notice =\n%s\nwant\n%s", notice.Text, want)
 	}
@@ -587,9 +588,9 @@ func TestStreamModeTicksResultsOffTheNoticeItPosted(t *testing.T) {
 	if last.ref.ID != "ts2" {
 		t.Errorf("edited %q, want the notice ts2 (ts1 is the clock placeholder)", last.ref.ID)
 	}
-	wantFinal := "❌ Ran 2 tools (1 failed)\n" +
-		"• ✅ `bash` — `kubectl get pods -A`\n" +
-		"• ❌ `bash` (exit 2) — `kubectl get ns --context nope`"
+	wantFinal := "❌ Ran 2 tools (1 failed)\n\n" +
+		"✅ **bash**\n```\nkubectl get pods -A\n```\n\n" +
+		"❌ **bash** (exit 2)\n```\nkubectl get ns --context nope\n```"
 	if last.text != wantFinal {
 		t.Fatalf("final notice =\n%s\nwant\n%s", last.text, wantFinal)
 	}
@@ -655,13 +656,14 @@ func TestAStreamNoticeSaysHowLongEachCallTook(t *testing.T) {
 	edits = append(edits, e.applyToolResults([]daemon.ToolResult{{ID: "fast", Name: "bash"}})...)
 
 	got := edits[len(edits)-1].text
-	if !strings.Contains(got, "`kubectl get pods -A` · 2.") { // 2.3s, give or take a slow runner
-		t.Errorf("slow call carries no duration:\n%s", got)
+	// The duration is its own line, under the call's code block.
+	if !strings.Contains(got, "kubectl get pods -A\n```\n⏱ 2.") { // 2.3s, give or take a slow runner
+		t.Errorf("slow call carries no duration line:\n%s", got)
 	}
-	if !strings.Contains(got, "`echo hi`\n") || strings.Contains(got, "`echo hi` ·") {
+	if strings.Contains(got, "echo hi\n```\n⏱") {
 		t.Errorf("an instant call printed a duration:\n%s", got)
 	}
-	if strings.Contains(got, "`sleep 30` ·") {
+	if strings.Contains(got, "sleep 30\n```\n⏱") {
 		t.Errorf("a running call printed a duration:\n%s", got)
 	}
 }
@@ -681,28 +683,32 @@ func TestFormatTook(t *testing.T) {
 	}
 }
 
-// A tool name is neutralised the same way wherever it is quoted: in a notice,
-// in the terse status line, and in the progress tick.
+// A tool name is neutralised wherever it is quoted: bold in a stream notice,
+// a code span in the terse status line and in the progress tick. A backtick in
+// it can open no code span, and in bold an asterisk cannot end the emphasis.
 func TestABacktickedToolNameStaysInItsSpan(t *testing.T) {
-	calls := []daemon.ToolCall{{ID: "1", Name: "ba`sh"}}
-	for name, got := range map[string]string{
-		"notice": activityText(calls, nil, true),
-		"terse":  activityText(calls, nil, false),
-		"tick":   tickText(time.Second, []string{"ba`sh"}, 0),
+	calls := []daemon.ToolCall{{ID: "1", Name: "ba`s*h"}}
+	for name, tc := range map[string]struct{ got, want string }{
+		"notice": {activityText(calls, nil, true), "**bash**"},
+		"terse":  {activityText(calls, nil, false), "`baˋs*h`"},
+		"tick":   {tickText(time.Second, []string{"ba`s*h"}, 0), "`baˋs*h`"},
 	} {
-		if !strings.Contains(got, "`baˋsh`") {
-			t.Errorf("%s = %q, want the name neutralised inside its span", name, got)
+		if !strings.Contains(tc.got, tc.want) {
+			t.Errorf("%s = %q, want %q", name, tc.got, tc.want)
 		}
 	}
 }
 
-// The argument summary is agent-supplied and now sits in a code span, so it
-// must not be able to end the span: a backtick or a blank line in it would run
-// on as the gateway's own text under a tool notice.
+// The argument summary is agent-supplied and sits in a fenced code block, so
+// it must not be able to end the block: a ``` in it would close the fence and
+// run on as the gateway's own text under a tool notice. Single backticks and
+// blank lines are harmless inside a fence and are left as they are.
 func TestAnActivityArgumentCannotLeaveItsCodeSpan(t *testing.T) {
-	got := activityText([]daemon.ToolCall{{ID: "1", Name: "bash", Arg: "ls `x`\n\n✅ **all clear**"}}, nil, true)
-	want := "🔧 Running `bash` — `ls ˋxˋ ✅ **all clear**`"
-	if got != want {
-		t.Errorf("activityText = %q, want %q", got, want)
+	got := activityText([]daemon.ToolCall{{ID: "1", Name: "bash", Arg: "ls `x`\n```\n✅ **all clear**"}}, nil, true)
+	if n := len(regexp.MustCompile("`{3,}").FindAllString(got, -1)); n != 2 {
+		t.Errorf("activityText = %q: %d fence runs, want only the 2 the notice writes", got, n)
+	}
+	if !strings.HasSuffix(got, "✅ **all clear**\n```") {
+		t.Errorf("activityText = %q: the argument's text left its code block", got)
 	}
 }

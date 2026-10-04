@@ -25,6 +25,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/go-steer/switchboard/internal/logging"
@@ -237,6 +238,17 @@ func toolIcon(r *daemon.ToolResult) string {
 // toolLine renders one group: icon, tool, how many of it, why it failed, and —
 // in stream mode only — what it was called with. verb puts "Running"/"Ran"
 // after the icon, for a notice that is one line and has no header to carry it.
+//
+// In stream mode a call is a small block rather than a line: a header naming
+// the tool and its verdict, the argument in a fenced code block, and how long
+// the call took on a line of its own (asked for on the live Chat rig — a
+// command reads as code in a block, and a duration tacked onto the end of it
+// read as part of it). The tool name is bold rather than a code span: a code
+// span renders monospace nowhere in a Chat card's markdown (measured), and a
+// fence is what the argument needs.
+//
+// The argument goes through fencedCode, as an approval prompt's command does:
+// it is agent-supplied, and a ``` in it would end the block early.
 func toolLine(g toolGroup, detail, verb bool) string {
 	line := toolIcon(g.res)
 	if verb {
@@ -246,7 +258,7 @@ func toolLine(g toolGroup, detail, verb bool) string {
 			line += " Ran"
 		}
 	}
-	line += " `" + inlineCode(g.call.Name) + "`"
+	line += " **" + boldName(g.call.Name) + "**"
 	if g.n > 1 {
 		line += " ×" + strconv.Itoa(g.n)
 	}
@@ -254,16 +266,41 @@ func toolLine(g toolGroup, detail, verb bool) string {
 		line += " (" + g.res.Detail + ")"
 	}
 	if detail && g.call.Arg != "" {
-		// A code span, like the tool name: it is a command or a path, and it
-		// read as prose (reported from the live Chat rig). Through inlineCode,
-		// because it is agent-supplied and a backtick or a blank line in it
-		// would otherwise end the span and run on as the gateway's own text.
-		line += " — `" + inlineCode(g.call.Arg) + "`"
+		line += "\n```\n" + fencedCode(g.call.Arg) + "\n```"
 	}
 	if g.res != nil && g.n == 1 && g.took >= minShownTook {
-		line += " · " + formatTook(g.took)
+		line += "\n⏱ " + formatTook(g.took)
 	}
 	return line
+}
+
+// boldName makes an agent-supplied tool name safe inside **…**. Unlike a code
+// span, bold shields nothing: a name shaped like [text](url) or <url|text>
+// would render as a link in the gateway's own notice (caught in review). So
+// it keeps only what tool names are made of — letters, digits and ._:/- — and
+// an underscore only between two of those, since one at either end reads as
+// emphasis. Anything else is dropped; a name with nothing left reads "?".
+func boldName(s string) string {
+	rs := []rune(s)
+	var b strings.Builder
+	for i, r := range rs {
+		switch {
+		case unicode.IsLetter(r) || unicode.IsDigit(r) || strings.ContainsRune(".:/-", r):
+			b.WriteRune(r)
+		case r == '_' && i > 0 && i < len(rs)-1 && nameRune(rs[i-1]) && nameRune(rs[i+1]):
+			b.WriteRune(r)
+		}
+	}
+	if b.Len() == 0 {
+		return "?"
+	}
+	return b.String()
+}
+
+// nameRune reports whether r may flank an underscore in a bold tool name. An
+// underscore counts, so mcp__github__list_prs keeps its double underscores.
+func nameRune(r rune) bool {
+	return unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_'
 }
 
 // activityText renders a standalone tool-activity notice — stream mode, and
@@ -271,13 +308,25 @@ func toolLine(g toolGroup, detail, verb bool) string {
 // each call's result once it has landed, so the same function renders the
 // notice when it is posted and again as each result ticks a line off:
 //
-//	🔧 Running `bash` — kubectl get pods -A          (stream, one call)
-//	✅ Ran `bash` — kubectl get pods -A              (…once it finishes)
-//	🔧 Running 3 tools                               (stream, a parallel frame)
-//	• ✅ `bash` — kubectl get pods -A
-//	• ❌ `bash` (exit 2) — kubectl get ns --context nope
-//	• 🔧 `bash` — sleep 30
-//	🔧 Running `bash` ×3                             (status: names, no arguments)
+//	✅ Ran **bash**                                   (stream, one call: a block)
+//	```
+//	kubectl get pods -A
+//	```
+//	⏱ 2.3s
+//
+//	❌ Ran 2 tools (1 failed)                         (stream, a parallel frame:
+//	                                                  header, then one block per
+//	✅ **bash**                                       call, blank-line separated)
+//	```
+//	kubectl get pods -A
+//	```
+//
+//	❌ **bash** (exit 2)
+//	```
+//	kubectl get ns --context nope
+//	```
+//
+//	🔧 Running `bash` ×3                              (status: names, no arguments)
 //
 // detail is the mode gate. Only stream carries argument summaries: status edits
 // one message in place and wants a short line, and a reader who chose indicator
@@ -287,7 +336,7 @@ func activityText(calls []daemon.ToolCall, res []*daemon.ToolResult, detail bool
 }
 
 // timedActivityText is activityText with each finished call's duration, which
-// stream mode prints after the call ("· 2.3s"). took is parallel to calls.
+// stream mode prints on its own line under the call ("⏱ 2.3s"). took is parallel to calls.
 func timedActivityText(calls []daemon.ToolCall, res []*daemon.ToolResult, took []time.Duration, detail bool) string {
 	if !detail {
 		// The terse shape, unchanged but for the count: names, comma-joined,
@@ -306,16 +355,16 @@ func timedActivityText(calls []daemon.ToolCall, res []*daemon.ToolResult, took [
 	if len(groups) == 1 {
 		return toolLine(groups[0], true, true)
 	}
-	lines := make([]string, 0, len(groups)+1)
-	lines = append(lines, activityHeader(groups))
+	blocks := make([]string, 0, len(groups)+1)
+	blocks = append(blocks, activityHeader(groups))
 	for _, g := range groups {
-		lines = append(lines, "• "+toolLine(g, true, false))
+		blocks = append(blocks, toolLine(g, true, false))
 	}
-	return strings.Join(lines, "\n")
+	return strings.Join(blocks, "\n\n")
 }
 
 // activityHeader summarises a multi-call notice in its first line, so a reader
-// scrolling past sees the state of the frame without reading the bullets.
+// scrolling past sees the state of the frame without reading the blocks.
 func activityHeader(groups []toolGroup) string {
 	total, done, failed := 0, 0, 0
 	for _, g := range groups {

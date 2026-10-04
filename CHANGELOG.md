@@ -12,9 +12,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   with no clock, so a long turn in it gave no sign of how long it had been
   going. It now also posts the "⏳ Working… 45s" placeholder, ticking and
   deleted when the answer lands, as in `indicator`. Each finished call on a
-  notice ends with its duration (`✅ Ran `bash` — `kubectl get pods -A` ·
-  2.3s`), measured at the gateway. Calls under 0.1s, and collapsed `×N`
-  lines, show none.
+  notice says how long it took (`⏱ 2.3s`, on its own line), measured at the
+  gateway. Calls under 0.1s, and collapsed `×N` calls, show none.
 - **Every Google Chat answer carries the `--show-usage` footer.** The footer
   rides a card, and an answer with no headings or rules does not get one, so
   plain answers (most of them) went out as text without the cost the
@@ -36,16 +35,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   no buttons and are unaffected.
 
 ### Changed
-- **Commands in tool activity read as code.** In `progress stream`, a tool
-  notice's argument (`Ran `bash` — gcloud config get-value project`) was
-  plain text after the tool name. It is now a code span on both platforms. It
-  passes through the same neutraliser as an approval prompt's names, so a
-  backtick or line break in it cannot end the span. On Google Chat, inline
-  code in the gateway's own cards renders as `<tt>`. Before, the backticks
-  showed literally, because the HTML subset those cards use has no
-  monospace. `<tt>` and `<font face="monospace">` render monospace in a card,
-  while `<code>` and a markdown paragraph's code span do not, measured on a
-  live card.
+- **Stream-mode tool notices show each command in a code block, with its
+  duration on a line of its own.** In `progress stream`, a tool notice's
+  argument was plain text after the tool name, and a frame of calls was a
+  bulleted list. A call now reads as a small block: the tool and its verdict
+  (`✅ Ran **bash**`), the argument in a fenced code block, and `⏱ 12s` below
+  it. A frame of several calls is a summary header and one block per call. On
+  Google Chat the notice is a markdown paragraph so the block renders, since
+  the icon-line card can't show one. The argument passes through the same
+  fence neutraliser as an approval prompt's command. The tool name is bold and
+  keeps only the characters tool names are made of, so a model-supplied name
+  can't carry a link or other markup. Status mode's terse line is unchanged.
+- **Inline code in the gateway's own Google Chat cards renders as `<tt>`.**
+  Before, the backticks showed literally, because the HTML subset those cards
+  use has no monospace. `<tt>` and `<font face="monospace">` render monospace
+  in a card, while `<code>` and a markdown paragraph's code span do not,
+  measured on a live card.
 - **Markdown tables read as tables on Google Chat.** Chat renders no tables,
   in text or in a card's `MARKDOWN`, so an agent's pipe table arrived as raw
   source. Its `| :--- | :--- |` delimiter line read like a blank first row.
