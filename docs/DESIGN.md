@@ -794,9 +794,16 @@ second press on a settled question changes nothing. A **legacy** click is acknow
 REST: its response envelope is not the add-on one, and nothing here has
 measured it.
 
-Broad answers get no confirmation on Chat yet. Slack's buttons carry a native
-"are you sure"; Chat has none, and building one from a card swap is follow-up
-work.
+Broad answers get their confirmation from a card swap (#92). Slack's buttons
+carry a native "are you sure"; Chat has none, so a Broad answer's button
+carries a `switchboard_stage=confirm` parameter, and its click never reaches
+the router. The adapter answers it in-band with the question, a line naming
+the grant, and **Yes, allow** (the real press) and **Back**. It is stateless
+by construction: the click delivers its hosting card whole (measured on the
+live add-on), so the confirmation is built from the question it replaces, and
+Back carries the answers it restores in its own parameters. A restart between
+the two presses costs nothing, and the approver checks stay at the router,
+which only ever sees Yes.
 
 The turn *does* run after the response here, which is the opposite of "anything
 that must happen happens before the write" — deliberately, and only because

@@ -1,0 +1,156 @@
+{
+  "commonEventObject": {
+    "userLocale": "en",
+    "hostApp": "CHAT",
+    "platform": "WEB",
+    "timeZone": {
+      "id": "Atlantic/Azores",
+      "offset": -3.6E6
+    },
+    "parameters": {
+      "switchboard_option": "allow-session",
+      "switchboard_decision": "core-agent/01a107d8-7555-7957-bb0d-2147a34c7d19#fb9de6fca80fddf245a1481f"
+    }
+  },
+  "authorizationEventObject": {
+    "userOAuthToken": "REDACTED",
+    "userIdToken": "REDACTED",
+    "systemIdToken": "REDACTED",
+    "authorizedScopes": [
+      "https://www.googleapis.com/auth/userinfo.email",
+      "openid"
+    ]
+  },
+  "chat": {
+    "user": {
+      "name": "users/106508980999999999999",
+      "displayName": "Ada Lovelace",
+      "avatarUrl": "https://lh3.googleusercontent.com/a/REDACTED",
+      "email": "ada@example.com",
+      "type": "HUMAN",
+      "domainId": "REDACTED"
+    },
+    "eventTime": "2026-10-04T16:56:54.795520Z",
+    "buttonClickedPayload": {
+      "space": {
+        "name": "spaces/AAQAXbGkY1s",
+        "type": "DM",
+        "singleUserBotDm": true,
+        "spaceThreadingState": "THREADED_MESSAGES",
+        "spaceType": "DIRECT_MESSAGE",
+        "spaceHistoryState": "HISTORY_ON",
+        "lastActiveTime": "2026-10-04T16:56:32.520047Z",
+        "membershipCount": {
+          "joinedDirectHumanUserCount": 1.0
+        },
+        "spaceUri": "https://chat.google.com/dm/AAQAXbGkY1s?cls\u003d11"
+      },
+      "message": {
+        "name": "spaces/AAQAXbGkY1s/messages/Bc4rNf7yUq2.Bc4rNf7yUq2",
+        "sender": {
+          "name": "users/103000000000000000001",
+          "displayName": "Switchboard",
+          "avatarUrl": "https://fonts.gstatic.com/s/i/short-term/release/googlesymbols/hub/default/48px.svg",
+          "type": "BOT"
+        },
+        "createTime": "2026-10-04T16:56:32.345119Z",
+        "thread": {
+          "name": "spaces/AAQAXbGkY1s/threads/Bc4rNf7yUq2",
+          "retentionSettings": {
+            "state": "PERMANENT"
+          }
+        },
+        "space": {
+          "name": "spaces/AAQAXbGkY1s",
+          "type": "DM",
+          "singleUserBotDm": true,
+          "spaceThreadingState": "THREADED_MESSAGES",
+          "spaceType": "DIRECT_MESSAGE",
+          "spaceHistoryState": "HISTORY_ON",
+          "lastActiveTime": "2026-10-04T16:56:32.520047Z",
+          "membershipCount": {
+            "joinedDirectHumanUserCount": 1.0
+          },
+          "spaceUri": "https://chat.google.com/dm/AAQAXbGkY1s?cls\u003d11"
+        },
+        "cardsV2": [
+          {
+            "cardId": "switchboard",
+            "card": {
+              "sections": [
+                {
+                  "widgets": [
+                    {
+                      "textParagraph": {
+                        "text": "**Permission needed** — `bash`\n\n```\nkubectl config get-contexts\n```\n\n• Deny\n• Allow once\n• Allow for this session\n• Allow every kubectl this session\n• Allow every bash this session\n• Always allow (saved)",
+                        "textSyntax": "MARKDOWN"
+                      }
+                    },
+                    {
+                      "textParagraph": {
+                        "text": "\u003cb\u003eAllow for this session\u003c/b\u003e — this outlasts the request being made."
+                      }
+                    },
+                    {
+                      "buttonList": {
+                        "buttons": [
+                          {
+                            "text": "Yes, allow",
+                            "onClick": {
+                              "action": {
+                                "function": "https://switchboard.example.com/chat",
+                                "parameters": [
+                                  {
+                                    "key": "switchboard_decision",
+                                    "value": "core-agent/01a107d8-7555-7957-bb0d-2147a34c7d19#fb9de6fca80fddf245a1481f"
+                                  },
+                                  {
+                                    "key": "switchboard_option",
+                                    "value": "allow-session"
+                                  }
+                                ]
+                              }
+                            }
+                          },
+                          {
+                            "text": "Back",
+                            "onClick": {
+                              "action": {
+                                "function": "https://switchboard.example.com/chat",
+                                "parameters": [
+                                  {
+                                    "key": "switchboard_decision",
+                                    "value": "core-agent/01a107d8-7555-7957-bb0d-2147a34c7d19#fb9de6fca80fddf245a1481f"
+                                  },
+                                  {
+                                    "key": "switchboard_stage",
+                                    "value": "back"
+                                  },
+                                  {
+                                    "key": "switchboard_options",
+                                    "value": "[{\"v\":\"deny\",\"l\":\"Deny\"},{\"v\":\"allow-once\",\"l\":\"Allow once\"},{\"v\":\"allow-session\",\"l\":\"Allow for this session\",\"b\":true},{\"v\":\"allow-session-verb\",\"l\":\"Allow every kubectl this session\",\"b\":true},{\"v\":\"allow-session-tool\",\"l\":\"Allow every bash this session\",\"b\":true},{\"v\":\"allow-always\",\"l\":\"Always allow (saved)\",\"b\":true}]"
+                                  }
+                                ]
+                              }
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        ],
+        "lastUpdateTime": "2026-10-04T16:56:48.363214Z",
+        "threadReply": true,
+        "retentionSettings": {
+          "state": "PERMANENT"
+        },
+        "messageHistoryState": "HISTORY_ON",
+        "markupSyntax": "MARKUP_SYNTAX_CHAT"
+      }
+    }
+  }
+}

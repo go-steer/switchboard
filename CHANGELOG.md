@@ -6,6 +6,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **A Broad answer takes two presses on Google Chat, as on Slack** (#92).
+  The answers that outlive the request (`allow-session*`, `allow-always`)
+  applied on one tap on Chat, while Slack asks first. Chat has no native
+  confirmation, so the first press now swaps the buttons for a line naming
+  the grant, with **Yes, allow** (the real press) and **Back** (the
+  question's answers restored). It is built from the click alone, because
+  the click carries its hosting card. Nothing is remembered between the two
+  presses, so a restart in between costs nothing. Approver checks are
+  unchanged, because only Yes reaches the router. Pub/Sub deployments render
+  no buttons and are unaffected.
+
 ### Changed
 - **Markdown tables read as tables on Google Chat.** Chat renders no tables,
   in text or in a card's `MARKDOWN`, so an agent's pipe table arrived as raw

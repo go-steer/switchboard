@@ -434,6 +434,10 @@ func (a *Adapter) runCommand(ctx context.Context, h chat.Handler, conv string, c
 // decided underneath, so a click arriving any other way is still answered.
 func (a *Adapter) runButton(ctx context.Context, h chat.Handler, in inbound, conv string) {
 	if id := in.params[paramDecision]; id != "" {
+		if in.params[paramStage] != "" {
+			a.runStage(ctx, in, conv, id) // not an answer yet (#92)
+			return
+		}
 		a.runPress(ctx, h, in, conv, id)
 		return
 	}

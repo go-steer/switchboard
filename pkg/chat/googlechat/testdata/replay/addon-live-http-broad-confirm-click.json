@@ -1,0 +1,9 @@
+{
+  "kind": "ignored",
+  "patches": [
+    {
+      "target": "spaces/AAQAXbGkY1s/messages/Bc4rNf7yUq2.Bc4rNf7yUq2",
+      "card": "[**Permission needed** — `bash`\n\n```\nkubectl config get-contexts\n```\n\n• Deny\n• Allow once\n• Allow for this session\n• Allow every kubectl this session\n• Allow every bash this session\n• Always allow (saved)][<b>Allow for this session</b> — this outlasts the request being made.]"
+    }
+  ]
+}

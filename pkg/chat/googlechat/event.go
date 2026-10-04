@@ -76,6 +76,14 @@ const (
 	paramArg      = "switchboard_arg"
 	paramDecision = "switchboard_decision"
 	paramOption   = "switchboard_option"
+	// paramStage marks a button that does not answer yet: a Broad answer's
+	// first press asks for confirmation, and Back undoes that (#92).
+	paramStage = "switchboard_stage"
+	// paramOptions carries a question's answers on Back, so the row can be
+	// restored from the click alone.
+	paramOptions = "switchboard_options"
+	stageConfirm = "confirm"
+	stageBack    = "back"
 )
 
 // senderTypeBot marks a message authored by an app (including this one). Chat
@@ -156,6 +164,13 @@ type inbound struct {
 	// for a turn (kindMessage), of the message itself, which the audit record
 	// carries back to the platform (#89).
 	messageName string
+
+	// hosting is the card the clicked button sits on, as the click delivered
+	// it (kindButton, add-on dialect). Measured live: the add-on's
+	// buttonClickedPayload carries the message's cardsV2 whole, buttons and
+	// their parameters included — which is what lets the Broad-answer
+	// confirmation be built and undone from the click alone (#92).
+	hosting *chatv1.GoogleAppsCardV1Card
 
 	// params are the action parameters carried by a button click. Add-ons
 	// that extend Chat never populate commonEventObject.invokedFunction, so
@@ -366,6 +381,9 @@ func normalizeAddon(ev *wireEvent) inbound {
 		in.thread = threadOf(p.Message)
 		if p.Message != nil {
 			in.messageName = p.Message.Name
+			if len(p.Message.CardsV2) > 0 && p.Message.CardsV2[0] != nil {
+				in.hosting = p.Message.CardsV2[0].Card
+			}
 		}
 		if ev.Common != nil {
 			in.params = ev.Common.Parameters
