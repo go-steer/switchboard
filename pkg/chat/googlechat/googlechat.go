@@ -341,7 +341,7 @@ func (a *Adapter) handleEvent(ctx context.Context, h chat.Handler, data []byte) 
 	// One line, one payload, compacted: the log is meant to be sliced straight
 	// into testdata/events as a decoder fixture.
 	if a.logEvents {
-		a.logf.Infof("googlechat: event %s", compactJSON(data))
+		a.logf.Infof("googlechat: event %s", redactCredentials(compactJSON(data)))
 	}
 	in, err := decodeEvent(data)
 	if err != nil {

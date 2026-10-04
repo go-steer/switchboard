@@ -106,12 +106,17 @@ Scrub before committing. A real payload carries the sender's display name,
 email, avatar URL, and `domainId`; the Workspace `customer` id; the space id,
 its `displayName` and its `spaceUri`; the message and thread ids, which are
 derived from the same base64url id and appear in `message.name` and
-`thread.name`; the client's `commonEventObject.timeZone`; and a
-`configCompleteRedirectUri` with a token in the query string. Replace each value
+`thread.name`; and the client's `commonEventObject.timeZone`. Replace each value
 with something of the same shape — `addon-live-message.json` is the worked
 example, and the fabricated ids in the corpus all follow one template so a real
 one left behind stands out — and change nothing else: the shape is the whole
 point.
+
+Credentials never reach the log: the three tokens in an HTTP event's
+`authorizationEventObject` (one is the sender's live OAuth access token), the
+legacy dialect's verification `token`, and the token in
+`configCompleteRedirectUri` are written as `REDACTED` with their keys left in
+place, and everything else keeps Chat's bytes apart from whitespace.
 
 The flag is off by default because payloads carry message text and sender
 identity. Do not leave it on in production.

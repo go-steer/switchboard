@@ -7,6 +7,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Fixed
+- `--googlechat-log-events` no longer writes credentials into the log. An
+  event on the HTTP ingress carries the sender's live OAuth access token and
+  two Google-signed ID tokens in `authorizationEventObject`, and the flag
+  logged the payload verbatim — so the debugging aid that exists to capture
+  fixtures put a bearer token for the person typing into whatever collects the
+  log. Those values, the legacy dialect's verification `token` and the
+  `configCompleteRedirectUri` token are now `REDACTED`, keys kept, the rest of
+  the payload byte-for-byte apart from whitespace, and a payload that does not parse is
+  redacted too.
 - The Google Chat **HTTP ingress decodes real events** again; in v0.5.0 it
   dropped every one. Chat's HTTP delivery spells every number as a float
   (`"offset": -3.6E6`, `"startIndex": 0.0`, `"commandId": 1.0`) and the
