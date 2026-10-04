@@ -136,15 +136,34 @@ func TestTablesToCode(t *testing.T) {
 
 // One long cell in an early column would be padded onto every row, turning a
 // couple of kilobytes into dozens of messages; such a table is left as written.
-func TestTablesToCodeLeavesAnOverWideTableAlone(t *testing.T) {
-	in := "| Note | N |\n|---|---|\n| " + strings.Repeat("x", maxTableColumn+1) + " | 1 |\n| a | 2 |"
+func TestTablesToCodeLeavesABalloonedTableAlone(t *testing.T) {
+	var b strings.Builder
+	b.WriteString("| Note | N |\n|---|---|\n| " + strings.Repeat("x", 1500) + " | 1 |\n")
+	for i := 0; i < 60; i++ {
+		b.WriteString("| a | 2 |\n")
+	}
+	in := b.String()
 	if got := TablesToCode(in); got != in {
-		t.Errorf("an over-wide table was converted:\n%s", got)
+		t.Errorf("a table that padding would multiply %dx was converted", len(got)/len(in))
 	}
 	// The last column is not padded, so a long one there is fine.
 	last := "| N | Note |\n|---|---|\n| 1 | " + strings.Repeat("x", 200) + " |"
 	if got := TablesToCode(last); !strings.HasPrefix(got, "```") {
 		t.Errorf("a long last column blocked conversion:\n%s", got)
+	}
+}
+
+// The table that stayed raw live under the old 48-rune column cap: a pod list
+// whose longest name is 56 characters. Laid out, it is about the size it was.
+func TestTablesToCodeLaysOutALongNamedPodList(t *testing.T) {
+	in := "| Pod Name | Ready | Status | Restarts | Age |\n" +
+		"| :--- | :---: | :---: | :---: | :---: |\n" +
+		"| anetd-* (4 pods) | 3/3 | Running | 0 | 4d – 20d |\n" +
+		"| antrea-controller-horizontal-autoscaler-55696dfcfd-bxmqc | 1/1 | Running | 0 | 4d16h |\n" +
+		"| event-exporter-gke-7884fb4bb-pvbb7 | 2/2 | Running | 0 | 4d16h |"
+	got := TablesToCode(in)
+	if !strings.HasPrefix(got, "```\nPod Name") || !strings.Contains(got, "antrea-controller-horizontal-autoscaler-55696dfcfd-bxmqc  1/1") {
+		t.Errorf("the live pod list was not laid out:\n%s", got)
 	}
 }
 

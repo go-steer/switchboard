@@ -22,13 +22,26 @@ import (
 	"unicode/utf8"
 )
 
-// maxTableColumn is the widest a column other than the last may be for a
-// table to be laid out. Every row is padded to its column's widest cell, so
-// one long cell in an early column multiplies across every row — a reply of a
-// couple of kilobytes measured at ninety, split over thirty messages. A table
-// like that is not tabular data anyone reads in columns, and is left as the
-// source it arrived as.
-const maxTableColumn = 48
+// A table is laid out only if that does not grow it past maxTableGrowth times
+// its source plus tableGrowthSlack bytes. Every row is padded to each column's
+// widest cell, so one long cell in an early column multiplies across every
+// row — a reply of a couple of kilobytes measured at ninety, split over thirty
+// messages. A table like that is not tabular data anyone reads in columns, and
+// is left as the source it arrived as. Measured on the output rather than as
+// a cap on column width, because a cap also refused ordinary tables: a pod
+// list whose longest name ran to 56 characters stayed raw (seen live).
+//
+// The budget is the reply's, not each table's: many small tables would
+// otherwise each take the slack and add up past it. maxTableAdded caps the
+// bytes laying out may add to one reply outright, so a large table under the
+// ratio still cannot turn ten messages into two dozen. Because the budget is
+// the reply's, a table declined for it could be laid out by a second pass over
+// the result; the adapters apply this once per reply, so that never arises.
+const (
+	maxTableGrowth   = 3
+	tableGrowthSlack = 512
+	maxTableAdded    = 16 << 10
+)
 
 // TablesToCode rewrites every GitHub-flavoured markdown table in md as a
 // fenced block of space-aligned columns, and leaves everything else as it was.
@@ -50,9 +63,9 @@ const maxTableColumn = 48
 // was not a table: the header and delimiter rows must both carry a pipe and
 // start at the margin (an indented table may be inside a list item or be
 // indented code, and a fence at the margin would break either), the body ends
-// at a blank line or at a line that starts another block, and a table with an
-// over-wide column is left alone (maxTableColumn). Tables inside an existing
-// fenced block are code already and are left alone.
+// at a blank line or at a line that starts another block, and a table that
+// laying out would balloon is left alone (maxTableGrowth). Tables inside an
+// existing fenced block are code already and are left alone.
 //
 // It never panics: a rendering bug returns md unchanged, because this runs on
 // every reply and a reply must never be lost to how it is laid out.
@@ -69,6 +82,7 @@ func TablesToCode(md string) (out string) {
 	res := make([]string, 0, len(lines))
 	var fence string // the open fence's marker, "" when outside one
 	changed := false
+	budget := min(maxTableGrowth*len(md)+tableGrowthSlack-len(md), maxTableAdded)
 	for i := 0; i < len(lines); i++ {
 		line := lines[i]
 		if fence != "" {
@@ -83,12 +97,18 @@ func TablesToCode(md string) (out string) {
 			res = append(res, line)
 			continue
 		}
-		if rows, align, next, ok := parseTable(lines, i); ok {
-			res = append(res, renderTable(rows, align)...)
-			changed = true
-			i = next - 1
-			continue
-		} else if next > 0 {
+		rows, align, next, ok := parseTable(lines, i)
+		if ok {
+			out := renderTable(rows, align)
+			if add := addedBytes(lines[i:next], out); add <= budget {
+				budget -= add
+				res = append(res, out...)
+				changed = true
+				i = next - 1
+				continue
+			}
+		}
+		if next > 0 {
 			// A table this declines to lay out is left whole, body included:
 			// scanning on from its second line would find a "table" made of
 			// its own rows.
@@ -119,9 +139,9 @@ var (
 )
 
 // parseTable reports whether a table starts at lines[i], and if so its rows,
-// (next is also set when a table matched but is declined, so the caller can
-// leave its whole span as written)
 // which columns are right-aligned, and the index of the first line after it.
+// next is also set when a table matched but is declined, so the caller can
+// leave its whole span as written.
 func parseTable(lines []string, i int) (rows [][]string, right []bool, next int, ok bool) {
 	if i+1 >= len(lines) || !tableRowCandidate(lines[i]) || !tableRowCandidate(lines[i+1]) {
 		return nil, nil, 0, false
@@ -147,14 +167,20 @@ func parseTable(lines []string, i int) (rows [][]string, right []bool, next int,
 			return nil, nil, next, false
 		}
 	}
-	for c := 0; c < len(right)-1; c++ {
-		for _, r := range rows {
-			if c < len(r) && utf8.RuneCountInString(r[c]) > maxTableColumn {
-				return nil, nil, next, false
-			}
-		}
-	}
 	return rows, right, next, true
+}
+
+// addedBytes is how many bytes laying a table out adds to the reply (negative
+// when it shrinks).
+func addedBytes(src, out []string) int {
+	n, m := 0, 0
+	for _, l := range src {
+		n += len(l) + 1
+	}
+	for _, l := range out {
+		m += len(l) + 1
+	}
+	return m - n
 }
 
 // tableRowCandidate is a line that may be a header or delimiter row: it has a
