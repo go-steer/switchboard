@@ -37,6 +37,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -695,4 +696,28 @@ func compactJSON(data []byte) string {
 		return string(data)
 	}
 	return buf.String()
+}
+
+// credentialField matches the string value of every credential a Chat event
+// can carry: the three tokens in an add-on's authorizationEventObject — a live
+// OAuth access token for the sender among them — and the legacy dialect's
+// top-level verification token. The value pattern is a whole JSON string,
+// escapes included, so a quote escaped inside one cannot end the match early.
+var credentialField = regexp.MustCompile(`("(?:userOAuthToken|userIdToken|systemIdToken|token)"\s*:\s*)"(?:[^"\\]|\\.)*"`)
+
+// configCompleteToken matches the token query parameter in the add-on's
+// configCompleteRedirectUri and the legacy configCompleteRedirectUrl, in any
+// position, with its = written plainly or JSON-escaped as a backslash-u003d sequence.
+var configCompleteToken = regexp.MustCompile(`("configCompleteRedirectUr[il]"\s*:\s*"[^"]*?[?&]token(?:=|\\u003d))[^"&\\]*`)
+
+// redactCredentials blanks every credential in a payload bound for the event
+// log, leaving each key in place with "REDACTED" for its value. It works on
+// the text rather than through a decode, so the rest of the payload keeps the
+// bytes Chat sent, apart from the whitespace compactJSON already strips —
+// number spelling included, which is what makes a
+// logged event usable as a fixture — and so a payload that is not valid JSON,
+// which is logged verbatim, is redacted too.
+func redactCredentials(s string) string {
+	s = credentialField.ReplaceAllString(s, `$1"REDACTED"`)
+	return configCompleteToken.ReplaceAllString(s, `${1}REDACTED`)
 }
