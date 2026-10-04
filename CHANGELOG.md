@@ -29,7 +29,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (so `__init__.py` and `2**10` survive), and a link becomes `label (url)`.
   The match is deliberately narrower than GFM, so prose is never rewritten.
   Indented tables, list items, a pipe over a setext underline, and a table
-  whose early column is over 48 characters are left as written. Text with no
+  that padding would grow past three times its size (one very long cell in an
+  early column, whose width pads every row) are left as written, with at most
+  16 KB added to any one reply. Text with no
   table is unchanged, and a table already inside a code block is left alone.
   The converter is `chat.TablesToCode`, in the shared package, so Slack can
   adopt it too.
