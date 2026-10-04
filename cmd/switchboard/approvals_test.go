@@ -59,10 +59,15 @@ type permsDaemon struct {
 	// respondDelay holds every answer this long before replying — the turn
 	// mast runs before it answers a park (#84).
 	respondDelay time.Duration
+	// streamACL, when set, answers /perms/stream the way core-agent does under
+	// ACL enforcement: 404 "session not found" to any asserted caller but this
+	// one, indistinguishable from a session that does not exist.
+	streamACL string
 
-	mu        sync.Mutex
-	streams   int
-	responded []permsPost
+	mu            sync.Mutex
+	streams       int
+	streamCallers []string
+	responded     []permsPost
 }
 
 // permsPost is one recorded call to /perms/respond.
@@ -100,7 +105,12 @@ func newPermsDaemon(t *testing.T, prompts ...string) *permsDaemon {
 	mux.HandleFunc("GET /sessions/{app}/{sid}/perms/stream", func(w http.ResponseWriter, r *http.Request) {
 		d.mu.Lock()
 		d.streams++
+		caller := r.Header.Get("X-Asserted-Caller")
+		d.streamCallers = append(d.streamCallers, caller)
 		status, prompts, cut := d.streamStatus, d.prompts, d.cutAfterPrompts
+		if d.streamACL != "" && caller != d.streamACL {
+			status = http.StatusNotFound
+		}
 		d.mu.Unlock()
 		if status != 0 {
 			w.WriteHeader(status)
@@ -394,6 +404,39 @@ func TestARealTurnSubscribesOffTheCapabilitiesFrame(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("a session offering prompts was never subscribed to")
+	}
+}
+
+// The prompt stream is read as the identity the relay reads events as — the
+// caller who opened the session. Under core-agent's ACL enforcement the relay's
+// own credential may not read someone else's session, and the daemon says so
+// with the 404 a missing session gets, which the watcher takes as permanent:
+// subscribed as nobody, it gave up on the first try and no question ever
+// reached the thread, while the turn sat parked at the daemon. Found live on
+// Google Chat (v0.5.0 button check).
+func TestThePromptStreamIsReadAsTheSessionOwner(t *testing.T) {
+	d := newPermsDaemon(t, bashPrompt)
+	d.caps = `{"protocol_version":"1","server":"core-agent","features":{"perms_stream":true}}`
+	d.streamACL = "alice@example.com"
+	r, fake, logs := permsRouter(t, d)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := r.Handle(ctx, chat.Message{Conversation: "C0:100.1", Caller: "alice@example.com", Text: "hi"}); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+
+	select {
+	case reply := <-fake.replies:
+		if reply.Kind != chat.KindDecision {
+			t.Fatalf("first reply is %q, want the permission question", reply.Kind)
+		}
+	case <-time.After(2 * time.Second):
+		d.mu.Lock()
+		callers := append([]string(nil), d.streamCallers...)
+		d.mu.Unlock()
+		t.Fatalf("no question reached the thread; prompt stream read as %q; log:\n%s",
+			callers, strings.Join(logs(), "\n"))
 	}
 }
 

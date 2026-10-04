@@ -104,7 +104,12 @@ func (r *Router) watchPerms(ctx context.Context, conv string, e *sessionEntry) {
 		// — where the next permission question waits that long before anyone
 		// sees it. The event relay resets on the same reasoning.
 		delivered := false
-		err := r.approvals.Stream(ctx, e.sess, "", func(p approval.Prompt) error {
+		// Read as the identity the relay subscribes as (sessionEntry.owner):
+		// under ACL enforcement the relay's own credential may not read another
+		// caller's session, and core-agent answers that with the 404 a missing
+		// session gets — which the case below takes as permanent. Empty for an
+		// adopted session, exactly as the relay's is.
+		err := r.approvals.Stream(ctx, e.sess, e.owner, func(p approval.Prompt) error {
 			delivered = true
 			r.postPrompt(ctx, conv, e, p)
 			return nil
