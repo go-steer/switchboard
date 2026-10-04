@@ -407,7 +407,7 @@ func TestATurnLeftOpenWithNoTickerIsStillGivenUp(t *testing.T) {
 		return true // and then the turn simply never ends
 	})
 	fake := &fakeSender{replies: make(chan chat.Reply, 8)}
-	r := NewRouter(dc, fake, ProgressStream, nil, nil)
+	r := NewRouter(dc, fake, ProgressOff, nil, nil)
 	r.minBackoff, r.maxBackoff = 5*time.Millisecond, 10*time.Millisecond
 	r.streamGrace = time.Hour
 	r.tickInterval = 0
@@ -420,7 +420,7 @@ func TestATurnLeftOpenWithNoTickerIsStillGivenUp(t *testing.T) {
 		t.Fatalf("Handle: %v", err)
 	}
 	if got := recvReply(t, fake.replies).Text; got != "let me check the logs…" {
-		t.Fatalf("first post = %q, want the narration; stream mode posts no placeholder", got)
+		t.Fatalf("first post = %q, want the narration; off mode posts no placeholder", got)
 	}
 	e := entryFor(t, r)
 	if !e.turnInFlight() {

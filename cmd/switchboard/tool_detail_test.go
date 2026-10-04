@@ -232,7 +232,7 @@ func TestResolveToolMatchesOnCallID(t *testing.T) {
 		{ID: "a", Name: "bash", Arg: "make test"},
 		{ID: "b", Name: "bash", Arg: "make lint"},
 	}
-	e.noteToolCalls(chat.MessageRef{ID: "ts1"}, calls, 0, true)
+	e.noteToolCalls(chat.MessageRef{ID: "ts1"}, calls, 0, true, time.Now())
 
 	ref, text, ok := fileResult(e, daemon.ToolResult{ID: "b", Name: "bash", Failed: true, Detail: "exit 1"})
 	if !ok {
@@ -254,7 +254,7 @@ func TestResolveToolMatchesOnCallID(t *testing.T) {
 // re-edit the notice — the content is identical and the edit is an API call.
 func TestResolveToolIgnoresADuplicateResult(t *testing.T) {
 	e := &sessionEntry{}
-	e.noteToolCalls(chat.MessageRef{ID: "ts1"}, []daemon.ToolCall{{ID: "a", Name: "bash", Arg: "make test"}}, 0, true)
+	e.noteToolCalls(chat.MessageRef{ID: "ts1"}, []daemon.ToolCall{{ID: "a", Name: "bash", Arg: "make test"}}, 0, true, time.Now())
 
 	if _, _, ok := fileResult(e, daemon.ToolResult{ID: "a", Name: "bash"}); !ok {
 		t.Fatal("the first result found no notice")
@@ -272,7 +272,7 @@ func TestResolveToolIgnoresADuplicateResult(t *testing.T) {
 // against the wrong line, so every argument shown was another call's.
 func TestResolveToolFallsBackToTheOldestUnansweredCall(t *testing.T) {
 	e := &sessionEntry{}
-	e.noteToolCalls(chat.MessageRef{ID: "ts1"}, []daemon.ToolCall{call("bash", "one"), call("bash", "two")}, 0, true)
+	e.noteToolCalls(chat.MessageRef{ID: "ts1"}, []daemon.ToolCall{call("bash", "one"), call("bash", "two")}, 0, true, time.Now())
 
 	if _, text, ok := fileResult(e, daemon.ToolResult{Name: "bash"}); !ok {
 		t.Fatal("the first result found no notice")
@@ -300,7 +300,7 @@ func TestResolveToolIgnoresWhatItIsNotWaitingFor(t *testing.T) {
 	if _, _, ok := fileResult(e, daemon.ToolResult{ID: "x", Name: "bash"}); ok {
 		t.Fatal("a result matched against a session with no notices")
 	}
-	e.noteToolCalls(chat.MessageRef{ID: "ts1"}, []daemon.ToolCall{{ID: "a", Name: "bash"}}, 0, true)
+	e.noteToolCalls(chat.MessageRef{ID: "ts1"}, []daemon.ToolCall{{ID: "a", Name: "bash"}}, 0, true, time.Now())
 	if _, _, ok := fileResult(e, daemon.ToolResult{Name: "read"}); ok {
 		t.Fatal("a result matched a notice that announced a different tool")
 	}
@@ -314,8 +314,8 @@ func TestResolveToolIgnoresWhatItIsNotWaitingFor(t *testing.T) {
 // must still find its line.
 func TestResolveToolSearchesOlderNotices(t *testing.T) {
 	e := &sessionEntry{}
-	e.noteToolCalls(chat.MessageRef{ID: "ts1"}, []daemon.ToolCall{{ID: "slow", Name: "bash", Arg: "sleep 30"}}, 0, true)
-	e.noteToolCalls(chat.MessageRef{ID: "ts2"}, []daemon.ToolCall{{ID: "fast", Name: "bash", Arg: "echo hi"}}, 0, true)
+	e.noteToolCalls(chat.MessageRef{ID: "ts1"}, []daemon.ToolCall{{ID: "slow", Name: "bash", Arg: "sleep 30"}}, 0, true, time.Now())
+	e.noteToolCalls(chat.MessageRef{ID: "ts2"}, []daemon.ToolCall{{ID: "fast", Name: "bash", Arg: "echo hi"}}, 0, true, time.Now())
 
 	if ref, _, ok := fileResult(e, daemon.ToolResult{ID: "fast", Name: "bash"}); !ok || ref.ID != "ts2" {
 		t.Fatalf("newest result edited %q (ok=%v), want ts2", ref.ID, ok)
@@ -333,7 +333,7 @@ func TestNoticeMemoryIsBounded(t *testing.T) {
 	e := &sessionEntry{}
 	for i := range noticeMemory + extra {
 		ref := chat.MessageRef{ID: fmt.Sprintf("ts%d", i)}
-		e.noteToolCalls(ref, []daemon.ToolCall{{ID: fmt.Sprintf("c%d", i), Name: "bash"}}, 0, true)
+		e.noteToolCalls(ref, []daemon.ToolCall{{ID: fmt.Sprintf("c%d", i), Name: "bash"}}, 0, true, time.Now())
 	}
 	e.amu.Lock()
 	n, oldest, newest := len(e.notices), e.notices[0].ref.ID, e.notices[len(e.notices)-1].ref.ID
@@ -373,7 +373,7 @@ func TestNoticeMemoryIsBounded(t *testing.T) {
 // case: a notice cannot land midway through the transition and slip past both.
 func TestTheTurnTransitionDropsThePreviousTurnsNotices(t *testing.T) {
 	note := func(e *sessionEntry, turn int64) {
-		e.noteToolCalls(chat.MessageRef{ID: "ts1"}, []daemon.ToolCall{{ID: "a", Name: "bash"}}, turn, true)
+		e.noteToolCalls(chat.MessageRef{ID: "ts1"}, []daemon.ToolCall{{ID: "a", Name: "bash"}}, turn, true, time.Now())
 	}
 	for _, tc := range []struct {
 		name string
@@ -404,8 +404,8 @@ func TestTheTurnTransitionDropsThePreviousTurnsNotices(t *testing.T) {
 // searching the notices newest-first did.
 func TestResolveToolSearchesNoticesOldestFirstOnAName(t *testing.T) {
 	e := &sessionEntry{}
-	e.noteToolCalls(chat.MessageRef{ID: "ts1"}, []daemon.ToolCall{call("bash", "first")}, 0, true)
-	e.noteToolCalls(chat.MessageRef{ID: "ts2"}, []daemon.ToolCall{call("bash", "second")}, 0, true)
+	e.noteToolCalls(chat.MessageRef{ID: "ts1"}, []daemon.ToolCall{call("bash", "first")}, 0, true, time.Now())
+	e.noteToolCalls(chat.MessageRef{ID: "ts2"}, []daemon.ToolCall{call("bash", "second")}, 0, true, time.Now())
 
 	if ref, text, ok := fileResult(e, daemon.ToolResult{Name: "bash"}); !ok || ref.ID != "ts1" {
 		t.Fatalf("the first result edited %q (ok=%v), want ts1\n%s", ref.ID, ok, text)
@@ -424,7 +424,7 @@ func TestApplyToolResultsCoalescesAFrame(t *testing.T) {
 	e.noteToolCalls(chat.MessageRef{ID: "ts1"}, []daemon.ToolCall{
 		{ID: "a", Name: "bash", Arg: "one"},
 		{ID: "b", Name: "bash", Arg: "two"},
-	}, 0, true)
+	}, 0, true, time.Now())
 
 	edits := e.applyToolResults([]daemon.ToolResult{
 		{ID: "a", Name: "bash"},
@@ -451,7 +451,7 @@ func TestApplyToolResultsFilesIdsBeforeGuessingByName(t *testing.T) {
 	e.noteToolCalls(chat.MessageRef{ID: "ts1"}, []daemon.ToolCall{
 		{ID: "a", Name: "bash", Arg: "one"},
 		{ID: "b", Name: "bash", Arg: "two"},
-	}, 0, true)
+	}, 0, true, time.Now())
 
 	// The id-less result arrives first, but "a" is spoken for.
 	edits := e.applyToolResults([]daemon.ToolResult{
@@ -476,8 +476,8 @@ func TestApplyToolResultsFilesIdsBeforeGuessingByName(t *testing.T) {
 // frames back. Where ids really are unique this changes nothing.
 func TestResolveToolPrefersTheNewestNoticeHoldingARepeatedID(t *testing.T) {
 	e := &sessionEntry{}
-	e.noteToolCalls(chat.MessageRef{ID: "ts1"}, []daemon.ToolCall{{ID: "0", Name: "bash", Arg: "first"}}, 0, true)
-	e.noteToolCalls(chat.MessageRef{ID: "ts2"}, []daemon.ToolCall{{ID: "0", Name: "bash", Arg: "second"}}, 0, true)
+	e.noteToolCalls(chat.MessageRef{ID: "ts1"}, []daemon.ToolCall{{ID: "0", Name: "bash", Arg: "first"}}, 0, true, time.Now())
+	e.noteToolCalls(chat.MessageRef{ID: "ts2"}, []daemon.ToolCall{{ID: "0", Name: "bash", Arg: "second"}}, 0, true, time.Now())
 
 	if ref, text, ok := fileResult(e, daemon.ToolResult{ID: "0", Name: "bash"}); !ok || ref.ID != "ts2" {
 		t.Fatalf("a repeated id resolved to %q (ok=%v), want ts2\n%s", ref.ID, ok, text)
@@ -496,7 +496,7 @@ func TestAFailedEditHealsOnTheNextResult(t *testing.T) {
 	e.noteToolCalls(chat.MessageRef{ID: "ts1"}, []daemon.ToolCall{
 		{ID: "a", Name: "bash", Arg: "one"},
 		{ID: "b", Name: "bash", Arg: "two"},
-	}, 0, true)
+	}, 0, true, time.Now())
 
 	// The edit for this one fails to reach the platform; nothing is un-filed.
 	if edits := e.applyToolResults([]daemon.ToolResult{{ID: "a", Name: "bash", Failed: true, Detail: "exit 2"}}); len(edits) != 1 {
@@ -522,7 +522,7 @@ func TestAFailedEditHealsOnTheNextResult(t *testing.T) {
 // single `if detail` at the registration site.
 func TestResolveToolRerendersInTheModeItWasPostedIn(t *testing.T) {
 	e := &sessionEntry{}
-	e.noteToolCalls(chat.MessageRef{ID: "ts1"}, []daemon.ToolCall{call("bash", "kubectl get secret x -o yaml")}, 0, false)
+	e.noteToolCalls(chat.MessageRef{ID: "ts1"}, []daemon.ToolCall{call("bash", "kubectl get secret x -o yaml")}, 0, false, time.Now())
 
 	_, text, ok := fileResult(e, daemon.ToolResult{Name: "bash"})
 	if !ok {
@@ -553,7 +553,8 @@ const (
 // fifteen calls would otherwise put thirty messages in the thread, and the
 // second fifteen carry one bit each.
 func TestStreamModeTicksResultsOffTheNoticeItPosted(t *testing.T) {
-	router, fake := newEventRouter(t, ProgressStream, nil, twoCallEvent, okResultEvent, failResultEvent, lateAnswerEvent)
+	release := make(chan struct{})
+	router, fake := newEventRouter(t, ProgressStream, release, twoCallEvent, okResultEvent, failResultEvent, lateAnswerEvent)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -561,6 +562,10 @@ func TestStreamModeTicksResultsOffTheNoticeItPosted(t *testing.T) {
 		t.Fatalf("Handle: %v", err)
 	}
 
+	if got := recvReply(t, fake.replies); got.Text != workingText {
+		t.Fatalf("first message = %q, want the clock placeholder", got.Text)
+	}
+	close(release)
 	notice := recvReply(t, fake.replies)
 	want := "🔧 Running 2 tools\n" +
 		"• 🔧 `bash` — `kubectl get pods -A`\n" +
@@ -579,8 +584,8 @@ func TestStreamModeTicksResultsOffTheNoticeItPosted(t *testing.T) {
 	waitFor(t, func() bool { return len(fake.updatedCalls()) == 2 }, "the results did not edit the notice twice")
 	edits := fake.updatedCalls()
 	last := edits[len(edits)-1]
-	if last.ref.ID != "ts1" {
-		t.Errorf("edited %q, want the notice ts1", last.ref.ID)
+	if last.ref.ID != "ts2" {
+		t.Errorf("edited %q, want the notice ts2 (ts1 is the clock placeholder)", last.ref.ID)
 	}
 	wantFinal := "❌ Ran 2 tools (1 failed)\n" +
 		"• ✅ `bash` — `kubectl get pods -A`\n" +
@@ -598,13 +603,16 @@ func TestStreamModeTicksResultsOffTheNoticeItPosted(t *testing.T) {
 // exists precisely for a stream that is not.
 func TestToolActivityNeverShadowsTheAnswer(t *testing.T) {
 	// answerEvent is seq 2, the same seq the tool result carries.
-	router, fake := newEventRouter(t, ProgressStream, nil, twoCallEvent, okResultEvent, answerEvent)
+	release := make(chan struct{})
+	router, fake := newEventRouter(t, ProgressStream, release, twoCallEvent, okResultEvent, answerEvent)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	if err := router.Handle(ctx, chat.Message{Conversation: "C0:1", Caller: "a@b.com", Text: "hi"}); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
+	recvReply(t, fake.replies) // the clock placeholder
+	close(release)
 	recvReply(t, fake.replies) // the notice
 	if got := recvReply(t, fake.replies); got.Text != "the answer" {
 		t.Fatalf("second message = %q, want the answer — a tool result shadowed it", got.Text)
@@ -627,6 +635,49 @@ func TestOffModeSurfacesNoToolActivityAtAll(t *testing.T) {
 	}
 	if n := len(fake.updatedCalls()); n != 0 {
 		t.Errorf("off mode edited %d message(s); want 0", n)
+	}
+}
+
+// A finished call in a stream notice says how long it ran, measured from when
+// its frame reached the gateway; one too quick to matter says nothing, and a
+// call still running has no number yet.
+func TestAStreamNoticeSaysHowLongEachCallTook(t *testing.T) {
+	e := &sessionEntry{}
+	e.noteToolCalls(chat.MessageRef{ID: "ts1"}, []daemon.ToolCall{
+		{ID: "slow", Name: "bash", Arg: "kubectl get pods -A"},
+		{ID: "fast", Name: "bash", Arg: "echo hi"},
+		{ID: "open", Name: "bash", Arg: "sleep 30"},
+	}, 0, true, time.Now().Add(-2300*time.Millisecond))
+	// "fast" is filed against a notice seen just now, so it took no time.
+	e.notices[0].seen = time.Now().Add(-2300 * time.Millisecond)
+	edits := e.applyToolResults([]daemon.ToolResult{{ID: "slow", Name: "bash"}})
+	e.notices[0].seen = time.Now()
+	edits = append(edits, e.applyToolResults([]daemon.ToolResult{{ID: "fast", Name: "bash"}})...)
+
+	got := edits[len(edits)-1].text
+	if !strings.Contains(got, "`kubectl get pods -A` · 2.") { // 2.3s, give or take a slow runner
+		t.Errorf("slow call carries no duration:\n%s", got)
+	}
+	if !strings.Contains(got, "`echo hi`\n") || strings.Contains(got, "`echo hi` ·") {
+		t.Errorf("an instant call printed a duration:\n%s", got)
+	}
+	if strings.Contains(got, "`sleep 30` ·") {
+		t.Errorf("a running call printed a duration:\n%s", got)
+	}
+}
+
+func TestFormatTook(t *testing.T) {
+	for d, want := range map[time.Duration]string{
+		400 * time.Millisecond:  "0.4s",
+		2340 * time.Millisecond: "2.3s",
+		45 * time.Second:        "45s",
+		150 * time.Second:       "2m30s",
+		9970 * time.Millisecond: "10s",
+		9940 * time.Millisecond: "9.9s",
+	} {
+		if got := formatTook(d); got != want {
+			t.Errorf("formatTook(%v) = %q, want %q", d, got, want)
+		}
 	}
 }
 

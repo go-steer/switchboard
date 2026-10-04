@@ -7,6 +7,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`progress stream` shows the turn's clock and how long each call took.**
+  Stream was the one mode that showed what the agent runs and the one mode
+  with no clock, so a long turn in it gave no sign of how long it had been
+  going. It now also posts the "⏳ Working… 45s" placeholder, ticking and
+  deleted when the answer lands, as in `indicator`. Each finished call on a
+  notice ends with its duration (`✅ Ran `bash` — `kubectl get pods -A` ·
+  2.3s`), measured at the gateway. Calls under 0.1s, and collapsed `×N`
+  lines, show none.
 - **Every Google Chat answer carries the `--show-usage` footer.** The footer
   rides a card, and an answer with no headings or rules does not get one, so
   plain answers (most of them) went out as text without the cost the

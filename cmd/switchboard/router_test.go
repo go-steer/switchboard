@@ -135,6 +135,12 @@ func (f *fakeSender) Update(_ context.Context, ref chat.MessageRef, r chat.Reply
 	return nil
 }
 
+func (f *fakeSender) deletedCalls() []chat.MessageRef {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]chat.MessageRef(nil), f.deleted...)
+}
+
 func (f *fakeSender) updatedCalls() []fakeUpdate {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -406,7 +412,14 @@ func newEventRouter(t *testing.T, mode ProgressMode, release <-chan struct{}, ev
 		f := w.(http.Flusher)
 		f.Flush()
 		if release != nil {
-			<-release
+			// Or the client going away: a test that fails before closing
+			// release must fail, not hang in httptest.Server.Close waiting on
+			// this handler.
+			select {
+			case <-release:
+			case <-r.Context().Done():
+				return
+			}
 		}
 		for _, ev := range events {
 			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", daemon.EventAgent, ev)
@@ -446,11 +459,12 @@ const (
 	answerEvent   = `{"seq":2,"event":{"Content":{"parts":[{"text":"the answer"}],"role":"model"},"Partial":false}}`
 )
 
-// TestRouterProgressStream verifies stream mode posts a standalone notice for a
-// tool call and then relays the completed turn — with no in-place edits and no
-// managed placeholder.
+// TestRouterProgressStream verifies stream mode posts the clock placeholder,
+// a standalone notice for a tool call, then the completed turn — and that the
+// placeholder is the part taken down, while the notice stays as the log.
 func TestRouterProgressStream(t *testing.T) {
-	router, fake := newEventRouter(t, ProgressStream, nil, toolCallEvent, answerEvent)
+	release := make(chan struct{})
+	router, fake := newEventRouter(t, ProgressStream, release, toolCallEvent, answerEvent)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -458,16 +472,18 @@ func TestRouterProgressStream(t *testing.T) {
 		t.Fatalf("Handle: %v", err)
 	}
 
+	if got := recvReply(t, fake.replies); got.Text != workingText || got.Kind != chat.KindProgress {
+		t.Fatalf("first reply = %q (%s), want the clock placeholder", got.Text, got.Kind)
+	}
+	close(release)
 	want := activityText([]daemon.ToolCall{{Name: "lookup"}}, nil, true)
 	if got := recvReply(t, fake.replies); got.Text != want {
-		t.Fatalf("first reply = %q, want tool notice %q", got.Text, want)
+		t.Fatalf("second reply = %q, want tool notice %q", got.Text, want)
 	}
 	if got := recvReply(t, fake.replies); got.Text != "the answer" {
-		t.Fatalf("second reply = %q, want the answer", got.Text)
+		t.Fatalf("third reply = %q, want the answer", got.Text)
 	}
-	if n := len(fake.updatedCalls()); n != 0 {
-		t.Errorf("stream mode edited %d message(s); want 0", n)
-	}
+	waitFor(t, func() bool { return len(fake.deletedCalls()) == 1 }, "the placeholder to be taken down")
 }
 
 // TestRouterProgressStatus verifies status mode keeps one message per turn: the
@@ -768,7 +784,8 @@ func TestProgressModesAreOneList(t *testing.T) {
 // command flips channel C0 to stream, so a tool call now surfaces a standalone
 // activity notice ahead of the answer.
 func TestRouterCommandOverridesTurnMode(t *testing.T) {
-	router, fake := newEventRouter(t, ProgressOff, nil, toolCallEvent, answerEvent)
+	release := make(chan struct{})
+	router, fake := newEventRouter(t, ProgressOff, release, toolCallEvent, answerEvent)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -782,10 +799,14 @@ func TestRouterCommandOverridesTurnMode(t *testing.T) {
 		t.Fatalf("Handle: %v", err)
 	}
 
+	if got := recvReply(t, fake.replies); got.Text != workingText {
+		t.Fatalf("first reply = %q, want the clock placeholder under the stream override", got.Text)
+	}
+	close(release)
 	if got := recvReply(t, fake.replies); got.Text != activityText([]daemon.ToolCall{{Name: "lookup"}}, nil, true) {
-		t.Fatalf("first reply = %q, want tool notice under the stream override", got.Text)
+		t.Fatalf("second reply = %q, want tool notice under the stream override", got.Text)
 	}
 	if got := recvReply(t, fake.replies); got.Text != "the answer" {
-		t.Fatalf("second reply = %q, want the answer", got.Text)
+		t.Fatalf("third reply = %q, want the answer", got.Text)
 	}
 }

@@ -108,7 +108,7 @@ could not check, and the worst case after a crash is one duplicate message.
 Only `chat:write` is unconditional. `--caller-id id` asserts the raw Slack user
 ID and never calls `users.info`, so both `users:read*` scopes drop away — at the
 cost of provisioning `U0123ABC` in the daemon instead of an address a human can
-guess. `--progress-mode off` or `stream` never edits or deletes, though
+guess. `--progress-mode off` never edits or deletes (every other mode does), though
 `chat:write` covers posting regardless. And an `--outbound-only` deployment
 (below) reaches none of the inbound path, which drops `connections:write`,
 `app_mentions:read` and `commands` as well.
@@ -186,7 +186,8 @@ In the order that shows what is there:
    retries as text, so a rich render can never cost you a reply.
 4. **Progress modes.** Default is `indicator`: a "⏳ Working…" placeholder that is
    deleted when the answer arrives. `--progress-mode status` edits one message in
-   place to name the running tool; `stream` posts a notice per tool; `off` shows
+   place to name the running tool; `stream` posts a notice per tool (with its
+   command and how long it took) under the same clock; `off` shows
    nothing. Ask for something slow enough to watch.
 5. **`@switchboard progress status`** — a mention command; the ack posts in the
    thread. Then **`/switchboard progress status`** if you configured the slash

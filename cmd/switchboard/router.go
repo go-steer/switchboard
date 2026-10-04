@@ -87,6 +87,13 @@ const (
 // text and from what a card offers.
 var progressModes = []ProgressMode{ProgressOff, ProgressIndicator, ProgressStatus, ProgressStream}
 
+// clocked reports whether a mode keeps a "⏳ Working…" placeholder with a
+// running clock for the turn. Every mode but off: stream used not to, which
+// left the one mode showing what the agent runs as the one that never said
+// how long it had been at it (reported from the live Chat rig). In stream the
+// clock is the indicator's alone; the tools are on their own notices.
+func (m ProgressMode) clocked() bool { return m != ProgressOff }
+
 // progressModeNames is progressModes as plain strings — the form both the
 // capability and the message text want.
 func progressModeNames() []string {
@@ -97,8 +104,8 @@ func progressModeNames() []string {
 	return names
 }
 
-// workingText is the initial progress message posted on wake under the
-// indicator and status modes while a turn is in flight. It is always a
+// workingText is the initial progress message posted on wake in
+// every mode but off while a turn is in flight. It is always a
 // transient message — retired when the reply is delivered — never the answer.
 const workingText = "⏳ Working…"
 
@@ -153,6 +160,10 @@ type toolGroup struct {
 	call daemon.ToolCall
 	res  *daemon.ToolResult
 	n    int
+	// took is how long the call ran, for a group of one that has finished;
+	// zero when unknown. A collapsed group shows none, since its calls each
+	// took their own time and no one number is the group's.
+	took time.Duration
 }
 
 // groupCalls collapses adjacent identical calls, where identical means the
@@ -160,22 +171,44 @@ type toolGroup struct {
 // verdict. Calls that differ in any of those stay separate lines — the point of
 // the argument summary is that three concurrent shells become three legible
 // lines rather than one count.
-func groupCalls(calls []daemon.ToolCall, res []*daemon.ToolResult) []toolGroup {
+func groupCalls(calls []daemon.ToolCall, res []*daemon.ToolResult, took []time.Duration) []toolGroup {
 	var groups []toolGroup
 	for i, c := range calls {
 		var r *daemon.ToolResult
 		if i < len(res) {
 			r = res[i]
 		}
+		var d time.Duration
+		if i < len(took) {
+			d = took[i]
+		}
 		if n := len(groups); n > 0 {
 			if prev := groups[n-1]; prev.call.Name == c.Name && prev.call.Arg == c.Arg && sameVerdict(prev.res, r) {
 				groups[n-1].n++
+				groups[n-1].took = 0
 				continue
 			}
 		}
-		groups = append(groups, toolGroup{call: c, res: r, n: 1})
+		groups = append(groups, toolGroup{call: c, res: r, n: 1, took: d})
 	}
 	return groups
+}
+
+// minShownTook is the shortest call duration worth printing. Below it the
+// number is noise to a reader — the call was instant, as far as anyone
+// watching is concerned — and it is mostly the gateway's own latency anyway.
+const minShownTook = 100 * time.Millisecond
+
+// formatTook renders a call's duration: tenths of a second under ten seconds,
+// where they still mean something, and the turn clock's own form above.
+func formatTook(d time.Duration) string {
+	// Rounded first, so 9.97s reads "10s" rather than a "10.0s" that the
+	// next tenth of a second would turn into "10s" anyway.
+	d = d.Round(100 * time.Millisecond)
+	if d < 10*time.Second {
+		return strconv.FormatFloat(d.Seconds(), 'f', 1, 64) + "s"
+	}
+	return formatElapsed(d)
 }
 
 // sameVerdict reports whether two results would render the same, treating "no
@@ -227,6 +260,9 @@ func toolLine(g toolGroup, detail, verb bool) string {
 		// would otherwise end the span and run on as the gateway's own text.
 		line += " — `" + inlineCode(g.call.Arg) + "`"
 	}
+	if g.res != nil && g.n == 1 && g.took >= minShownTook {
+		line += " · " + formatTook(g.took)
+	}
 	return line
 }
 
@@ -247,11 +283,17 @@ func toolLine(g toolGroup, detail, verb bool) string {
 // one message in place and wants a short line, and a reader who chose indicator
 // or status did not ask to see what the agent is running things with.
 func activityText(calls []daemon.ToolCall, res []*daemon.ToolResult, detail bool) string {
+	return timedActivityText(calls, res, nil, detail)
+}
+
+// timedActivityText is activityText with each finished call's duration, which
+// stream mode prints after the call ("· 2.3s"). took is parallel to calls.
+func timedActivityText(calls []daemon.ToolCall, res []*daemon.ToolResult, took []time.Duration, detail bool) string {
 	if !detail {
 		// The terse shape, unchanged but for the count: names, comma-joined,
 		// with runs of the same name collapsed rather than repeated.
 		var parts []string
-		for _, g := range groupCalls(stripArgs(calls), nil) {
+		for _, g := range groupCalls(stripArgs(calls), nil, nil) {
 			part := "`" + inlineCode(g.call.Name) + "`"
 			if g.n > 1 {
 				part += " ×" + strconv.Itoa(g.n)
@@ -260,7 +302,7 @@ func activityText(calls []daemon.ToolCall, res []*daemon.ToolResult, detail bool
 		}
 		return "🔧 Running " + strings.Join(parts, ", ")
 	}
-	groups := groupCalls(calls, res)
+	groups := groupCalls(calls, res, took)
 	if len(groups) == 1 {
 		return toolLine(groups[0], true, true)
 	}
@@ -552,7 +594,7 @@ type sessionEntry struct {
 	// answer delivered, or the relay giving up on a stream that stayed down.
 	// It is what tells a dropped stream apart from a dropped stream *with
 	// someone waiting on it*, and it is deliberately independent of the
-	// progress message, which only exists in two of the four progress modes.
+	// progress message, which off mode never posts.
 	//
 	// failed is the separate claim on *telling the thread the turn failed*.
 	// The two cannot be the same flag: an answer ends the turn, but a turn can
@@ -1223,6 +1265,12 @@ type activityNote struct {
 	calls  []daemon.ToolCall
 	res    []*daemon.ToolResult
 	detail bool
+	// seen is when the frame's calls reached the gateway, and took[i] how long
+	// call i ran to its result, measured from there. Gateway-side, so it is
+	// the call plus the stream's latency both ways — close enough to tell a
+	// slow command from a quick one, which is what it is for.
+	seen time.Time
+	took []time.Duration
 }
 
 // pending returns the index of the oldest still-unanswered call of this name,
@@ -1258,7 +1306,7 @@ const noticeMemory = 32
 // turn is the turn that was current when the notice was *sent*. A newer one
 // having started since means forgetActivity has already run and this note is
 // the previous turn's, so it is dropped rather than appended behind the clear.
-func (e *sessionEntry) noteToolCalls(ref chat.MessageRef, calls []daemon.ToolCall, turn int64, detail bool) {
+func (e *sessionEntry) noteToolCalls(ref chat.MessageRef, calls []daemon.ToolCall, turn int64, detail bool, seen time.Time) {
 	e.amu.Lock()
 	defer e.amu.Unlock()
 	if e.turnSeq.Load() != turn {
@@ -1269,6 +1317,8 @@ func (e *sessionEntry) noteToolCalls(ref chat.MessageRef, calls []daemon.ToolCal
 		calls:  slices.Clone(calls),
 		res:    make([]*daemon.ToolResult, len(calls)),
 		detail: detail,
+		seen:   seen,
+		took:   make([]time.Duration, len(calls)),
 	})
 	if n := len(e.notices) - noticeMemory; n > 0 {
 		e.notices = append([]*activityNote(nil), e.notices[n:]...)
@@ -1304,6 +1354,7 @@ func (e *sessionEntry) resolveTool(r daemon.ToolResult) (*activityNote, bool) {
 				if c.ID == r.ID && n.res[j] == nil {
 					res := r
 					n.res[j] = &res
+					n.took[j] = time.Since(n.seen)
 					return n, true
 				}
 			}
@@ -1316,6 +1367,7 @@ func (e *sessionEntry) resolveTool(r daemon.ToolResult) (*activityNote, bool) {
 		if at := n.pending(r.Name); at != -1 {
 			res := r
 			n.res[at] = &res
+			n.took[at] = time.Since(n.seen)
 			return n, true
 		}
 	}
@@ -1369,7 +1421,7 @@ func (e *sessionEntry) applyToolResults(results []daemon.ToolResult) []toolEdit 
 	// rendered once, in its final state.
 	for i := range edits {
 		n := edits[i].note
-		edits[i].text = activityText(n.calls, n.res, n.detail)
+		edits[i].text = timedActivityText(n.calls, n.res, n.took, n.detail)
 	}
 	return edits
 }
@@ -1588,7 +1640,7 @@ func (r *Router) Handle(ctx context.Context, msg chat.Message) (err error) {
 	// Post the progress message before injecting: inject starts the turn, so a
 	// fast reply would otherwise beat the placeholder into the thread and strand
 	// it there ("Working…" below the answer, with nothing left to clear it). A
-	// no-op in off and stream modes.
+	// no-op in off mode.
 	r.startProgress(ctx, entry, msg.Conversation)
 	// Someone is waiting from the moment the message is handed over, not from
 	// the moment the daemon acknowledges it: the relay is a separate goroutine
@@ -1874,14 +1926,13 @@ func (r *Router) noteCapabilities(ctx context.Context, conv string, e *sessionEn
 	}
 }
 
-// startProgress posts the initial progress message for a turn (indicator and
-// status modes), records it on the entry so relay can edit or clear it, and
-// starts the ticker that keeps its clock running. A no-op in off and stream
-// modes. A message still outstanding from a prior turn (a second turn started
+// startProgress posts the initial progress message for a turn (every mode but
+// off), records it on the entry so relay can edit or clear it, and starts the
+// ticker that keeps its clock running. A message still outstanding from a prior turn (a second turn started
 // before the first replied) is deleted so only the latest remains. Failures
 // are logged, never fatal — a missing progress message must not drop the turn.
 func (r *Router) startProgress(ctx context.Context, e *sessionEntry, conv string) {
-	if mode := r.progressFor(e.channel); mode != ProgressIndicator && mode != ProgressStatus {
+	if !r.progressFor(e.channel).clocked() {
 		return
 	}
 	// Time the turn from here rather than from the post that is about to
@@ -1936,7 +1987,7 @@ func (r *Router) tick(ctx context.Context, e *sessionEntry, conv string, start t
 		case <-deadline.C:
 			// The clock only. Whether the *turn* is still owed is not something
 			// the renderer gets to decide — that is the backstop's job, and it
-			// runs in every mode rather than only the two that have a ticker.
+			// runs in every mode rather than only those that have a ticker.
 			//
 			// The message stays, frozen at the age it reached. Deleting it
 			// would leave the thread showing the question and nothing else,
@@ -2002,8 +2053,8 @@ func (r *Router) retireSpokenPlaceholder(ctx context.Context, e *sessionEntry, c
 // strength of an absent turn-complete, and an absence is exactly the kind of
 // evidence that can turn out to be wrong — core-agent's cost-ceiling and
 // watchdog pre-flights emit no frame at all. It is armed here rather than
-// alongside the ticker because two of the four progress modes have no ticker,
-// and the turn is in flight in all four.
+// alongside the ticker because off mode has no ticker, and the turn is in
+// flight in every mode.
 //
 // The timer is held against the turn it was armed for, not against the entry:
 // a later turn that is legitimately running must not be ended by an hour-old
@@ -2167,8 +2218,8 @@ func (r *Router) deliverText(ctx context.Context, e *sessionEntry, conv, text st
 // shipped adapters implement Delete, so that is a note for the next one.
 func (r *Router) reanchorProgress(ctx context.Context, e *sessionEntry, conv string) {
 	mode := r.progressFor(e.channel)
-	if mode != ProgressIndicator && mode != ProgressStatus {
-		return // stream and off never posted one
+	if !mode.clocked() {
+		return // off never posted one
 	}
 	old, text, ok := e.tickRender(mode)
 	if !ok {
@@ -2217,6 +2268,7 @@ func (r *Router) postActivity(ctx context.Context, e *sessionEntry, conv string,
 	// running when it was posted, and Send is a network call the next turn can
 	// start underneath.
 	turn := e.turnSeq.Load()
+	seen := time.Now() // before the Send, which is the gateway's time and not the call's
 	ref, err := r.out.Send(ctx, chat.Reply{Conversation: conv, Text: activityText(calls, nil, detail), Kind: chat.KindActivity})
 	r.metrics.recordReply(err)
 	if err != nil {
@@ -2226,7 +2278,7 @@ func (r *Router) postActivity(ctx context.Context, e *sessionEntry, conv string,
 	if detail {
 		// Only stream mode's notices are worth remembering: they are the only
 		// ones that carry per-call state a result can tick off.
-		e.noteToolCalls(ref, calls, turn, detail)
+		e.noteToolCalls(ref, calls, turn, detail, seen)
 	}
 }
 

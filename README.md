@@ -313,12 +313,16 @@ the process default:
 |------|----------|
 | `indicator` (default) | posts a "⏳ Working…" placeholder with a running clock, deleted when the reply lands |
 | `status` | keeps one message per turn, edited in place with the clock and the running tool |
-| `stream` | posts a notice per tool frame — tool, argument, result — plus each completed turn |
+| `stream` | the `indicator` clock, plus a notice per tool frame — tool, argument, verdict, how long it took — that stays as a log |
 | `off` | silent until the reply is ready |
 
-In `indicator` and `status` the placeholder ticks: every 15 seconds it is
+In every mode but `off` the placeholder ticks: every 15 seconds it is
 re-rendered with how long the turn has been running, and in `status` with the
-tool it is on.
+tool it is on. In `stream` it carries the clock alone, since the tools are on
+their own notices, and like `indicator`'s it is deleted when the answer lands.
+It is posted when the turn starts, so in a busy `stream` turn it sits above the
+notices rather than following them down; moving it after every notice would
+cost two more API calls per tool frame.
 
 ```
 ⏳ Working… 45s
@@ -379,14 +383,19 @@ header, and the results tick those lines off by editing the notice in place
 rather than posting again.
 
 ```
-🔧 Running `bash` — kubectl get pods -A
-✅ Ran `bash` — kubectl get pods -A
+🔧 Running `bash` — `kubectl get pods -A`
+✅ Ran `bash` — `kubectl get pods -A` · 2.3s
 
 ❌ Ran 3 tools (1 failed)
-• ✅ `bash` — kubectl get pods -A
-• ❌ `bash` (exit 2) — kubectl get ns --context nope
-• ✅ `bash` — sleep 30
+• ✅ `bash` — `kubectl get pods -A` · 2.3s
+• ❌ `bash` (exit 2) — `kubectl get ns --context nope` · 0.8s
+• ✅ `bash` — `sleep 30` · 30s
 ```
+
+A finished call says how long it ran, measured at the gateway from when its
+call arrived to when its result did, so it includes the stream's latency both
+ways (and any reconnect in between). A call under a tenth of a second shows no number, and neither does a
+collapsed `×3` line, whose calls each took their own time.
 
 Calls that a reader could not tell apart — same tool, same argument, same
 verdict — collapse to `` `bash` ×3 `` rather than repeating the word.
