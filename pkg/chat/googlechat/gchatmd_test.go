@@ -80,7 +80,7 @@ func TestToCardHTML(t *testing.T) {
 			// argument list is full of angle brackets.
 			name: "angle brackets in code are escaped, not rendered as markup",
 			in:   "Set it with `progress <off|stream>`.",
-			want: "Set it with `progress &lt;off|stream&gt;`.",
+			want: "Set it with <tt>progress &lt;off|stream&gt;</tt>.",
 		},
 		{"bare angle brackets escaped", "a < b & c > d", "a &lt; b &amp; c &gt; d"},
 		{

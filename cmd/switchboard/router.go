@@ -130,7 +130,7 @@ const (
 func quotedTools(tools []string) string {
 	quoted := make([]string, len(tools))
 	for i, t := range tools {
-		quoted[i] = "`" + t + "`"
+		quoted[i] = "`" + inlineCode(t) + "`"
 	}
 	return strings.Join(quoted, ", ")
 }
@@ -213,7 +213,7 @@ func toolLine(g toolGroup, detail, verb bool) string {
 			line += " Ran"
 		}
 	}
-	line += " `" + g.call.Name + "`"
+	line += " `" + inlineCode(g.call.Name) + "`"
 	if g.n > 1 {
 		line += " ×" + strconv.Itoa(g.n)
 	}
@@ -221,7 +221,11 @@ func toolLine(g toolGroup, detail, verb bool) string {
 		line += " (" + g.res.Detail + ")"
 	}
 	if detail && g.call.Arg != "" {
-		line += " — " + g.call.Arg
+		// A code span, like the tool name: it is a command or a path, and it
+		// read as prose (reported from the live Chat rig). Through inlineCode,
+		// because it is agent-supplied and a backtick or a blank line in it
+		// would otherwise end the span and run on as the gateway's own text.
+		line += " — `" + inlineCode(g.call.Arg) + "`"
 	}
 	return line
 }
@@ -248,7 +252,7 @@ func activityText(calls []daemon.ToolCall, res []*daemon.ToolResult, detail bool
 		// with runs of the same name collapsed rather than repeated.
 		var parts []string
 		for _, g := range groupCalls(stripArgs(calls), nil) {
-			part := "`" + g.call.Name + "`"
+			part := "`" + inlineCode(g.call.Name) + "`"
 			if g.n > 1 {
 				part += " ×" + strconv.Itoa(g.n)
 			}
