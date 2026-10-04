@@ -1,0 +1,86 @@
+{
+  "commonEventObject": {
+    "userLocale": "en",
+    "hostApp": "CHAT",
+    "platform": "WEB",
+    "timeZone": {
+      "id": "Atlantic/Azores",
+      "offset": -3.6E6
+    }
+  },
+  "authorizationEventObject": {
+    "userOAuthToken": "REDACTED",
+    "userIdToken": "REDACTED",
+    "systemIdToken": "REDACTED",
+    "authorizedScopes": [
+      "https://www.googleapis.com/auth/userinfo.email",
+      "openid"
+    ]
+  },
+  "chat": {
+    "user": {
+      "name": "users/106508980999999999999",
+      "displayName": "Ada Lovelace",
+      "avatarUrl": "https://lh3.googleusercontent.com/a/REDACTED",
+      "email": "ada@example.com",
+      "type": "HUMAN",
+      "domainId": "REDACTED"
+    },
+    "eventTime": "2026-10-04T10:10:25.265007Z",
+    "messagePayload": {
+      "space": {
+        "name": "spaces/AAQAXbGkY1s",
+        "type": "DM",
+        "singleUserBotDm": true,
+        "spaceThreadingState": "THREADED_MESSAGES",
+        "spaceType": "DIRECT_MESSAGE",
+        "spaceHistoryState": "HISTORY_ON",
+        "lastActiveTime": "2026-10-04T10:10:25.265007Z",
+        "membershipCount": {
+          "joinedDirectHumanUserCount": 1.0
+        },
+        "spaceUri": "https://chat.google.com/dm/AAQAXbGkY1s?cls\u003d11"
+      },
+      "message": {
+        "name": "spaces/AAQAXbGkY1s/messages/Tz4nRb8cYh1.Tz4nRb8cYh1",
+        "sender": {
+          "name": "users/106508980999999999999",
+          "displayName": "Ada Lovelace",
+          "avatarUrl": "https://lh3.googleusercontent.com/a/REDACTED",
+          "email": "ada@example.com",
+          "type": "HUMAN",
+          "domainId": "REDACTED"
+        },
+        "createTime": "2026-10-04T10:10:25.265007Z",
+        "text": "use bash to run touch /tmp/sb-approval-test-2",
+        "thread": {
+          "name": "spaces/AAQAXbGkY1s/threads/Tz4nRb8cYh1",
+          "retentionSettings": {
+            "state": "PERMANENT"
+          }
+        },
+        "space": {
+          "name": "spaces/AAQAXbGkY1s",
+          "type": "DM",
+          "singleUserBotDm": true,
+          "spaceThreadingState": "THREADED_MESSAGES",
+          "spaceType": "DIRECT_MESSAGE",
+          "spaceHistoryState": "HISTORY_ON",
+          "lastActiveTime": "2026-10-04T10:10:25.265007Z",
+          "membershipCount": {
+            "joinedDirectHumanUserCount": 1.0
+          },
+          "spaceUri": "https://chat.google.com/dm/AAQAXbGkY1s?cls\u003d11"
+        },
+        "argumentText": "use bash to run touch /tmp/sb-approval-test-2",
+        "retentionSettings": {
+          "state": "PERMANENT"
+        },
+        "messageHistoryState": "HISTORY_ON",
+        "formattedText": "use bash to run `touch ``/tmp/sb-approval-test-2`",
+        "markupSyntax": "MARKUP_SYNTAX_CHAT"
+      },
+      "configCompleteRedirectUri": "https://chat.google.com/api/bot_config_complete?token\u003dREDACTED"
+    }
+  }
+}

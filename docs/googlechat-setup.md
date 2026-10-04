@@ -5,7 +5,7 @@ three levels of cost. Layers A and B need nothing but a checkout. Layer C needs
 a Google Workspace domain and a GCP project.
 
 Design rationale for the choices below is in [DESIGN.md](DESIGN.md) §3.3, and
-for the HTTP interaction endpoint that is not built yet, §3.4.
+for the HTTP interaction endpoint, §3.4.
 
 ## What each layer can and cannot prove
 
@@ -106,7 +106,9 @@ Scrub before committing. A real payload carries the sender's display name,
 email, avatar URL, and `domainId`; the Workspace `customer` id; the space id,
 its `displayName` and its `spaceUri`; the message and thread ids, which are
 derived from the same base64url id and appear in `message.name` and
-`thread.name`; and the client's `commonEventObject.timeZone`. Replace each value
+`thread.name`; the client's `commonEventObject.timeZone`; and, in a click, the
+endpoint's public URL in every card button's `onClick.action.function` (use
+`https://switchboard.example.com/chat`, the tests' audience). Replace each value
 with something of the same shape — `addon-live-message.json` is the worked
 example, and the fabricated ids in the corpus all follow one template so a real
 one left behind stands out — and change nothing else: the shape is the whole
@@ -382,10 +384,15 @@ and the welcome and the `progress` ack offer the modes as a row. Each button
 sends its click to the endpoint's full URL, which the gateway takes from
 `--googlechat-endpoint-url` or learns from the first verified event.
 
-The first deployment should capture a real click with `--googlechat-log-events`
-and add it to `testdata/events`: the click fixtures are hand-written, and the
-response shape a click is answered with (`updateMessageAction`) is measured on
-a sibling add-on rather than on this one.
+Clicks have been captured live on this app (2026-10-04, through a tunnel): a
+`progress` mode button and an approval's **Allow once** both arrived as add-on
+`buttonClickedPayload` events, and both cards were edited in place by the
+click's `updateMessageAction` response. The captures are
+`addon-live-http-*-click.json` in `testdata/events`, run through the real
+handler by `http_live_test.go`. The same session found three bugs no
+hand-written fixture could — HTTP events spell every number as a float, the
+event log carried live tokens, and the prompt stream was refused under ACL
+enforcement — so a new deployment shape is still worth one captured session.
 
 It costs the property the paragraph above is about. Chat has to reach the
 process, so a laptop behind NAT no longer works without a tunnel, and the URL is

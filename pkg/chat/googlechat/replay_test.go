@@ -69,6 +69,7 @@ type replayResult struct {
 	Kind     string        `json:"kind"`
 	Turns    []replayTurn  `json:"turns,omitempty"`
 	Commands []replayCmd   `json:"commands,omitempty"`
+	Presses  []replayPress `json:"presses,omitempty"`
 	Posts    []replayWrite `json:"posts,omitempty"`
 	Patches  []replayWrite `json:"patches,omitempty"`
 }
@@ -85,6 +86,17 @@ type replayCmd struct {
 	Args    []string `json:"args,omitempty"`
 	Channel string   `json:"channel"`
 	Caller  string   `json:"caller"`
+}
+
+// replayPress is a decision button's click as it reached the router. Without
+// it a routed press replayed as "ignored", indistinguishable from a click the
+// decoder dropped.
+type replayPress struct {
+	Conversation string `json:"conversation"`
+	Caller       string `json:"caller"`
+	DecisionID   string `json:"decisionId"`
+	Option       string `json:"option"`
+	Message      string `json:"message"`
 }
 
 type replayWrite struct {
@@ -179,6 +191,13 @@ func replay(t *testing.T, payload []byte) replayResult {
 		out.Kind = "command"
 		out.Commands = append(out.Commands, replayCmd{
 			Name: c.Name, Args: c.Args, Channel: c.Channel, Caller: c.Caller,
+		})
+	}
+	for _, p := range h.presses {
+		out.Kind = "press"
+		out.Presses = append(out.Presses, replayPress{
+			Conversation: p.Conversation, Caller: p.Caller,
+			DecisionID: p.DecisionID, Option: p.Option, Message: p.Message.ID,
 		})
 	}
 	for _, c := range m.creates {

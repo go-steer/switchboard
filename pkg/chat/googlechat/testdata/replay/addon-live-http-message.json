@@ -1,0 +1,11 @@
+{
+  "kind": "message",
+  "turns": [
+    {
+      "conversation": "spaces/AAQAXbGkY1s:spaces/AAQAXbGkY1s/threads/Tz4nRb8cYh1",
+      "channel": "spaces/AAQAXbGkY1s",
+      "caller": "ada@example.com",
+      "text": "use bash to run touch /tmp/sb-approval-test-2"
+    }
+  ]
+}

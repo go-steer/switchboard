@@ -1,0 +1,12 @@
+{
+  "kind": "press",
+  "presses": [
+    {
+      "conversation": "spaces/AAQAXbGkY1s:spaces/AAQAXbGkY1s/threads/Wq6jDs3fNk5",
+      "caller": "ada@example.com",
+      "decisionId": "core-agent/01a10664-b664-734b-b1f6-b823bd8f020a#60f01814ec2e051934b43233",
+      "option": "allow-once",
+      "message": "spaces/AAQAXbGkY1s/messages/Wq6jDs3fNk5.Wq6jDs3fNk5"
+    }
+  ]
+}
