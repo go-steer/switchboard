@@ -6,6 +6,42 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [v0.5.1] — 2026-10-04
+
+A fix release for the Google Chat buttons v0.5.0 introduced. The HTTP ingress
+they depend on cannot receive an event in v0.5.0: the first event of the first
+live session failed to decode, and since Chat's HTTP delivery writes every
+number as a float, no event can. This release fixes that and two more defects
+found in the same session. Every HTTP fixture had been hand-written, and the
+test daemon enforced no session ACL, so none of the three could show up in CI.
+
+**Upgrade if you run `--googlechat-ingress http`.** Chat's HTTP delivery
+writes every number as a float, and v0.5.0's decoder rejected the whole event
+on the first one. Numbers are now normalized before decoding. Pub/Sub traffic
+is untouched.
+
+**Upgrade if you run `--approvals` against a daemon that enforces session
+ACLs**, on either platform. The prompt stream was read without an asserted
+caller, the daemon answered with its disguised 404, and switchboard stopped
+watching for prompts after the first try. The turn then waited at the daemon
+with no question in the thread. A related case remains open (#106). A press
+from an approver who is not the session's owner gets the same disguised 404,
+which is read as "answered elsewhere" while the turn stays parked.
+
+**Treat any log written with `--googlechat-log-events` as sensitive.** The flag
+logged each event verbatim:
+- An HTTP event carries the sender's live OAuth access token and two ID tokens.
+  These expire within the hour.
+- Events on either ingress can carry a `configCompleteRedirectUri` token.
+- A legacy-dialect event carries the app's verification `token`, a standing
+  credential.
+
+Credentials are now redacted before logging.
+
+The button flow itself is now verified live: a mode button and an approval
+both arrived as clicks, and each card was edited in place by the click's own
+response. Nothing else changes, and there are no new flags.
+
 ### Fixed
 - **Permission prompts reach the thread on a daemon that enforces session
   ACLs.** The prompt stream was opened with no asserted caller, as the relay's
