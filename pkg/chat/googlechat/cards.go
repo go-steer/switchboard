@@ -474,14 +474,26 @@ func decisionCard(text string, d *chat.Decision, actionURL string) *chatv1.Googl
 	if actionURL == "" {
 		return nil
 	}
+	if !d.Deciding() {
+		body := decisionBody(text)
+		if len(body) == 0 {
+			return nil
+		}
+		return widgetCard(body...)
+	}
+	// The buttons are the answers, so the prose list the text carries for
+	// platforms without them is dropped from the card — but only when every
+	// answer became a button. One dropped (no value, past maxButtons), or no
+	// row at all, and the list is the only place left that names it.
+	row := decisionRow(d.ID, d.Options, actionURL)
+	if row != nil && len(row.ButtonList.Buttons) == len(d.Options) {
+		text = chat.DecisionBody(text, d)
+	}
 	body := decisionBody(text)
 	if len(body) == 0 {
 		return nil
 	}
-	if !d.Deciding() {
-		return widgetCard(body...)
-	}
-	return widgetCard(append(body, decisionRow(d.ID, d.Options, actionURL))...)
+	return widgetCard(append(body, row)...)
 }
 
 // decisionRow is a question's answers as a row of buttons. A Broad answer's

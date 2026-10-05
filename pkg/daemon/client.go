@@ -689,10 +689,20 @@ type agentFrame struct {
 			} `json:"parts"`
 			Role string `json:"role"`
 		} `json:"Content"`
-		Partial bool   `json:"Partial"`
-		Author  string `json:"Author"`
+		Partial        bool           `json:"Partial"`
+		Author         string         `json:"Author"`
+		CustomMetadata map[string]any `json:"CustomMetadata"`
 	} `json:"event"`
 }
+
+// compactionMetadataKey tags a history row core-agent wrote to compact the
+// conversation — a checkpoint after mark_task_done, or a summary — rather
+// than anything the model said in a turn (core-agent pkg/agent's
+// CompactionMetadataKey). Such a row is model-role text, and is written at
+// the start of the next turn, so relayed it read as the agent volunteering
+// "All requested tasks have been completed…" ahead of every follow-up
+// question (reported from the live rigs).
+const compactionMetadataKey = "compaction"
 
 // AgentReply is the assistant text carried by one EventAgent event.
 type AgentReply struct {
@@ -725,6 +735,11 @@ func AgentText(data string) (r AgentReply, ok bool) {
 	// role is "model" for assistant output and "user" for injected turns
 	// echoed back onto the stream; only the former is relayed.
 	if f.Event.Content.Role != "model" {
+		return AgentReply{Seq: f.Seq}, false
+	}
+	// History bookkeeping, not a reply: core-agent itself classifies these
+	// rows as meta, never conversation.
+	if _, compaction := f.Event.CustomMetadata[compactionMetadataKey]; compaction {
 		return AgentReply{Seq: f.Seq}, false
 	}
 	r.Partial = f.Event.Partial

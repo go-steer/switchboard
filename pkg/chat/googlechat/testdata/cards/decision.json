@@ -4,7 +4,7 @@
       "widgets": [
         {
           "textParagraph": {
-            "text": "**Permission needed** — `bash`\n\n```\nkubectl rollout restart deploy/api\n```\n\n• Deny\n• Allow once\n• Allow commands like this for the session",
+            "text": "**Permission needed** — `bash`\n\n```\nkubectl rollout restart deploy/api\n```",
             "textSyntax": "MARKDOWN"
           }
         },

@@ -6,6 +6,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **core-agent's checkpoint summaries no longer appear in the thread.** After
+  a turn that ends with `mark_task_done`, core-agent writes a checkpoint row
+  into the session history when the next message arrives. The row is
+  model-role text ("All requested tasks have been completed. Summary: …") and
+  switchboard relayed it like an answer, so every follow-up question in a
+  thread was preceded by it. Rows tagged `compaction` (a checkpoint or a
+  summary) are now skipped, the same rule core-agent applies to its own
+  history.
+- **A permission prompt with buttons no longer lists its answers as well.**
+  The prompt text carries the answers as a `•` list, so a platform without
+  buttons can still show them, and both adapters rendered that list above the
+  buttons too. Where the answers are buttons, the list is now left off. On
+  Google Chat without an action URL, and anywhere the buttons can't be posted,
+  the list is still there.
+
 ## [v0.6.0] — 2026-10-05
 
 A release about reading a turn in chat. Everything here came out of watching

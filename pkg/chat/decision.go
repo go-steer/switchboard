@@ -121,3 +121,24 @@ func DecisionText(d *Decision) string {
 	}
 	return b.String()
 }
+
+// DecisionReplyText is the Text a question is sent with: its body, then its
+// answers in prose (DecisionText), so a platform that renders no buttons still
+// carries a question a person can read and act on.
+func DecisionReplyText(body string, d *Decision) string {
+	if list := DecisionText(d); list != "" {
+		return body + "\n\n" + list
+	}
+	return body
+}
+
+// DecisionBody is the inverse, for an adapter that does render the answers as
+// buttons: the same answers listed again above them are noise (reported from
+// the live rigs), so it shows the body alone. Text not built by
+// DecisionReplyText comes back unchanged.
+func DecisionBody(text string, d *Decision) string {
+	if list := DecisionText(d); list != "" {
+		return strings.TrimSuffix(text, "\n\n"+list)
+	}
+	return text
+}
