@@ -63,6 +63,13 @@ func decisionBlocks(text string, d *chat.Decision, mrkdwnFn func(string) string)
 	blocks := []map[string]any{
 		{"type": "actions", "elements": elements},
 	}
+	// The buttons are the answers, so the prose list the text carries for
+	// platforms without them is dropped from the section above — but only
+	// when every answer became a button; otherwise the list is the only place
+	// that still names the ones left out.
+	if len(elements) == len(d.Options) {
+		text = chat.DecisionBody(text, d)
+	}
 	if body := strings.TrimSpace(mrkdwnFn(text)); body != "" {
 		blocks = append([]map[string]any{sectionBlock(body)}, blocks...)
 	}

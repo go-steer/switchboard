@@ -194,7 +194,7 @@ func (r *Router) postPrompt(ctx context.Context, conv string, e *sessionEntry, p
 	}
 	if _, err := r.out.Send(ctx, chat.Reply{
 		Conversation: conv,
-		Text:         body + "\n\n" + chat.DecisionText(d),
+		Text:         chat.DecisionReplyText(body, d),
 		Kind:         chat.KindDecision,
 		Decision:     d,
 	}); err != nil {
