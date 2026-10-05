@@ -588,6 +588,13 @@ func (a *Adapter) cardFor(r chat.Reply) *chatv1.GoogleAppsCardV1Card {
 		// which names the answers in prose, is the whole of the question.
 		return decisionCard(r.Text, r.Decision, a.actionURL())
 	}
+	if r.Kind == chat.KindActivity && strings.Contains(r.Text, "```") {
+		// A stream notice carrying its commands in code blocks. An icon line
+		// renders only the HTML subset, which has no block; a MARKDOWN
+		// paragraph renders the fence, and the verdict emoji leading it says
+		// what the icon would have.
+		return widgetCard(markdownWidgets(r.Text)...)
+	}
 	return gatewayCard(r.Kind, toChatText(r.Text))
 }
 

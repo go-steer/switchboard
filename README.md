@@ -378,27 +378,53 @@ footers can therefore land on the wrong answer (#42).
 
 `stream` is the mode that exists to show detail, so it shows the tool, one
 argument, and the verdict once the call finishes. One notice per *frame*, not
-per call: a frame carrying three concurrent shells is three lines under one
-header, and the results tick those lines off by editing the notice in place
+per call: a frame carrying three concurrent shells is three blocks under one
+header, and the results tick those blocks off by editing the notice in place
 rather than posting again.
 
-```
-🔧 Running `bash` — `kubectl get pods -A`
-✅ Ran `bash` — `kubectl get pods -A` · 2.3s
+Each call is a small block: the tool and its verdict, the argument in a code
+block, and how long it took on its own line. A notice for one call reads
+"🔧 Running **bash**" while it runs, and is edited when the result lands:
 
-❌ Ran 3 tools (1 failed)
-• ✅ `bash` — `kubectl get pods -A` · 2.3s
-• ❌ `bash` (exit 2) — `kubectl get ns --context nope` · 0.8s
-• ✅ `bash` — `sleep 30` · 30s
+````
+✅ Ran **bash**
 ```
+kubectl get pods -A
+```
+⏱ 2.3s
+````
+
+A frame of several calls gets a summary header, then one block per call:
+
+````
+❌ Ran 2 tools (1 failed)
+
+✅ **bash**
+```
+kubectl get pods -A
+```
+⏱ 2.3s
+
+❌ **bash** (exit 2)
+```
+kubectl get ns --context nope
+```
+⏱ 0.8s
+````
+
+On Google Chat the notice is a markdown paragraph, because the icon-line card
+used for other gateway messages can't render a code block. The leading ✅, ❌
+or 🔧 carries the verdict instead.
 
 A finished call says how long it ran, measured at the gateway from when its
 call arrived to when its result did, so it includes the stream's latency both
-ways (and any reconnect in between). A call under a tenth of a second shows no number, and neither does a
-collapsed `×3` line, whose calls each took their own time.
+ways (and any reconnect in between). A call under a tenth of a second shows no
+time, and neither does a collapsed `×3` call, whose calls each took their own
+time.
 
 Calls that a reader could not tell apart — same tool, same argument, same
-verdict — collapse to `` `bash` ×3 `` rather than repeating the word.
+verdict — collapse to **bash** ×3 rather than repeating the block
+(`` `bash` ×3 `` in `status`'s terse line).
 
 **The notices are permanent, by decision.** `indicator` and `status` clean up
 after themselves; `stream` accumulates, and the trail it leaves is the reason to
