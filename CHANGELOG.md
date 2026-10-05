@@ -6,6 +6,35 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [v0.6.0] — 2026-10-05
+
+A release about reading a turn in chat. Everything here came out of watching
+real turns go by on a live Google Chat rig: what the agent ran, how long it
+took, what it cost, and an answer that looks like its source and not like raw
+markdown.
+
+**Stream mode shows the turn as it happens.** `progress stream` now has the
+turn clock the other modes had. Each tool call is a small block: the verdict,
+the command in a code block, and how long it took on its own line.
+
+**Answers render properly on Google Chat.** Markdown tables arrive as aligned
+columns, not pipe source. Inline code renders monospace in the gateway's own
+cards. With `--show-usage`, every answer carries its cost footer, not only
+those that happened to need a card.
+
+**core-agent 2.10's new event order is handled.** 2.10 sends a turn's answer
+before the turn's end. That put the cost footer a turn late and made a
+placeholder flicker on every answer. Both orders now work.
+
+**Approvals on Google Chat match Slack.** A Broad answer (`allow-session*`,
+`allow-always`) takes a confirming second press. A permission prompt's command
+renders as code that the agent can't break out of. A press from someone
+other than the session's opener is no longer mistaken for an answered
+question.
+
+Upgrading needs no flag or config change. Stream-mode notices look different,
+so any tooling that scraped their old one-line text needs updating.
+
 ### Added
 - **`progress stream` shows the turn's clock and how long each call took.**
   Stream was the one mode that showed what the agent runs and the one mode
