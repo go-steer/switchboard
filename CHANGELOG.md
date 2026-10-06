@@ -7,6 +7,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Changed
+- **Stream notices for MCP tools show what the call acts on.** The argument
+  summary picked a command, path, query or URL, and otherwise fell back to the
+  alphabetically first field. A GKE call then read `TABLE` (its output format),
+  and `retrieve_raw` read `call_4216138` (an internal handle). Without one of
+  those fields, a call now shows up to four identifier facets (kind, name,
+  namespace, location) joined with `·`, such as
+  `pod · us-central1/std-simian-test`. Resource paths are shortened to their
+  last two ids. A facet is shown only if its value looks like a name, so a
+  manifest under `resource` is skipped, and each facet is redacted on its own.
+  Noise fields are never the fallback. The line stays redacted and within 120
+  bytes. "One argument per call" now reads "one argument, or up to four
+  identifier facets".
 - **Tool notices use heavy monochrome marks:** `▸` running, `✔` succeeded,
   `✖` failed, replacing 🔧/✅/❌, which read as clutter in a busy thread. ✔ and
   ✖ carry the text-style variation selector, so clients draw the glyph rather

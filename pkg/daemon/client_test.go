@@ -582,6 +582,65 @@ func TestSummariseArg(t *testing.T) {
 			want: "curl -H 'Authorization: Bearer <redacted>' https://x",
 		},
 		{
+			// The GKE MCP call that read as "TABLE" on the deployment: what it
+			// acts on, with the resource path shortened to its last id.
+			name: "a resource-oriented call shows what it acts on",
+			args: map[string]any{"outputFormat": "TABLE", "parent": "projects/gke-demos-345619/locations/us-central1/clusters/std-simian-test", "resourceType": "pod"},
+			want: "pod · us-central1/std-simian-test",
+		},
+		{
+			name: "identity facets read kind, name, namespace, location",
+			args: map[string]any{"cluster": "std-simian-test", "namespace": "switchboard", "name": "core-agent", "kind": "Deployment"},
+			want: "Deployment · core-agent · switchboard · std-simian-test",
+		},
+		{
+			name: "a location-only call shows its ids",
+			args: map[string]any{"parent": "projects/gke-demos-345619/locations/us-central1"},
+			want: "gke-demos-345619/us-central1",
+		},
+		{
+			// retrieve_raw's handle on an earlier result read as "call_4216138".
+			name: "noise is never the fallback",
+			args: map[string]any{"call_id": "call_4216138"},
+			want: "",
+		},
+		{
+			name: "a preferred key still wins over identity facets",
+			args: map[string]any{"command": "kubectl get pods", "namespace": "kube-system"},
+			want: "kubectl get pods",
+		},
+		{
+			name: "a path that is not a resource name is left whole",
+			args: map[string]any{"parent": "folders/123"},
+			want: "folders/123",
+		},
+		{
+			// A manifest under an identifying key is a body, not a name: it is
+			// skipped, not published (caught in review — the password below came
+			// out whole).
+			name: "a body under an identity key is never shown",
+			args: map[string]any{"namespace": "default", "resource": "apiVersion: v1\nkind: Secret\nmetadata:\n  name: db\nstringData:\n  DB_PASS: hunter2"},
+			want: "default",
+		},
+		{
+			name: "JSON under an identity key falls through to the group's next key",
+			args: map[string]any{"cluster": `{"name":"c","initialNodeCount":3}`, "location": "us-central1"},
+			want: "us-central1",
+		},
+		{
+			// Two clusters' node pools must not read the same and merge into ×2.
+			name: "a deep resource name keeps its last two ids",
+			args: map[string]any{"name": "projects/p/locations/l/clusters/c1/nodePools/default-pool"},
+			want: "c1/default-pool",
+		},
+		{
+			// Redacted per facet: a credential keyword in one facet cannot use
+			// the separator as its value and leave the next facet exposed.
+			name: "each facet is redacted on its own",
+			args: map[string]any{"kind": "Secret", "name": "ghp_aaaaaaaaaaaaaaaaaaaa"},
+			want: "Secret · <redacted>",
+		},
+		{
 			// The blast radius of one shown field: a token in a second argument is
 			// not disclosed because the second argument is never rendered.
 			name: "a secret in an argument that is not shown is never rendered",
