@@ -33,11 +33,9 @@ import (
 
 	"github.com/go-steer/switchboard/internal/logging"
 	"github.com/go-steer/switchboard/internal/version"
-	"github.com/go-steer/switchboard/pkg/approval"
 	"github.com/go-steer/switchboard/pkg/chat"
 	"github.com/go-steer/switchboard/pkg/chat/googlechat"
 	"github.com/go-steer/switchboard/pkg/chat/slack"
-	"github.com/go-steer/switchboard/pkg/daemon"
 )
 
 const prog = "switchboard"
@@ -392,6 +390,7 @@ func runServe(args []string) (err error) {
 		approvers: policy,
 		standing:  standing,
 	}
+	applyAgentSettings(&defaults, cfg.Defaults)
 	byChannel, err := channelsFrom(cfg, defaults, *platform, callerMode)
 	if err != nil {
 		return err
@@ -418,23 +417,29 @@ func runServe(args []string) (err error) {
 	// Only a bridged run talks to the daemon: the ingress posts straight through
 	// the adapter. So an outbound-only deployment is not asked for a bearer
 	// token it would never present.
-	var dc *daemon.Client
-	var ac *approval.Client
+	var agents *agentSet
 	if inbound {
-		token := os.Getenv(*tokenEnv)
-		if token == "" {
-			return fmt.Errorf("no daemon token in $%s (set --token-env to the right var)", *tokenEnv)
-		}
-		dcfg := daemon.Config{BaseURL: *daemonURL, BearerToken: token}
-		if dc, err = daemon.New(dcfg); err != nil {
+		if agents, err = agentsFrom(cfg, *daemonURL, *tokenEnv, wantApprovals); err != nil {
 			return err
 		}
-		// Same daemon, same credential, different routes — and built here
-		// rather than inside the router so that a run with approvals off
-		// everywhere holds no client for a surface it does not offer.
-		if wantApprovals {
-			if ac, err = approval.New(dcfg); err != nil {
+		if err := checkChannelAgents(agents, "defaults", defaults); err != nil {
+			return err
+		}
+		for _, id := range channelIDs(byChannel) {
+			if err := checkChannelAgents(agents, fmt.Sprintf("channels[%q]", id), byChannel[id]); err != nil {
 				return err
+			}
+		}
+		if !agents.implicit {
+			logf.Infof("agents: %d registered (%s), default %q", len(agents.order), strings.Join(agents.order, ", "), agents.def)
+			if cfg.DefaultAgent == nil {
+				// Conversations recorded by a gateway without an agents list
+				// name no agent and follow the default — which, unset, is just
+				// whichever agent is listed first.
+				logf.Warnf("agents: default_agent is not set, so %q (listed first) is the default; conversations recorded before the agents list existed go to it. Set default_agent to the daemon they were on.", agents.def)
+			}
+			if res.passed("daemon-url") || res.passed("token-env") || os.Getenv("SWITCHBOARD_DAEMON_URL") != "" || cfg.DaemonURL != nil || cfg.TokenEnv != nil {
+				logf.Warnf("agents: daemon_url and token_env are ignored when the config file has an agents list; each agent names its own")
 			}
 		}
 	}
@@ -574,8 +579,9 @@ func runServe(args []string) (err error) {
 	// run has none — and needs no daemon to point it at.
 	var router *Router
 	if inbound {
-		router = NewRouter(dc, adapter, progress, m, logf)
-		configureRouter(router, ac, defaults, byChannel)
+		router = NewRouter(nil, adapter, progress, m, logf)
+		router.setAgents(agents)
+		configureRouter(router, router.defaultApprovals(), defaults, byChannel)
 	}
 	// Opened before anything is dispatched, and a failure to open it stops the
 	// run: an operator who asked for an audit trail and got a gateway running

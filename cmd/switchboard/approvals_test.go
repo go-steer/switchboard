@@ -2037,7 +2037,7 @@ func TestAChannelCanTurnApprovalsOnWhereTheDefaultIsOff(t *testing.T) {
 	r, _, _ := permsRouter(t, d)
 	// The client stays — one connection to one daemon — and the default goes
 	// off, which is exactly what runServe builds for a file like this.
-	r.setApprovals(r.approvals, false)
+	r.setApprovals(r.defaultApprovals(), false)
 	r.setChannels(map[string]channelSettings{"C9": {approvals: true}})
 
 	// Nothing in the channel the file said nothing about.

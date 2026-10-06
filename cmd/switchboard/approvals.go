@@ -41,9 +41,22 @@ import (
 // one — it is an operator decision made once at startup, before the adapter
 // begins dispatching, and every test that does not care about permissions
 // should not have to name it.
+//
+// c is the default agent's client (#140); nil turns relaying off for it. The
+// other agents keep the clients their registry was built with.
 func (r *Router) setApprovals(c *approval.Client, on bool) {
-	r.approvals = c
+	if a, ok := r.agents.lookup(""); ok {
+		a.approvals = c
+	}
 	r.defaults.approvals = on
+}
+
+// defaultApprovals is the default agent's approval client, nil if it has none.
+func (r *Router) defaultApprovals() *approval.Client {
+	if a, ok := r.agents.lookup(""); ok {
+		return a.approvals
+	}
+	return nil
 }
 
 // setApprovers narrows who may answer a permission prompt in a channel the
@@ -76,13 +89,14 @@ func (r *Router) setStandingApprovers(p approverPolicy) { r.defaults.standing = 
 // pending, so a watcher that attaches after the gate has stopped a call still
 // receives it.
 func (r *Router) watchPermsIfOffered(ctx context.Context, conv string, e *sessionEntry, c daemon.Capabilities) {
-	if r.approvals == nil || !r.settingsFor(e.channel).approvals || !c.Offers(daemon.FeaturePermsStream) {
+	ac := r.approvalsOf(e)
+	if ac == nil || !r.settingsFor(e.channel).approvals || !c.Offers(daemon.FeaturePermsStream) {
 		return
 	}
 	if !e.claimPermsWatch() {
 		return
 	}
-	go r.watchPerms(ctx, conv, e)
+	go r.watchPerms(ctx, conv, e, ac)
 }
 
 // watchPerms holds the session's permission subscription and posts each
@@ -94,7 +108,7 @@ func (r *Router) watchPermsIfOffered(ctx context.Context, conv string, e *sessio
 // still pending, and drops what has been answered. What it does not know is
 // what has already been *posted*: an unanswered question is still pending, so
 // every reconnect redelivers it. postPrompt is what makes that idempotent.
-func (r *Router) watchPerms(ctx context.Context, conv string, e *sessionEntry) {
+func (r *Router) watchPerms(ctx context.Context, conv string, e *sessionEntry, ac *approval.Client) {
 	backoff := r.minBackoff
 	for ctx.Err() == nil {
 		// Whether this connection carried a prompt: its own evidence that it
@@ -110,7 +124,7 @@ func (r *Router) watchPerms(ctx context.Context, conv string, e *sessionEntry) {
 		// caller's session, and core-agent answers that with the 404 a missing
 		// session gets — which the case below takes as permanent. Empty for an
 		// adopted session, exactly as the relay's is.
-		err := r.approvals.Stream(ctx, e.sess, e.owner, func(p approval.Prompt) error {
+		err := ac.Stream(ctx, e.sess, e.owner, func(p approval.Prompt) error {
 			delivered = true
 			r.postPrompt(ctx, conv, e, p)
 			return nil
@@ -165,11 +179,35 @@ func decisionRef(sess daemon.Session, promptID string) string {
 	return sessionRef(sess) + "#" + promptID
 }
 
+// agentDecisionRef is decisionRef carrying the agent that asked (#140):
+// "agent@app/sid#prompt". The press is resolved through its conversation,
+// whose record names the agent, so this is a cross-check, not the routing —
+// a press whose agent disagrees with the conversation's is a stale button.
+func agentDecisionRef(agent string, sess daemon.Session, promptID string) string {
+	if agent == "" {
+		return decisionRef(sess, promptID)
+	}
+	return agent + "@" + decisionRef(sess, promptID)
+}
+
 // splitDecisionRef reverses decisionRef. Neither half of a session reference
-// can contain '#', so the first one separates them.
+// can contain '#', so the first one separates them. An agent prefix, if any,
+// is dropped here; splitAgentDecisionRef returns it.
 func splitDecisionRef(ref string) (sess, promptID string, ok bool) {
+	_, sess, promptID, ok = splitAgentDecisionRef(ref)
+	return sess, promptID, ok
+}
+
+// splitAgentDecisionRef reverses agentDecisionRef. An agent name cannot
+// contain '@' (agentNameRE) and a session reference does not, so an '@' before
+// the '#' is the agent's. agent is empty for a button posted before the
+// registry existed, which any agent's conversation may answer.
+func splitAgentDecisionRef(ref string) (agent, sess, promptID string, ok bool) {
 	sess, promptID, ok = strings.Cut(ref, "#")
-	return sess, promptID, ok && sess != "" && promptID != ""
+	if a, s, found := strings.Cut(sess, "@"); found {
+		agent, sess = a, s
+	}
+	return agent, sess, promptID, ok && sess != "" && promptID != ""
 }
 
 // postPrompt puts one pending permission prompt into the thread, once.
@@ -184,7 +222,7 @@ func (r *Router) postPrompt(ctx context.Context, conv string, e *sessionEntry, p
 		return
 	}
 	opts := approval.Options(p)
-	d := &chat.Decision{ID: decisionRef(e.sess, p.ID)}
+	d := &chat.Decision{ID: agentDecisionRef(e.agent, e.sess, p.ID)}
 	for _, o := range opts {
 		d.Options = append(d.Options, chat.DecisionOption{
 			Value: string(o.Decision),
@@ -659,7 +697,7 @@ func (r *Router) HandlePress(ctx context.Context, p chat.Press) error {
 	// is: a channel this gateway does not relay prompts into gets one answer, and
 	// it is not one that reveals whether a prompt exists.
 	settings := r.settingsFor(p.Channel)
-	if r.approvals == nil || !settings.approvals {
+	if !r.agents.anyApprovals() || !settings.approvals {
 		rec.Outcome = auditDisabled
 		return errors.New("permission prompts are not enabled on this gateway")
 	}
@@ -696,7 +734,7 @@ func (r *Router) HandlePress(ctx context.Context, p chat.Press) error {
 		rec.Outcome = auditNotStanding
 		return r.surfaceNotice(ctx, p.Conversation, notice)
 	}
-	sess, promptID, ok := splitDecisionRef(p.DecisionID)
+	pressAgent, sess, promptID, ok := splitAgentDecisionRef(p.DecisionID)
 	if !ok {
 		rec.Outcome = auditInvalid
 		return fmt.Errorf("press in %s names no prompt: %q", p.Conversation, p.DecisionID)
@@ -715,7 +753,7 @@ func (r *Router) HandlePress(ctx context.Context, p chat.Press) error {
 		rec.Outcome = auditStale
 		return r.surfaceNotice(ctx, p.Conversation, noticeStalePress)
 	}
-	if sess != sessionRef(e.sess) {
+	if sess != sessionRef(e.sess) || (pressAgent != "" && pressAgent != r.agents.stored(e.agent)) {
 		// The conversation is on a different session than the one that asked.
 		// A bound session the daemon lost is discarded and the next message in
 		// the thread opens a new one, which leaves the old question on screen
@@ -729,7 +767,14 @@ func (r *Router) HandlePress(ctx context.Context, p chat.Press) error {
 	kind := e.askKind(promptID)
 	rctx, cancel := r.respondContext(ctx, kind)
 	defer cancel()
-	ack, err := r.approvals.Respond(rctx, e.sess, p.Caller, promptID, d)
+	ac := r.approvalsOf(e)
+	if ac == nil {
+		// This conversation's agent relays no prompts, or is gone: there is
+		// nothing to answer through, and the buttons it has are stale.
+		rec.Outcome = auditStale
+		return r.surfaceNotice(ctx, p.Conversation, noticeStalePress)
+	}
+	ack, err := ac.Respond(rctx, e.sess, p.Caller, promptID, d)
 	if err != nil {
 		if errors.Is(err, approval.ErrNotFound) && mayBeRefused(e, p.Caller, promptID) {
 			// Not necessarily settled. Under core-agent's session ACL, answering
