@@ -16,6 +16,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   lists the one-time steps (static IP, DNS, IAM, secrets) and the cutover.
 
 ### Fixed
+- **A long structured answer on Google Chat gets its usage footer again.**
+  With core-agent 2.10 the footer is added by editing the answer once its
+  turn ends, and the edit was gated on the answer's *text* form fitting one
+  Chat message (4,096 bytes). A structured answer goes out as a single card,
+  which holds far more. So an answer that was never split, such as a pod table
+  whose aligned columns rendered 23 bytes past the text limit as a 4.7 KB
+  card, lost its footer. The check now follows how the answer was actually
+  sent.
+  - **Ingress timelines:** the same check governs when an ingress timeline
+    rolls over. Under rich cards, a structured timeline now grows in one card
+    (up to about 26 KB) before starting a new message, where it used to roll
+    over at 4 KB.
+  - **Rejected card edits:** an edit whose card Chat rejects no longer clamps
+    a text too long for one message into that message. The edit fails and the
+    message is left as it was.
 - **core-agent's checkpoint summaries no longer appear in the thread.** After
   a turn that ends with `mark_task_done`, core-agent writes a checkpoint row
   into the session history when the next message arrives. The row is

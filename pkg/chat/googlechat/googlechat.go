@@ -686,7 +686,9 @@ func (a *Adapter) Update(ctx context.Context, ref chat.MessageRef, r chat.Reply)
 // rewrite patches one message to the given card or text, falling back to text
 // when Chat rejects the card.
 func (a *Adapter) rewrite(ctx context.Context, name string, card *chatv1.GoogleAppsCardV1Card, text string) error {
-	text = clamp(strings.TrimSpace(text), chatTextLimit)
+	text = strings.TrimSpace(text)
+	whole := len(text) <= chatTextLimit
+	text = clamp(text, chatTextLimit)
 	// An edit to the card a click is waiting on goes back in the click's
 	// response instead (http.go). Taken whole, card or text: there is no
 	// rejection to fall back from in a response, so the card it carries has
@@ -705,6 +707,14 @@ func (a *Adapter) rewrite(ctx context.Context, name string, card *chatv1.GoogleA
 		}
 		if !isCardRejection(err) {
 			return fmt.Errorf("googlechat: update %s: %w", name, platformErr(err))
+		}
+		if !whole {
+			// The card held more than one text message can. Clamping it into
+			// one would overwrite the message with a cut-off copy — on an
+			// answer whose card was rejected at Send, the head of the text
+			// already split across the messages after it; on an ingress
+			// timeline, a silent truncation. Leave the message as it is.
+			return fmt.Errorf("googlechat: update %s: card rejected and the text does not fit one message: %w", name, platformErr(err))
 		}
 		a.logf.Warnf("googlechat: card rejected updating %s (%v); retrying as text", name, err)
 	}
@@ -732,7 +742,18 @@ func (a *Adapter) Delete(ctx context.Context, ref chat.MessageRef) error {
 // than being split across several by Send. It measures the rendered form,
 // because the markup translation can change the length. Implements
 // chat.TextFitter.
+//
+// It follows Send's own choice of form. A structured answer under
+// --googlechat-cards rich goes out as one card, which holds far more than a
+// text message (answerCard declines anything over maxCardBytes), so such an
+// answer fits even when its text form would be split. Measuring only the text
+// form skipped the usage footer's edit on answers that were never split — a
+// 33-row pod table renders 23 bytes past chatTextLimit as aligned columns, and
+// went out as a 4.7 KB card (reported from the GKE deployment).
 func (a *Adapter) FitsOneMessage(text string) bool {
+	if a.cards == CardsRich && answerCard(text) != nil {
+		return true
+	}
 	return len(toChatText(text)) <= chatTextLimit
 }
 
