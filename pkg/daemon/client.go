@@ -949,6 +949,32 @@ const argSummaryCap = 120
 // full of distinguishable lines.
 var preferredArgs = []string{"command", "cmd", "path", "file_path", "filename", "query", "url", "pattern"}
 
+// identityArgs are the fields that name what a call acts on, when it has no
+// preferred argument — the shape of resource-oriented MCP tools, which say
+// what kind of thing, which one, and where: {resourceType: pod, parent:
+// projects/…/clusters/std-simian-test}. One group per facet, in reading order;
+// the first scalar in each group is used, and the facets found are joined with
+// " · ". Identifiers only, never free text: a key name is no promise — some
+// servers put a whole manifest under "resource" or "cluster" — so a value is
+// used only if it looks like an identifier (identifierLike), and otherwise
+// the group's next key is tried.
+var identityArgs = [][]string{
+	{"resourceType", "resource_type", "kind", "resource", "type"},
+	{"name", "resourceName", "resource_name"},
+	{"namespace"},
+	{"parent", "cluster", "clusterName", "cluster_name", "location", "project", "projectId", "project_id"},
+}
+
+// noiseArgs never identify a call: how its output is shaped, which page of it,
+// or an internal handle on an earlier result (retrieve_raw's call_id). The
+// fallback skips them, so a call with nothing better shows no argument rather
+// than "TABLE" or "call_4216138" (reported from the GKE deployment).
+var noiseArgs = map[string]bool{
+	"outputFormat": true, "output_format": true, "format": true,
+	"pageToken": true, "page_token": true,
+	"call_id": true, "callId": true,
+}
+
 // summariseArg picks one argument out of a tool call and renders it as a
 // single clamped, redacted line. It returns "" when there is nothing scalar to
 // show.
@@ -960,8 +986,11 @@ var preferredArgs = []string{"command", "cmd", "path", "file_path", "filename", 
 // a file being written. Posting them into a shared channel is a disclosure
 // decision, and this is the whole of that decision:
 //
-//   - one argument, never the object. A tool called with a token in a
-//     second field does not leak it because the first field is what is shown.
+//   - one argument, never the object: the command, path, query or URL. A
+//     tool called with a token in a second field does not leak it because
+//     the first field is what is shown. A call with none of those shows up to
+//     four identity facets instead (identityArgs), each of which must look
+//     like a name, not a body, and is redacted on its own.
 //   - scalars only. Nested objects and arrays are skipped rather than
 //     serialised, so the size of what can be disclosed stays bounded by one
 //     field rather than by the call.
@@ -984,12 +1013,34 @@ func summariseArg(args map[string]any) string {
 			return safeArg(s)
 		}
 	}
-	// No preferred key: fall back to the first scalar by name. Sorted, because
-	// map order is random and a notice that renders a different argument on
-	// every reconnect replay is worse than one that renders none.
+	// No preferred key: what the call acts on, if its arguments say so. Each
+	// facet is redacted on its own, before the join: over the joined line the
+	// " · " separator can stand in for the value a credential pattern expects
+	// after its keyword, so a line could look redacted and not be.
+	var facets []string
+	for _, group := range identityArgs {
+		for _, key := range group {
+			// Judged once shortened: a resource name is long but well formed,
+			// and shortResourceName returns anything else unchanged.
+			if s, ok := scalar(args[key]); ok {
+				if short := shortResourceName(s); identifierLike(short) {
+					facets = append(facets, redact(short))
+					break
+				}
+			}
+		}
+	}
+	if len(facets) > 0 {
+		return clampArg(strings.Join(facets, " · "))
+	}
+	// Otherwise the first scalar by name that is not noise. Sorted, because map
+	// order is random and a notice that renders a different argument on every
+	// reconnect replay is worse than one that renders none.
 	keys := make([]string, 0, len(args))
 	for k := range args {
-		keys = append(keys, k)
+		if !noiseArgs[k] {
+			keys = append(keys, k)
+		}
 	}
 	slices.Sort(keys)
 	for _, k := range keys {
@@ -998,6 +1049,47 @@ func summariseArg(args map[string]any) string {
 		}
 	}
 	return ""
+}
+
+// maxFacetBytes bounds one identity facet. Names are short; anything longer
+// is more likely a body that happens to sit under an identifying key.
+const maxFacetBytes = 64
+
+// identifierLike reports whether a value reads as a name rather than a body:
+// one token, no structure (JSON or YAML punctuation), and short. It is what
+// lets the facets show a key's value at all.
+func identifierLike(s string) bool {
+	if len(s) > maxFacetBytes || strings.ContainsAny(s, " \t\r\n{}[]\"'`") {
+		return false
+	}
+	return !strings.Contains(s, ": ")
+}
+
+// shortResourceName reduces a Google resource name to its last two ids:
+// projects/p/locations/l/clusters/c reads as "l/c". The leading collections
+// are context a thread already has, and the full path would fill the clamp;
+// one id alone would make calls on two clusters (or two versions of two
+// secrets) read the same, and merge into one ×2 line. Anything that is not a
+// well-formed resource name is returned as it is.
+func shortResourceName(s string) string {
+	if !strings.HasPrefix(s, "projects/") {
+		return s
+	}
+	parts := strings.Split(strings.TrimSuffix(s, "/"), "/")
+	if len(parts)%2 != 0 {
+		return s
+	}
+	var ids []string
+	for i := 1; i < len(parts); i += 2 {
+		if parts[i] == "" || parts[i-1] == "" {
+			return s
+		}
+		ids = append(ids, parts[i])
+	}
+	if len(ids) > 2 {
+		ids = ids[len(ids)-2:]
+	}
+	return strings.Join(ids, "/")
 }
 
 // safeArg turns one raw argument into the line that goes in a chat room:

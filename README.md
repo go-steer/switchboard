@@ -438,8 +438,19 @@ unbounded, and exactly where a secret turns up: a shell command line with a
 token in it, a private path, the contents of a file being written. Only `stream`
 shows them, and only like this:
 
-- one argument per call — never the whole object, so a token in a second field
-  is not disclosed;
+- never the whole object. A call shows the one argument that says what it is
+  doing: the command, path, query or URL. A token in a second field is then
+  not disclosed. A resource-oriented tool with none of those (an MCP call like
+  `gke_get_k8s_resource`) shows what it acts on instead: up to four identifier
+  facets (kind, name, namespace, location) joined into one value, such as
+  `pod · us-central1/std-simian-test`.
+  - A facet is shown only if its value looks like a name: one token, no
+    JSON/YAML punctuation, at most 64 bytes. A manifest that a server put under
+    `resource` is skipped, not shown.
+  - Each facet is redacted on its own.
+  - Google resource paths are shortened to their last two ids.
+  - Fields that never identify anything (output format, page tokens, an
+    earlier call's id) are never shown;
 - scalars only, so nested objects and arrays are skipped rather than serialised;
 - flattened to one line and clamped to 120 bytes plus an ellipsis, after
   redaction as well as before — `<redacted>` is longer than some of what it
