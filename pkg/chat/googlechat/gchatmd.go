@@ -226,7 +226,7 @@ var (
 	// escaping it would litter ordinary prose with entities.
 	htmlEscaper = strings.NewReplacer(
 		"&", "&amp;", "<", "&lt;", ">", "&gt;", `"`, "&quot;")
-	leadEmojiRE = regexp.MustCompile(`^[\x{1F000}-\x{1FAFF}\x{2190}-\x{2BFF}\x{FE0F}\x{200D}]+\s*`)
+	leadEmojiRE = regexp.MustCompile(`^[\x{1F000}-\x{1FAFF}\x{2190}-\x{2BFF}\x{FE0E}\x{FE0F}\x{200D}]+\s*`)
 )
 
 // defuseMentions strips the brackets off every Chat mention, so model text
@@ -317,7 +317,7 @@ func isWordByte(b byte) bool {
 }
 
 // stripLeadEmoji removes a leading emoji (and the space after it) from a
-// gateway message. The router prefixes its notices with one — ⏳, 🔧, ⚠️ —
+// gateway message. The router prefixes its notices with one — ⏳, ▸, ⚠️ —
 // because in plain text that emoji *is* the icon; on a card the widget's own
 // icon says the same thing, and showing both reads as a stutter.
 func stripLeadEmoji(s string) string {

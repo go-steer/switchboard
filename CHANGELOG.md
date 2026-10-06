@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- **Tool notices use heavy monochrome marks:** `▸` running, `✔` succeeded,
+  `✖` failed, replacing 🔧/✅/❌, which read as clutter in a busy thread. ✔ and
+  ✖ carry the text-style variation selector, so clients draw the glyph rather
+  than a colour emoji. Approval records ("✅ **Allowed**…") are unchanged.
+
 ### Added
 - **A GKE deployment example: `deploy/examples/gke-demo`** (#131). It runs a
   switchboard-dedicated gke-platform-agent daemon (core-agent `:main`, ask-mode
@@ -16,6 +22,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   lists the one-time steps (static IP, DNS, IAM, secrets) and the cutover.
 
 ### Fixed
+- **A multi-call tool notice on Google Chat no longer runs together on one
+  line.** A frame of several calls was one markdown paragraph, and Chat dropped
+  the blank lines between its calls. The header and each call are now separate
+  widgets, which always stack.
 - **A long structured answer on Google Chat gets its usage footer again.**
   With core-agent 2.10 the footer is added by editing the answer once its
   turn ends, and the edit was gated on the answer's *text* form fitting one

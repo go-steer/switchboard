@@ -295,13 +295,16 @@ func gatewayCard(kind chat.ReplyKind, text string) *chatv1.GoogleAppsCardV1Card 
 // iconTextWidget strips that emoji, on the reasoning that the widget's icon
 // already says what it says. That holds while every notice of a kind means the
 // same thing, and stopped holding when tool notices gained verdicts (#36): the
-// difference between ✅ and ❌ was deleted and a static gear put in its place,
+// difference between ✔ and ✖ was deleted and a static gear put in its place,
 // so a card reader could not see that a tool had failed. Translate it instead.
+// The marks are the router's (markOK, markFailed), matched on the base glyph
+// so the variation selector after it does not matter; ✅/❌ are still read, for
+// a notice posted by an older router and edited by this one.
 func activityIcon(text string) string {
 	switch {
-	case strings.HasPrefix(text, "✅"):
+	case strings.HasPrefix(text, "✔"), strings.HasPrefix(text, "✅"):
 		return iconToolOK
-	case strings.HasPrefix(text, "❌"):
+	case strings.HasPrefix(text, "✖"), strings.HasPrefix(text, "❌"):
 		return iconToolFail
 	}
 	return iconActivity
