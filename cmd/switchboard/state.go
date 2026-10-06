@@ -94,6 +94,10 @@ type sessionRecord struct {
 	Channel string `json:"channel,omitempty"`
 	// Session is "app/sid".
 	Session string `json:"session"`
+	// Agent names the registry entry whose daemon holds Session (#140).
+	// Absent in a record written before the registry existed, which belongs
+	// to the default agent — so old snapshots load unchanged.
+	Agent string `json:"agent,omitempty"`
 	// Owner is the identity the relay subscribes as: the creator, or empty for
 	// an adopted session (sessionEntry.owner).
 	Owner   string `json:"owner,omitempty"`
@@ -132,6 +136,8 @@ type bindingRecord struct {
 	Conversation string `json:"conversation"`
 	Session      string `json:"session"`
 	Since        int64  `json:"since"`
+	// Agent is the bound session's agent; absent means the default (#140).
+	Agent string `json:"agent,omitempty"`
 }
 
 // stateStore persists the snapshot. The file is the only implementation; the
@@ -315,7 +321,7 @@ func (r *Router) snapshot() routerState {
 		if !ok {
 			continue
 		}
-		st.Bindings = append(st.Bindings, bindingRecord{Conversation: conv, Session: sessionRef(b.sess), Since: b.since})
+		st.Bindings = append(st.Bindings, bindingRecord{Conversation: conv, Session: sessionRef(b.sess), Since: b.since, Agent: b.agent})
 	}
 	r.mu.Unlock()
 
@@ -335,6 +341,7 @@ func (e *sessionEntry) record() sessionRecord {
 	rec := sessionRecord{
 		Channel: e.channel,
 		Session: sessionRef(e.sess),
+		Agent:   e.agent,
 		Owner:   e.owner,
 		Adopted: e.adopted,
 		// delivered, not relayed: relayed moves before the post is made, so a
@@ -382,6 +389,7 @@ func entryFromRecord(rec sessionRecord, channel string) (*sessionEntry, error) {
 	e := &sessionEntry{
 		ready:   make(chan struct{}),
 		sess:    sess,
+		agent:   rec.Agent,
 		channel: channel,
 		adopted: rec.Adopted,
 		owner:   rec.Owner,
@@ -422,7 +430,7 @@ func (r *Router) restore(ctx context.Context, st routerState, now time.Time) (re
 			r.logf.Warnf("state: dropping the binding of %s: %v", b.Conversation, err)
 			continue
 		}
-		r.bindings[b.Conversation] = binding{sess: sess, since: b.Since}
+		r.bindings[b.Conversation] = binding{sess: sess, since: b.Since, agent: b.Agent}
 		r.boundTo[b.Session] = b.Conversation
 		r.bindOrder = append(r.bindOrder, b.Conversation)
 		r.metrics.bindRecorded()

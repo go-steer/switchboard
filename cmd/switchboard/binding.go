@@ -106,6 +106,9 @@ const maxBindings = 1024
 // the thread should pick up.
 type binding struct {
 	sess daemon.Session
+	// agent is the registry entry whose daemon holds sess; empty is the
+	// default agent, which is what an ingress bind names today (#140).
+	agent string
 	// since is the session's head seq when the binding was made: the resume
 	// point that keeps the backlog out of the thread. See above.
 	since int64
@@ -177,7 +180,7 @@ func (r *Router) PrepareBind(ctx context.Context, conv string, sess daemon.Sessi
 	// No asserted caller: this reads a session belonging to whoever created it,
 	// and switchboard has no standing to claim it is any particular person. The
 	// turns it later injects are attributed to the human who typed them.
-	head, err := r.client.HeadSeq(ctx, sess, "")
+	head, err := r.daemonFor("").HeadSeq(ctx, sess, "")
 	if err != nil {
 		r.AbortBind(sess)
 		return 0, err

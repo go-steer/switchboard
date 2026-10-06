@@ -6,6 +6,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Several agents behind one gateway, phase 1 of multi-agent** (#140). A
+  config file can register several core-agent or mast daemons (`agents`, each
+  with its own `daemon_url` and `token_env`), name a global `default_agent`,
+  and give a channel its own `default_agent` and an `agents` allow list.
+  - A conversation belongs to the agent it started on for its whole life, and
+    its approvals go to that agent's daemon.
+  - With an `agents` list, the agent is written into the state records and
+    the approval buttons' decision ids. Without one, nothing names an agent,
+    so existing records and buttons belong to whatever the default agent is.
+    Moving to a list needs no migration as long as the daemon you were using
+    becomes the `default_agent`, and startup warns when that choice is left
+    implicit.
+  - A thread whose agent has been removed gets a notice and is not rerouted.
+  - Without an `agents` list, nothing changes.
+  - The `/agent` picker, the admin API and attribution follow in later phases.
+
 ### Changed
 - **Stream notices for MCP tools show what the call acts on.** The argument
   summary picked a command, path, query or URL, and otherwise fell back to the

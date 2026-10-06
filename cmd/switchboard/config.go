@@ -113,6 +113,13 @@ type Config struct {
 	BotTokenEnv     *string `json:"slack_bot_token_env,omitempty"`
 	IngressTokenEnv *string `json:"ingress_token_env,omitempty"`
 
+	// Agents is the registry of daemons this gateway routes to (#140). Absent,
+	// the gateway has one agent, built from daemon_url and token_env, exactly
+	// as before. DefaultAgent is where a conversation goes when its channel
+	// names none; absent, the first agent listed.
+	Agents       []AgentConfig `json:"agents,omitempty"`
+	DefaultAgent *string       `json:"default_agent,omitempty"`
+
 	// Defaults are the channel-scopable settings as they apply to a channel
 	// with no entry of its own.
 	Defaults ChannelConfig `json:"defaults,omitempty"`
@@ -152,6 +159,13 @@ type ChannelConfig struct {
 	// list like Approvers does, and like it can say ["channel"], which here
 	// means "no tighter than the approver list" (#85).
 	StandingApprovers []string `json:"standing_approvers,omitempty"`
+
+	// DefaultAgent is the agent a new conversation here goes to (#140). Agents
+	// is the allow list: if set, only these agents are offered and accepted
+	// here, and a default outside it is refused at startup. Both name agents
+	// in the top-level agents list.
+	DefaultAgent *string  `json:"default_agent,omitempty"`
+	Agents       []string `json:"agents,omitempty"`
 }
 
 // loadConfig reads and validates a config file.
@@ -464,9 +478,28 @@ func channelsFrom(cfg *Config, def channelSettings, platform string, mode chat.C
 			}
 			s.standing = p
 		}
+		applyAgentSettings(&s, c)
 		out[id] = s
 	}
 	return out, nil
+}
+
+// applyAgentSettings layers a block's agent settings over s. Replaces rather
+// than extends, like the approver lists: a channel naming its agents is
+// answering "which agents here", and an empty list means "no restriction".
+// Names are checked against the registry once it is built (checkChannelAgents).
+func applyAgentSettings(s *channelSettings, c ChannelConfig) {
+	if c.DefaultAgent != nil {
+		s.defaultAgent = strings.TrimSpace(*c.DefaultAgent)
+	}
+	if c.Agents != nil {
+		s.agents = nil
+		for _, n := range c.Agents {
+			if n = strings.TrimSpace(n); n != "" {
+				s.agents = append(s.agents, n)
+			}
+		}
+	}
 }
 
 // slackChannelID and chatSpaceName are the two shapes Message.Channel can

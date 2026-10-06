@@ -304,6 +304,53 @@ core-agent picks up `.agents/config.json` from the working directory, which is a
 convenience for a CLI; a long-lived gateway changing who may approve a production
 change because of a file that appeared beside it is not.
 
+### Several agents
+
+One gateway can front several agents: core-agent or mast daemons, each with its
+own endpoint and credential (#140, design in
+[`docs/multi-agent.md`](docs/multi-agent.md)). Register them in the config
+file:
+
+```json
+{
+  "agents": [
+    {"name": "platform", "display_name": "Platform agent", "daemon_url": "http://platform:7777", "token_env": "PLATFORM_TOKEN"},
+    {"name": "infra", "daemon_url": "http://infra:7777", "token_env": "INFRA_TOKEN", "kind": "mast"}
+  ],
+  "default_agent": "platform",
+  "channels": {
+    "C0123ABCD": {"default_agent": "infra", "agents": ["infra", "platform"]}
+  }
+}
+```
+
+- **A conversation belongs to one agent for its whole life,** chosen when it
+  starts: the channel's `default_agent`, else the global `default_agent`, else
+  the first agent listed. Every later message in the thread goes to the same
+  agent, and so do its approvals.
+- **A channel's `agents` is an allow list.** If it's set, a default outside it
+  is refused at startup.
+- **`name`** is a short lowercase id (letters, digits, `-`). It's written into
+  the state records and approval buttons, so keep it stable.
+- **The credential is named, never written:** `token_env` holds the name of
+  the variable carrying the token, and the config file's secret scan applies
+  as everywhere else.
+- **Removed agents.** If an agent is removed while threads still belong to it,
+  a message in one of those threads gets a notice to start a new thread.
+  Nothing is rerouted.
+- **Without an `agents` list,** the gateway has one agent built from
+  `daemon_url` and `token_env`, exactly as before. Its state records and
+  buttons name no agent, so they belong to whatever the default agent is.
+- **Moving a gateway to an `agents` list:** register the daemon it was already
+  using and make it the `default_agent`. Its existing conversations, and the
+  approval buttons already on screen, then carry on unchanged. If
+  `default_agent` is unset, the first agent listed is the default, and startup
+  warns about it. `daemon_url` and `token_env` are ignored once a list exists,
+  and startup warns if they're still set.
+
+Choosing an agent per thread (`/agent`), adding agents through an API, and
+showing which agent answered come in later steps of #140.
+
 ### Long-turn feedback
 
 While an agent turn runs, switchboard can show liveness. `--progress-mode` sets

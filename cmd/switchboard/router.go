@@ -29,7 +29,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/go-steer/switchboard/internal/logging"
-	"github.com/go-steer/switchboard/pkg/approval"
 	"github.com/go-steer/switchboard/pkg/chat"
 	"github.com/go-steer/switchboard/pkg/daemon"
 )
@@ -460,7 +459,8 @@ func formatElapsed(d time.Duration) string {
 // per-turn) is what keeps the daemon from replaying prior turns on every
 // message.
 type Router struct {
-	client  *daemon.Client
+	// agents is the registry every conversation's daemon is found in (#140).
+	agents  *agentSet
 	out     sender
 	metrics *metrics
 	logf    logging.Logf
@@ -557,15 +557,12 @@ type Router struct {
 	omu       sync.Mutex
 	overrides map[string]ProgressMode
 
-	// approvals relays the daemon's permission prompts into the thread and
-	// sends back what someone decided. Nil leaves the feature off for every
-	// channel, whatever a config file says — see setApprovals. Set once at
-	// startup, before dispatch begins.
-	//
-	// Whether a given channel uses it is channelSettings.approvals: the client
-	// is one connection to one daemon and cannot be per-channel, while the
-	// decision to put prompts in front of a particular room can be.
-	approvals *approval.Client
+	// The approval client that relays a daemon's permission prompts and sends
+	// back what someone decided is per agent (agent.approvals, #140): it is a
+	// connection to one daemon. None anywhere leaves the feature off for every
+	// channel, whatever a config file says — see setApprovals. Whether a given
+	// channel uses it is channelSettings.approvals: the decision to put prompts
+	// in front of a particular room can be per-channel, a connection cannot.
 }
 
 // channelSettings is every gateway setting that may differ between channels,
@@ -577,6 +574,12 @@ type Router struct {
 type channelSettings struct {
 	// progress is the long-turn feedback mode.
 	progress ProgressMode
+
+	// defaultAgent is the agent a new conversation here goes to; empty means
+	// the registry's global default. agents is the allow list; empty allows
+	// every agent (#140).
+	defaultAgent string
+	agents       []string
 
 	// approvals is whether permission prompts are put into this channel at
 	// all. False leaves them where they were, waiting on a console.
@@ -610,6 +613,12 @@ type sessionEntry struct {
 	ready chan struct{}
 	sess  daemon.Session
 	err   error
+
+	// agent names the registry entry whose daemon holds sess (#140): resolved
+	// when the conversation began and fixed for its life. Empty only for an
+	// entry revived from a record written before the registry existed, which
+	// belongs to the default agent. Set before ready closes.
+	agent string
 
 	// adopted marks a session switchboard did not create but was told about by
 	// the outbound ingress (#38). It changes two things: the entry starts at the
@@ -1651,7 +1660,7 @@ func NewRouter(client *daemon.Client, out sender, progress ProgressMode, m *metr
 		progress = ProgressOff
 	}
 	return &Router{
-		client:        client,
+		agents:        singleAgent(client, nil),
 		out:           out,
 		defaults:      channelSettings{progress: progress},
 		metrics:       m,
@@ -1813,6 +1822,12 @@ func (r *Router) Handle(ctx context.Context, msg chat.Message) (err error) {
 
 	entry, err = r.session(ctx, msg.Conversation, msg.Channel, msg.Caller)
 	if err != nil {
+		if errors.Is(err, errNoAgentHere) {
+			if sendErr := r.surfaceNotice(ctx, msg.Conversation, "No agent is available in this channel: its allowed agents exclude its default. An admin needs to fix the channel's agent settings."); sendErr != nil {
+				r.logf.Errorf("handle %s: surface no agent: %v", msg.Conversation, sendErr)
+			}
+			return err
+		}
 		r.surfaceError(ctx, msg.Conversation, err)
 		return err
 	}
@@ -1849,7 +1864,7 @@ func (r *Router) Handle(ctx context.Context, msg chat.Message) (err error) {
 	// and the turn can fail on the stream before Inject's response is read.
 	entry.beginTurnInFlight()
 	start := time.Now()
-	err = r.client.Inject(ctx, entry.sess, msg.Caller, msg.Text)
+	err = r.daemonOf(entry).Inject(ctx, entry.sess, msg.Caller, msg.Text)
 	r.metrics.recordDaemon("inject", time.Since(start), err)
 	if err != nil {
 		// The turn never reached the daemon, so nothing on the stream will ever
@@ -1889,6 +1904,14 @@ func (r *Router) Handle(ctx context.Context, msg chat.Message) (err error) {
 			}
 			return err
 		}
+		if errors.Is(err, errAgentGone) {
+			// Not rerouted: one agent per thread, and the person decides where
+			// the conversation goes next (#140).
+			if sendErr := r.surfaceNotice(ctx, msg.Conversation, agentGoneNotice(entry.agent)); sendErr != nil {
+				r.logf.Errorf("handle %s: surface agent gone: %v", msg.Conversation, sendErr)
+			}
+			return err
+		}
 		r.surfaceError(ctx, msg.Conversation, err)
 		return err
 	}
@@ -1916,7 +1939,7 @@ func (r *Router) sessionGone(ctx context.Context, e *sessionEntry, caller string
 	if !e.adopted && caller == e.owner {
 		return true
 	}
-	_, err := r.client.HeadSeq(ctx, e.sess, e.owner)
+	_, err := r.daemonOf(e).HeadSeq(ctx, e.sess, e.owner)
 	return isMissingSession(err)
 }
 
@@ -2699,6 +2722,18 @@ func (r *Router) session(ctx context.Context, conv, channel, caller string) (*se
 	// double-create, and release the map lock before the network call.
 	b, adopted := r.bindings[conv]
 	e := &sessionEntry{ready: make(chan struct{}), channel: channel, adopted: adopted}
+	if adopted {
+		e.agent = r.agents.stored(b.agent)
+	} else {
+		e.agent, e.err = r.agents.channelAgent(r.settingsFor(channel))
+	}
+	if e.err != nil {
+		// No agent this channel may use. Not published: nothing to wait on and
+		// nothing to retry until the configuration changes.
+		r.mu.Unlock()
+		close(e.ready)
+		return e, e.err
+	}
 	r.sessions[conv] = e
 	r.mu.Unlock()
 
@@ -2723,7 +2758,7 @@ func (r *Router) session(ctx context.Context, conv, channel, caller string) (*se
 	}
 
 	start := time.Now()
-	e.sess, e.err = r.client.CreateSession(ctx, caller)
+	e.sess, e.err = r.daemonOf(e).CreateSession(ctx, caller)
 	r.metrics.recordDaemon("create", time.Since(start), e.err)
 	if e.err != nil {
 		// Drop the failed entry so a later turn can retry.
@@ -2758,12 +2793,12 @@ func (r *Router) reviveLocked(ctx context.Context, conv, channel string, rec ses
 	e.touch()
 	r.sessions[conv] = e
 	r.mu.Unlock()
-	if rec.Adopted && stale {
+	if _, ok := r.agents.lookup(e.agent); rec.Adopted && stale && ok {
 		// An adopted session the thread stopped following long ago has been
 		// working the whole time; resuming from where the thread left off
 		// would replay all of it at once. The same head re-measure adoption
 		// makes, for the same reason (adoptFrom).
-		since := r.adoptFrom(ctx, conv, binding{sess: e.sess, since: rec.Relayed})
+		since := r.adoptFrom(ctx, conv, binding{sess: e.sess, since: rec.Relayed, agent: e.agent})
 		e.seq.Store(since)
 		e.relayed.Store(since)
 		e.delivered.Store(since)
@@ -2853,7 +2888,7 @@ func (r *Router) noteAttempt(e *sessionEntry, seq int64) {
 // with the one to the message being handled right now, and this failure at
 // least announces itself when the inject that follows fails too.
 func (r *Router) adoptFrom(ctx context.Context, conv string, b binding) int64 {
-	head, err := r.client.HeadSeq(ctx, b.sess, "")
+	head, err := r.daemonFor(b.agent).HeadSeq(ctx, b.sess, "")
 	if err != nil {
 		r.logf.Warnf("session %s: adopting %s: could not read the head (%v); resuming from the bind at seq %d",
 			conv, sessionRef(b.sess), err, b.since)
@@ -2946,7 +2981,7 @@ func (r *Router) relay(ctx context.Context, conv string, e *sessionEntry, owner 
 		// meant to cover the outage. Telling the two apart needs a per-turn
 		// identity, which is #42.
 		streaming := false
-		err := r.client.Subscribe(ctx, e.sess, owner, e.seq.Load(), func(ev daemon.Event) error {
+		err := r.daemonOf(e).Subscribe(ctx, e.sess, owner, e.seq.Load(), func(ev daemon.Event) error {
 			lastAlive = time.Now()
 			e.quietReset()
 			// The two lifecycle events carrying a turn's accounting arrive
@@ -3231,6 +3266,13 @@ func (r *Router) relay(ctx context.Context, conv string, e *sessionEntry, owner 
 				}
 				cancel()
 			}
+			return
+		}
+		// An agent removed from the registry since this conversation began
+		// has no daemon to follow: reconnecting would retry the refusal
+		// forever. The thread is told on its next message (Handle).
+		if errors.Is(err, errAgentGone) {
+			r.logf.Warnf("relay %s: agent %q is no longer registered; not following %s", conv, e.agent, sessionRef(e.sess))
 			return
 		}
 		// The subscription returned: the stream ended or errored. Reset the
