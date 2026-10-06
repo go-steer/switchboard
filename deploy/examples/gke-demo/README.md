@@ -9,11 +9,11 @@ This is a standing deployment for testing switchboard end to end (#131). In one
   so gated calls become approvals in the chat thread, and `sa:switchboard` as
   the only proxy identity. It has no watcher, because its only clients are the
   two gateways (enforced by a NetworkPolicy).
-- **switchboard's Google Chat gateway** (`0.6.0`), on the HTTP ingress, behind
+- **switchboard's Google Chat gateway** (`:main`), on the HTTP ingress, behind
   a GKE Gateway at `https://switchboard-chat.demo.gke.ninja/chat`. The cert
   comes from the Certificate Manager map `star-demo-gke-ninja`. Chat API calls
   use Workload Identity as the Chat app's service account.
-- **switchboard's Slack gateway** (`0.6.0`), on Socket Mode, with no inbound
+- **switchboard's Slack gateway** (`:main`), on Socket Mode, with no inbound
   endpoint.
 
 Both gateways keep their routing table on a PVC (`components/durable-state`),
@@ -108,9 +108,9 @@ Then:
 - **"Always allow (saved)" lasts only the session.** The daemon's agents
   directory is the read-only content image, so a saved grant has nowhere to
   persist.
-- **core-agent tracks `:main` with `imagePullPolicy: Always`.** A restart picks
-  up the newest build. Pin a `main-<sha>` tag in
-  `core-agent/kustomization.yaml` to hold one.
+- **core-agent and switchboard both track `:main` with `imagePullPolicy:
+  Always`.** `kubectl -n switchboard rollout restart deploy` picks up the
+  newest builds. Pin a `main-<sha>` tag in a `kustomization.yaml` to hold one.
 - **The content image is pinned to `v4`,** the one the `gke-platform-agent`
   namespace runs. The hub config here was taken from core-agent `main`, so a
   newer content image may need it refreshed.

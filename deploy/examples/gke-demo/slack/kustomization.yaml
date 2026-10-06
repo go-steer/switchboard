@@ -26,14 +26,20 @@ labels:
       app.kubernetes.io/instance: slack
     includeSelectors: true
 images:
+  # switchboard tracks main, as core-agent does here: fixes land without
+  # waiting for a release. Pin a main-<sha> tag to hold a build.
   - name: ghcr.io/go-steer/switchboard
-    newTag: "0.6.0"
+    newTag: main
 configMapGenerator:
   - name: switchboard-config
     files:
       - config.json
 patches:
   - path: patch-deployment.yaml
+    target:
+      kind: Deployment
+      name: switchboard
+  - path: patch-pull-always.yaml
     target:
       kind: Deployment
       name: switchboard
