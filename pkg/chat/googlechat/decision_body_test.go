@@ -59,3 +59,36 @@ func TestAQuestionCardMissingAButtonKeepsItsList(t *testing.T) {
 		t.Errorf("the button-less answer vanished: %s", raw)
 	}
 }
+
+// The Broad-answer confirmation (#92) and its Back both rebuild from the posted
+// card's own body, so neither may list the answers the prompt dropped above
+// its buttons (#132: seen on a pre-#130 gateway, where the prompt still did).
+func TestTheConfirmationAndBackCardsDoNotListTheAnswers(t *testing.T) {
+	d := &chat.Decision{ID: "s#p", Options: []chat.DecisionOption{
+		{Value: "deny", Label: "Deny"}, {Value: "allow-once", Label: "Allow once"},
+		{Value: "allow-session", Label: "Allow for this session", Broad: true},
+	}}
+	hosting := decisionCard(chat.DecisionReplyText("**Permission needed** — `mcp`", d), d, testAudience)
+	if hosting == nil {
+		t.Fatal("no prompt card")
+	}
+
+	confirm, _ := confirmCard(hosting, d.ID, "allow-session", testAudience)
+	raw, _ := json.Marshal(confirm)
+	if strings.Contains(string(raw), "•") {
+		t.Errorf("confirmation card lists the answers: %s", raw)
+	}
+	if !strings.Contains(string(raw), "Permission needed") || !strings.Contains(string(raw), "Yes, allow") {
+		t.Errorf("confirmation card lost the question or its Yes: %s", raw)
+	}
+
+	wire, _ := json.Marshal([]wireOption{{V: "deny", L: "Deny"}, {V: "allow-once", L: "Allow once"}, {V: "allow-session", L: "Allow for this session", B: true}})
+	back, _ := restoredCard(hosting, d.ID, string(wire), testAudience)
+	raw, _ = json.Marshal(back)
+	if strings.Contains(string(raw), "•") {
+		t.Errorf("Back-restored card lists the answers: %s", raw)
+	}
+	if !strings.Contains(string(raw), "Allow once") {
+		t.Errorf("Back-restored card lost its buttons: %s", raw)
+	}
+}
