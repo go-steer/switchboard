@@ -155,9 +155,78 @@ interface.
 In reviewable steps, each with its own review gate: the store and lease; the
 standby role, queue and handoff; the deployment change and the live test.
 
+## If one process is not enough
+
+Not built here, but the design above is meant to grow into it, so the path is
+written down.
+
+### When one process is actually the limit
+
+Later than it looks. A gateway is almost all network waiting: each active
+conversation costs a couple of idle daemon streams and a few goroutines, so one
+process should carry thousands of active conversations. That is an estimate,
+not a measured load test. The ceilings that bind first are elsewhere:
+
+- **Platform rate limits** are per app or per space, not per process. More pods
+  do not raise them (#107: Chat's per-space write quota).
+- **The daemon.** One core-agent daemon serves every session. If it is the
+  bottleneck, the answer is more daemons, with switchboard routing
+  conversations across them, not more gateways.
+- **Availability.** One owner is still one point of failure for the time
+  between a crash and its lease expiring.
+
+So the real triggers are a very large fleet, several daemons, or availability
+requirements beyond what a handoff gives.
+
+### Stage 1: static sharding by deployment
+
+No code. Run separate gateway deployments for separate sets of workspaces,
+spaces or channels, each with its own Chat or Slack app or its own `channels`
+configuration. Each is a single-owner gateway with this design's handoff. It is
+crude, but it is enough when the load splits along organisational lines.
+
+### Stage 2: sharded ownership (active-active)
+
+The general answer. **One owner per conversation still holds**, so ordering and
+effectively-once delivery work unchanged. What changes is how many owners there
+are.
+
+- **Shards and leases.** Conversations hash into a fixed number of shards (say
+  64), each with its own Lease. Every pod claims a fair share of shards and runs
+  relays and watchers only for the conversations in shards it owns.
+- **Events are forwarded to the owner.** This is the new part. The platforms do
+  not route by conversation: Chat's load balancer picks any pod, and Slack
+  spreads Socket Mode events across an app's connections at random. The pod
+  that receives an event forwards it over the cluster network to the owner of
+  that conversation's shard, found from the leases.
+- **Rebalancing is this design's handoff, per shard.** When a pod joins or
+  leaves, shards move. Each move is release, final write, acquire, resume, and
+  events for a shard in motion are held, as above.
+- **Storage moves to per-conversation records.** One Secret snapshot does not
+  scale to this. The state becomes records in a real store (Firestore, Cloud
+  SQL or Redis) behind the same `stateStore` interface. If core-agent#995 lands
+  (the daemon accepting a caller-supplied session key), much of this state can
+  be recovered from the daemon instead of kept here.
+
+### Stage 3: several daemons
+
+The shard map can also say which daemon a conversation lives on. That covers
+the case where the daemon, not the gateway, is the bottleneck.
+
+### Seams to build now
+
+The single-owner design is stage 2 with one shard. Three choices in the first
+implementation keep the upgrade from being a rewrite:
+
+1. **The lock is asked per conversation.** The interface takes a key ("who
+   owns conversation X?"). Today every key resolves to the one global Lease.
+2. **The state store keeps a per-conversation shape at its interface,** even
+   though the first implementation writes one snapshot.
+3. **The held-event queue is "deliver to the owner",** not "wait until I own".
+   Today the owner is always this process once it holds the lock. In stage 2
+   the same path forwards to another pod.
+
 ## Out of scope
 
-Several gateways serving at once, active-active, sharing conversations. That
-needs per-conversation ownership rather than one lock, and buys availability
-this deployment does not need. The design keeps it reachable: the lock could
-later become per-conversation without changing the store.
+Building any of the stages above. This design delivers the single-owner handoff
+with the three seams, and nothing more.
