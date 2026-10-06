@@ -593,7 +593,27 @@ func (a *Adapter) cardFor(r chat.Reply) *chatv1.GoogleAppsCardV1Card {
 		// renders only the HTML subset, which has no block; a MARKDOWN
 		// paragraph renders the fence, and the verdict emoji leading it says
 		// what the icon would have.
-		return widgetCard(markdownWidgets(r.Text)...)
+		//
+		// One widget per block — the header, then each call — rather than one
+		// paragraph holding them all. Inside a single MARKDOWN paragraph Chat
+		// dropped the blank lines between a frame's calls, so a four-call
+		// notice ran together on one line (reported from the GKE deployment);
+		// separate widgets always stack. The split is on the router's own
+		// separator, and a block never contains a blank line: the argument in
+		// its fence is flattened to one line.
+		var widgets []*chatv1.GoogleAppsCardV1Widget
+		for _, block := range strings.Split(r.Text, "\n\n") {
+			if strings.TrimSpace(block) != "" {
+				widgets = append(widgets, markdownWidgets(block)...)
+			}
+		}
+		if len(widgets) > maxCardWidgets {
+			// A frame of more distinct calls than a card holds widgets: one
+			// paragraph, chunked, as before — run together, but accepted, and
+			// editable when its results land (caught in review).
+			widgets = markdownWidgets(r.Text)
+		}
+		return widgetCard(widgets...)
 	}
 	return gatewayCard(r.Kind, toChatText(r.Text))
 }

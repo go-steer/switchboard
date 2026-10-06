@@ -224,15 +224,27 @@ func sameVerdict(a, b *daemon.ToolResult) bool {
 	return a.Failed == b.Failed && a.Detail == b.Detail
 }
 
+// The marks a tool notice leads with: running, succeeded, failed. Heavy
+// monochrome glyphs rather than emoji (chosen on the live rig: ✅/❌ read as
+// clutter in a busy thread). ✔ and ✖ are emoji that default to text style,
+// and a client may still draw them in colour, so each carries the text-style
+// variation selector (U+FE0E) to ask for the glyph. The Chat adapter reads
+// them back to pick an icon (activityIcon), so it shares these spellings.
+const (
+	markRunning = "▸"
+	markOK      = "✔\uFE0E"
+	markFailed  = "✖\uFE0E"
+)
+
 // toolIcon is the state of one group at a glance: still running, done, failed.
 func toolIcon(r *daemon.ToolResult) string {
 	switch {
 	case r == nil:
-		return "🔧"
+		return markRunning
 	case r.Failed:
-		return "❌"
+		return markFailed
 	}
-	return "✅"
+	return markOK
 }
 
 // toolLine renders one group: icon, tool, how many of it, why it failed, and —
@@ -308,25 +320,25 @@ func nameRune(r rune) bool {
 // each call's result once it has landed, so the same function renders the
 // notice when it is posted and again as each result ticks a line off:
 //
-//	✅ Ran **bash**                                   (stream, one call: a block)
+//	✔ Ran **bash**                                    (stream, one call: a block)
 //	```
 //	kubectl get pods -A
 //	```
 //	⏱ 2.3s
 //
-//	❌ Ran 2 tools (1 failed)                         (stream, a parallel frame:
+//	✖ Ran 2 tools (1 failed)                          (stream, a parallel frame:
 //	                                                  header, then one block per
-//	✅ **bash**                                       call, blank-line separated)
+//	✔ **bash**                                        call, blank-line separated)
 //	```
 //	kubectl get pods -A
 //	```
 //
-//	❌ **bash** (exit 2)
+//	✖ **bash** (exit 2)
 //	```
 //	kubectl get ns --context nope
 //	```
 //
-//	🔧 Running `bash` ×3                              (status: names, no arguments)
+//	▸ Running `bash` ×3                               (status: names, no arguments)
 //
 // detail is the mode gate. Only stream carries argument summaries: status edits
 // one message in place and wants a short line, and a reader who chose indicator
@@ -349,7 +361,7 @@ func timedActivityText(calls []daemon.ToolCall, res []*daemon.ToolResult, took [
 			}
 			parts = append(parts, part)
 		}
-		return "🔧 Running " + strings.Join(parts, ", ")
+		return markRunning + " Running " + strings.Join(parts, ", ")
 	}
 	groups := groupCalls(calls, res, took)
 	if len(groups) == 1 {
@@ -377,11 +389,11 @@ func activityHeader(groups []toolGroup) string {
 			failed += g.n
 		}
 	}
-	head := "🔧 Running " + strconv.Itoa(total) + " tools"
+	head := markRunning + " Running " + strconv.Itoa(total) + " tools"
 	if done == total {
-		head = "✅ Ran " + strconv.Itoa(total) + " tools"
+		head = markOK + " Ran " + strconv.Itoa(total) + " tools"
 		if failed > 0 {
-			head = "❌ Ran " + strconv.Itoa(total) + " tools (" + strconv.Itoa(failed) + " failed)"
+			head = markFailed + " Ran " + strconv.Itoa(total) + " tools (" + strconv.Itoa(failed) + " failed)"
 		}
 	}
 	return head
@@ -1483,7 +1495,7 @@ func (n *activityNote) pending(name string) int {
 
 // noticeMemory bounds how many tool notices a session keeps addressable. A long
 // turn posts one per frame, and a result almost always answers the most recent
-// few; the cost of forgetting an older one is a notice that keeps its 🔧 rather
+// few; the cost of forgetting an older one is a notice that keeps its ▸ rather
 // than a wrong edit, so this is deliberately small.
 const noticeMemory = 32
 
@@ -1531,7 +1543,7 @@ func (e *sessionEntry) noteToolCalls(ref chat.MessageRef, calls []daemon.ToolCal
 // searching from either end newest-first pairs them up backwards. The fallback
 // can still be wrong for two same-named calls genuinely in flight at once, and
 // the cost is a tick against the wrong line of a notice that lists them both —
-// visible, bounded, and preferable to leaving every line at 🔧 forever.
+// visible, bounded, and preferable to leaving every line at ▸ forever.
 //
 // The caller must hold amu.
 func (e *sessionEntry) resolveTool(r daemon.ToolResult) (*activityNote, bool) {
@@ -1593,7 +1605,7 @@ func (e *sessionEntry) applyToolResults(results []daemon.ToolResult) []toolEdit 
 	// arrival order lets an id-less result take by name the very line an
 	// id-carrying result later in the frame owns outright; that later result
 	// then finds the line already answered and is dropped, so one call wears
-	// another's verdict and a second stays at 🔧 for good. The name fallback
+	// another's verdict and a second stays at ▸ for good. The name fallback
 	// should only ever be offered what is genuinely left over.
 	for _, r := range results {
 		if r.ID != "" {

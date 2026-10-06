@@ -384,10 +384,10 @@ rather than posting again.
 
 Each call is a small block: the tool and its verdict, the argument in a code
 block, and how long it took on its own line. A notice for one call reads
-"🔧 Running **bash**" while it runs, and is edited when the result lands:
+"▸ Running **bash**" while it runs, and is edited when the result lands:
 
 ````
-✅ Ran **bash**
+✔ Ran **bash**
 ```
 kubectl get pods -A
 ```
@@ -397,15 +397,15 @@ kubectl get pods -A
 A frame of several calls gets a summary header, then one block per call:
 
 ````
-❌ Ran 2 tools (1 failed)
+✖ Ran 2 tools (1 failed)
 
-✅ **bash**
+✔ **bash**
 ```
 kubectl get pods -A
 ```
 ⏱ 2.3s
 
-❌ **bash** (exit 2)
+✖ **bash** (exit 2)
 ```
 kubectl get ns --context nope
 ```
@@ -413,8 +413,9 @@ kubectl get ns --context nope
 ````
 
 On Google Chat the notice is a markdown paragraph, because the icon-line card
-used for other gateway messages can't render a code block. The leading ✅, ❌
-or 🔧 carries the verdict instead.
+used for other gateway messages can't render a code block. The leading ✔, ✖
+or ▸ carries the verdict instead, and each call is its own paragraph so
+Chat keeps them apart.
 
 A finished call says how long it ran, measured at the gateway from when its
 call arrived to when its result did, so it includes the stream's latency both
