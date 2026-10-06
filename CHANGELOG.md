@@ -6,6 +6,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **A GKE deployment example: `deploy/examples/gke-demo`** (#131). It runs a
+  switchboard-dedicated gke-platform-agent daemon (core-agent `:main`, ask-mode
+  approvals) with switchboard's Google Chat and Slack gateways in front of it,
+  in one namespace. Chat uses the HTTP ingress behind a GKE Gateway with a
+  Certificate Manager map and calls the Chat API by Workload Identity, with no
+  key file. Both gateways keep durable state and track `:main`. The README
+  lists the one-time steps (static IP, DNS, IAM, secrets) and the cutover.
+
 ### Fixed
 - **core-agent's checkpoint summaries no longer appear in the thread.** After
   a turn that ends with `mark_task_done`, core-agent writes a checkpoint row

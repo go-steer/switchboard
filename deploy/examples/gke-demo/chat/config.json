@@ -1,0 +1,21 @@
+{
+  "platform": "googlechat",
+  "daemon_url": "http://core-agent.switchboard.svc.cluster.local:7777",
+  "caller_id": "email",
+  "metrics_addr": ":9090",
+  "token_env": "SWITCHBOARD_DAEMON_TOKEN",
+  "defaults": {
+    "progress_mode": "stream",
+    "approvals": true,
+    "show_usage": true
+  },
+  "google_project": "gke-demos-345619",
+  "googlechat_ingress": "http",
+  "googlechat_listen": ":8081",
+  "googlechat_endpoint_url": "https://switchboard-chat.demo.gke.ninja/chat",
+  "googlechat_service_account": "service-1067056737933@gcp-sa-gsuiteaddons.iam.gserviceaccount.com",
+  "googlechat_cards": "rich",
+  "googlechat_commands": {
+    "1": "progress"
+  }
+}

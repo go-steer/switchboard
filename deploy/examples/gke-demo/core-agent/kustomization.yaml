@@ -1,0 +1,41 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - serviceaccount.yaml
+  - pvc.yaml
+  - deployment.yaml
+  - service.yaml
+  - networkpolicy.yaml
+configMapGenerator:
+  # The gke-platform-agent hub config with two changes: permissions.mode is
+  # "ask", so every gated call becomes an approval in the chat thread, and
+  # switchboard is the one proxy identity. Everything else (persona, MCP,
+  # the cluster subagent) is read from the content image via --agents-dir.
+  - name: core-agent-config
+    files:
+      - config.switchboard.json
+  - name: core-agent-gcp-env
+    literals:
+      - GOOGLE_CLOUD_PROJECT=gke-demos-345619
+      - GOOGLE_CLOUD_LOCATION=global
+      - GKE_CLUSTER=std-simian-test
+      - GKE_LOCATION=us-central1
+images:
+  # core-agent tracks main, as every live switchboard test does. Pin a
+  # main-<sha> tag here to hold a build.
+  - name: ghcr.io/go-steer/core-agent
+    newTag: main
