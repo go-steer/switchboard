@@ -233,7 +233,7 @@ func (r *Router) agentListing(cs channelSettings) string {
 	def = r.agents.resolve(def)
 	var lines []string
 	for _, a := range r.agents.allowedIn(cs) {
-		item := "• **" + a.label() + "** (`" + a.name + "`)"
+		item := "• **" + a.label() + "** (" + a.name + ")"
 		if a.name == def {
 			item += ", the default"
 		}
@@ -243,7 +243,7 @@ func (r *Router) agentListing(cs channelSettings) string {
 		return "No agents are available here."
 	}
 	return "**Agents here**\n" + strings.Join(lines, "\n") +
-		"\nStart a thread with one: `agent <name> <prompt>`. A plain message goes to the default."
+		"\nStart a thread with one: agent [name] [prompt]. A plain message goes to the default."
 }
 
 func agentAllowed(list []*agent, name string) bool {

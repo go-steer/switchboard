@@ -1768,7 +1768,7 @@ func (r *Router) HandleCommand(ctx context.Context, cmd chat.Command) (string, e
 // command.
 var commandHelp = "Try `progress <" + strings.Join(progressModeNames(), "|") + ">` to set this " +
 	"channel's long-turn feedback, or `progress` to see the current mode. " +
-	"`agent` lists the agents here, and `agent <name> <prompt>` starts a thread with one."
+	"`agent` lists the agents here, and `agent [name] [prompt]` starts a thread with one."
 
 // Router reports its commands' accepted values, so an adapter can name them in
 // whatever its platform affords — today that is the text of Google Chat's

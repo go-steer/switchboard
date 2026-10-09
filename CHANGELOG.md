@@ -30,13 +30,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - A thread whose agent has been removed gets a notice and is not rerouted.
   - Without an `agents` list, nothing changes.
   - The admin API and attribution follow in later phases.
-- **The agent picker on Google Chat** (#140, phase 3b). With **Opens a
-  dialog** ticked on the `agent` slash command, a bare `/agent` opens a
-  dialog: a dropdown of the space's agents (the default selected, each
-  agent's new `description` under it), an optional prompt, and **Start**,
-  which starts the thread exactly as the typed form does. Typed with
-  arguments while ticked, the command runs as text. HTTP ingress only.
-  Agents gain an optional `description` in the config file.
+- **The agent picker on Google Chat** (#140, phase 3b). A bare `/agent`
+  replies with the agent list and a **Start a conversation…** button
+  (`interaction: OPEN_DIALOG`). It opens a dialog with:
+  - a dropdown of the space's agents, the default selected, each with its
+    new `description`;
+  - an optional prompt;
+  - **Start**, which starts the thread exactly as the typed form does.
+
+  A slash command with **Opens a dialog** ticked opens the dialog directly,
+  but only once the app has been removed from the space and re-added: Chat
+  caches a space's command settings (measured). The button works either way.
+  A Slack slash command's reply now goes through the markdown conversion. HTTP ingress only. Agents gain an optional
+  `description` in the config file. The listing reply is a markdown card, so
+  its bold renders: the plain acknowledgment card's icon line showed literal
+  asterisks.
 - **The GKE example runs two agents** (#140). `deploy/examples/gke-demo` adds
   a small general-purpose core-agent (`general`, on `gemini-3.5-flash-lite`,
   no cluster tools) next to the platform agent. Both gateways register both

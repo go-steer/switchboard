@@ -379,15 +379,23 @@ and every follow-up you reply there.
   and the thread opens a moment later. If it can't be opened, the channel or
   thread is told and a Slack starter message is taken down.
 
-**The picker on Google Chat.** Tick **Opens a dialog** on the slash command
-in the Chat API console, and a bare `/agent` opens a dialog instead. It has a
-dropdown of the agents this space offers, with the default selected and each
-agent's `description` under it, an optional prompt, and **Start**. Starting
-posts the same starter message and thread as the typed form. With the box
-ticked, `/agent <name> <prompt>` still works and simply starts the thread.
-Dialogs need the HTTP ingress (`googlechat_ingress: "http"`), because a dialog
-is the synchronous answer to the request that asked for it. Without the box,
-nothing changes.
+**The picker on Google Chat.** A bare `/agent` replies with the agent list
+and a **Start a conversation…** button. The button opens a dialog with:
+
+- a dropdown of the agents this space offers, the default selected, each with
+  its `description`;
+- an optional prompt;
+- **Start**, which posts the same starter message and thread as the typed
+  form.
+
+To open the dialog straight from `/agent`, tick **Opens a dialog** on the
+slash command in the Chat API console, then **remove the app from the space
+and add it back**. Chat caches a space's command settings: until it was
+re-added, the command kept arriving without the dialog request (measured).
+The button works either way, and is the route in any space that hasn't picked
+the setting up. Dialogs need the HTTP
+ingress (`googlechat_ingress: "http"`), because a dialog is the synchronous
+answer to the request that asked for it.
 
 Give agents a one-line `description` in the config file for the picker to
 show:
