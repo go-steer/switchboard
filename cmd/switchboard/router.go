@@ -1750,11 +1750,13 @@ func (r *Router) setProgress(channel string, mode ProgressMode) {
 // the daemon: commands configure the gateway. An unknown or malformed command
 // yields a helpful ack rather than an error; the error return is reserved for
 // future commands that can fail internally.
-func (r *Router) HandleCommand(_ context.Context, cmd chat.Command) (string, error) {
+func (r *Router) HandleCommand(ctx context.Context, cmd chat.Command) (string, error) {
 	r.metrics.recordCommand()
 	switch cmd.Name {
 	case "progress":
 		return r.progressCommand(cmd), nil
+	case "agent", "agents":
+		return r.agentCommand(ctx, cmd), nil
 	case "", "help":
 		return commandHelp, nil
 	default:
@@ -1765,7 +1767,8 @@ func (r *Router) HandleCommand(_ context.Context, cmd chat.Command) (string, err
 // commandHelp is the one-line usage surfaced for an empty, "help", or unknown
 // command.
 var commandHelp = "Try `progress <" + strings.Join(progressModeNames(), "|") + ">` to set this " +
-	"channel's long-turn feedback, or `progress` to see the current mode."
+	"channel's long-turn feedback, or `progress` to see the current mode. " +
+	"`agent` lists the agents here, and `agent <name> <prompt>` starts a thread with one."
 
 // Router reports its commands' accepted values, so an adapter can name them in
 // whatever its platform affords — today that is the text of Google Chat's
@@ -2696,6 +2699,14 @@ func (r *Router) postToolResults(ctx context.Context, e *sessionEntry, conv stri
 // asserted caller: switchboard did not open it and cannot claim to be whoever
 // did.
 func (r *Router) session(ctx context.Context, conv, channel, caller string) (*sessionEntry, error) {
+	return r.sessionAs(ctx, conv, channel, caller, "")
+}
+
+// sessionAs is session with the agent chosen rather than defaulted: a new
+// conversation opens on agent (which the channel must allow) instead of the
+// channel's default (#140, `/agent`). An existing conversation is returned
+// as it is, whatever agent it is on; the caller checks.
+func (r *Router) sessionAs(ctx context.Context, conv, channel, caller, agent string) (*sessionEntry, error) {
 	r.mu.Lock()
 	if e, ok := r.sessions[conv]; ok {
 		// Touched under the lock the reaper sweeps under, so a message
@@ -2722,9 +2733,12 @@ func (r *Router) session(ctx context.Context, conv, channel, caller string) (*se
 	// double-create, and release the map lock before the network call.
 	b, adopted := r.bindings[conv]
 	e := &sessionEntry{ready: make(chan struct{}), channel: channel, adopted: adopted}
-	if adopted {
+	switch {
+	case adopted:
 		e.agent = r.agents.stored(b.agent)
-	} else {
+	case agent != "":
+		e.agent, e.err = r.agents.chosenAgent(r.settingsFor(channel), agent)
+	default:
 		e.agent, e.err = r.agents.channelAgent(r.settingsFor(channel))
 	}
 	if e.err != nil {

@@ -233,6 +233,29 @@ func (s *agentSet) channelAgent(cs channelSettings) (string, error) {
 	return s.stored(name), nil
 }
 
+// chosenAgent validates an explicitly chosen agent for a channel and returns
+// the name to store.
+func (s *agentSet) chosenAgent(cs channelSettings, name string) (string, error) {
+	if _, ok := s.byName[name]; !ok || s.implicit {
+		return "", fmt.Errorf("%w: %q is not a registered agent", errNoAgentHere, name)
+	}
+	if len(cs.agents) > 0 && !slices.Contains(cs.agents, name) {
+		return "", fmt.Errorf("%w: %q is not among this channel's allowed agents", errNoAgentHere, name)
+	}
+	return s.stored(name), nil
+}
+
+// allowedIn lists the agents a channel may use, in registration order.
+func (s *agentSet) allowedIn(cs channelSettings) []*agent {
+	var out []*agent
+	for _, n := range s.order {
+		if len(cs.agents) == 0 || slices.Contains(cs.agents, n) {
+			out = append(out, s.byName[n])
+		}
+	}
+	return out
+}
+
 // errNoAgentHere is a channel whose allow list excludes the agent it would
 // default to. Startup validation refuses that configuration; this is what a
 // conversation is told if one gets through anyway.

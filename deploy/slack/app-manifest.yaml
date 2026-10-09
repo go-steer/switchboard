@@ -36,7 +36,7 @@ features:
   slash_commands:
     - command: /switchboard
       description: Configure switchboard for this channel
-      usage_hint: progress <off|indicator|status|stream>
+      usage_hint: progress <off|indicator|status|stream> | agent [name] [prompt]
       should_escape: false
 oauth_config:
   scopes:
