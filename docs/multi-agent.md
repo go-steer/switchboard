@@ -109,9 +109,11 @@ Each agent conversation is its own thread.
     thread: the app posts "*Conversation with Platform agent*" plus the prompt,
     and the person replies there.
   - **Slack:** the slash command opens a **modal** (`views.open` with the
-    command's trigger id, which works over Socket Mode) holding a select menu
-    and a prompt field: `static_select`, or `external_select` if the list
-    outgrows a static menu. Submitting starts the thread the same way.
+    command's trigger id, which works over Socket Mode) holding a
+    `static_select` and a prompt field; the channel rides in the view's
+    `private_metadata`. Submitting starts the thread the same way, and the
+    acknowledgment goes to the submitter as an ephemeral message. (A static
+    menu holds 100 options; `external_select` if the list ever outgrows it.)
   - `/agent <name> <prompt>` does the same without the picker.
 - **Inside an existing thread,** `/agent` does not switch. It answers "*this
   thread talks to Platform agent*" with a button to start a new thread with
