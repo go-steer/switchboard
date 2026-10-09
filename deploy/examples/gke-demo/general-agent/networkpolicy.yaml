@@ -12,16 +12,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# A switchboard-dedicated gke-platform-agent, with switchboard's Google Chat
-# and Slack gateways in front of it, in one namespace. See README.md for what
-# has to exist before this applies (secrets, IAM, the static IP, DNS).
-apiVersion: kustomize.config.k8s.io/v1beta1
-kind: Kustomization
-namespace: switchboard
-resources:
-  - namespace.yaml
-  - core-agent
-  - general-agent
-  - chat
-  - slack
-  - gateway.yaml
+# Only switchboard's gateways reach the daemon.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: general-agent
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: general-agent
+      app.kubernetes.io/component: daemon
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: switchboard
+      ports:
+        - port: attach
+          protocol: TCP

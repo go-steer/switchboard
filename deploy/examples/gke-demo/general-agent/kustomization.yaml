@@ -12,16 +12,27 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# A switchboard-dedicated gke-platform-agent, with switchboard's Google Chat
-# and Slack gateways in front of it, in one namespace. See README.md for what
-# has to exist before this applies (secrets, IAM, the static IP, DNS).
+# A small general-purpose core-agent on Gemini's cheap tier, registered with
+# both gateways as the "general" agent next to the platform agent (#140). No
+# cluster tools, ask-mode approvals, a short persona; its own service account
+# with only Vertex access.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
-namespace: switchboard
 resources:
-  - namespace.yaml
-  - core-agent
-  - general-agent
-  - chat
-  - slack
-  - gateway.yaml
+  - serviceaccount.yaml
+  - pvc.yaml
+  - deployment.yaml
+  - service.yaml
+  - networkpolicy.yaml
+configMapGenerator:
+  - name: general-agent-content
+    files:
+      - config.json
+      - AGENTS.md
+  - name: general-agent-gcp-env
+    literals:
+      - GOOGLE_CLOUD_PROJECT=gke-demos-345619
+      - GOOGLE_CLOUD_LOCATION=global
+images:
+  - name: ghcr.io/go-steer/core-agent
+    newTag: main

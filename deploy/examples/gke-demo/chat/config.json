@@ -1,9 +1,24 @@
 {
   "platform": "googlechat",
-  "daemon_url": "http://core-agent.switchboard.svc.cluster.local:7777",
+  "agents": [
+    {
+      "name": "platform",
+      "display_name": "Platform agent",
+      "daemon_url": "http://core-agent.switchboard.svc.cluster.local:7777",
+      "token_env": "SWITCHBOARD_DAEMON_TOKEN",
+      "kind": "core-agent"
+    },
+    {
+      "name": "general",
+      "display_name": "General agent",
+      "daemon_url": "http://general-agent.switchboard.svc.cluster.local:7777",
+      "token_env": "SWITCHBOARD_DAEMON_TOKEN",
+      "kind": "core-agent"
+    }
+  ],
+  "default_agent": "platform",
   "caller_id": "email",
   "metrics_addr": ":9090",
-  "token_env": "SWITCHBOARD_DAEMON_TOKEN",
   "defaults": {
     "progress_mode": "stream",
     "approvals": true,
@@ -16,6 +31,7 @@
   "googlechat_service_account": "service-1067056737933@gcp-sa-gsuiteaddons.iam.gserviceaccount.com",
   "googlechat_cards": "rich",
   "googlechat_commands": {
-    "1": "progress"
+    "1": "progress",
+    "100": "agent"
   }
 }

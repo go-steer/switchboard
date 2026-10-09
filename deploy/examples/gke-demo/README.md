@@ -25,6 +25,22 @@ instance runs `yolo` with a watcher, and switching it to ask mode would stall
 every watcher-driven turn, because those turns have no thread to surface a
 prompt in.
 
+## Two agents
+
+Both gateways register two agents (#140) and route by them:
+
+- **`platform`** is the gke-platform-agent daemon above, and the default: a
+  plain message goes to it.
+- **`general`** is a small general-purpose core-agent (`general-agent/`) on
+  Gemini's cheap tier (`gemini-3.5-flash-lite`). It has no cluster tools,
+  ask-mode approvals, `checkpoint.mode: operator`, a short persona, and a
+  per-turn cost ceiling of $0.10.
+
+Reach `general` with `/agent general <prompt>` on Google Chat (slash command
+ID 100, mapped in `googlechat_commands`) or `/switchboard agent general
+<prompt>` on Slack. Both agents accept the same gateway token: `general`'s
+bearer table reuses switchboard's `sa:switchboard` token.
+
 ## Before `kubectl apply -k`
 
 These steps are done by hand, once. Variables:
@@ -66,6 +82,13 @@ gcloud iam service-accounts add-iam-policy-binding switchboard-chat@$PROJECT.iam
   --role=roles/iam.workloadIdentityUser --project $PROJECT
 ```
 
+**3b. The general agent's IAM.** Vertex only:
+
+```sh
+gcloud projects add-iam-policy-binding $PROJECT --condition=None --role=roles/aiplatform.user \
+  --member="principal://iam.googleapis.com/projects/$PROJECT_NUMBER/locations/global/workloadIdentityPools/$PROJECT.svc.id.goog/subject/ns/$NS/sa/general-agent"
+```
+
 **4. Secrets.** These are never checked in. The token switchboard presents is
 the `sa:switchboard` entry in the daemon's bearer table. The callers it asserts
 are listed with tokens of their own, as in the laptop rig.
@@ -82,6 +105,8 @@ cat > /tmp/users.json <<EOF
 EOF
 kubectl -n $NS create secret generic core-agent-users --from-file=users.json=/tmp/users.json
 kubectl -n $NS create secret generic switchboard-daemon-token --from-literal=token="$SB_TOKEN"
+# The general agent's bearer table: the same table, so the same switchboard token.
+kubectl -n $NS create secret generic general-agent-users --from-file=users.json=/tmp/users.json
 kubectl -n $NS create secret generic switchboard-slack \
   --from-literal=app-token="$SWITCHBOARD_SLACK_APP_TOKEN" --from-literal=bot-token="$SWITCHBOARD_SLACK_BOT_TOKEN"
 rm /tmp/users.json
