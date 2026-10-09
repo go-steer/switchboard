@@ -40,9 +40,13 @@ type fakeMessenger struct {
 	createErr error
 	cardErr   error
 	patchErr  error
-	// assignThread, when set, is the thread the fake reports each created
-	// message landed in — simulating Chat assigning a thread in a flat space.
-	assignThread string
+	// assignThread, when set, is the thread the fake reports a message posted
+	// with no thread landed in — Chat assigning one. A reply naming a thread
+	// lands in it, as on Chat, unless fallbackThread is set: then it lands
+	// there instead, as Chat's REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD does for a
+	// thread it will not take a reply in (a slash command's, measured).
+	assignThread   string
+	fallbackThread string
 	// byRequest is every keyed create, so a repeated request ID returns the
 	// earlier message as Chat does; deduped counts those.
 	byRequest map[string]*chatv1.Message
@@ -91,7 +95,12 @@ func (f *fakeMessenger) create(_ context.Context, parent string, msg *chatv1.Mes
 	})
 	f.n++
 	out := &chatv1.Message{Name: fmt.Sprintf("spaces/AAA/messages/M%d", f.n)}
-	if f.assignThread != "" {
+	switch {
+	case thread != "" && f.fallbackThread != "":
+		out.Thread = &chatv1.Thread{Name: f.fallbackThread}
+	case thread != "":
+		out.Thread = &chatv1.Thread{Name: thread}
+	case f.assignThread != "":
 		out.Thread = &chatv1.Thread{Name: f.assignThread}
 	}
 	if requestID != "" {
@@ -1318,5 +1327,53 @@ func TestACardReplayAfterATextFallbackIsDeduplicated(t *testing.T) {
 	}
 	if len(f.creates) != 1 || f.deduped != 1 {
 		t.Errorf("creates = %d, deduped = %d; want the card answered with the text already posted", len(f.creates), f.deduped)
+	}
+}
+
+// A reply Chat would not take into the thread asked for lands in a new one, and
+// the ref says where it really went, with a warning — rather than claiming the
+// thread asked for and letting a conversation scatter (measured on the GKE
+// deployment: a slash command's thread takes no app reply, #140).
+func TestARefNamesTheThreadChatFellBackTo(t *testing.T) {
+	f := &fakeMessenger{fallbackThread: "spaces/AAA/threads/NEW"}
+	a := newTestAdapter(f)
+	var warned []string
+	a.logf = func(level chat.Level, format string, args ...any) {
+		if level == chat.LevelInfo {
+			warned = append(warned, fmt.Sprintf(format, args...))
+		}
+	}
+	ref, err := a.Send(context.Background(), chat.Reply{Conversation: "spaces/AAA:spaces/AAA/threads/T1", Text: "hello"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ref.Conversation != "spaces/AAA:spaces/AAA/threads/NEW" {
+		t.Errorf("ref.Conversation = %q, want the thread Chat put it in", ref.Conversation)
+	}
+	if len(warned) != 1 || !strings.Contains(warned[0], "started a new thread") {
+		t.Errorf("warnings = %q, want one naming the fallback", warned)
+	}
+}
+
+// After a fallback, the rest of a chunked reply follows the thread Chat put the
+// first part in: posted to the thread asked for, each part would fall back
+// again, into a thread of its own (caught in review).
+func TestAChunkedReplyFollowsTheFallbackThread(t *testing.T) {
+	f := &fakeMessenger{fallbackThread: "spaces/AAA/threads/NEW"}
+	a := newTestAdapter(f)
+	long := strings.Repeat("word ", chatTextLimit/2) // two chunks at least
+	if _, err := a.Send(context.Background(), chat.Reply{Conversation: "spaces/AAA:spaces/AAA/threads/T1", Text: long}); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.creates) < 2 {
+		t.Fatalf("%d posts, want a chunked reply", len(f.creates))
+	}
+	if f.creates[0].thread != "spaces/AAA/threads/T1" {
+		t.Errorf("first part asked for %q, want the conversation's thread", f.creates[0].thread)
+	}
+	for i, c := range f.creates[1:] {
+		if c.thread != "spaces/AAA/threads/NEW" {
+			t.Errorf("part %d asked for %q, want the thread the first part landed in", i+2, c.thread)
+		}
 	}
 }

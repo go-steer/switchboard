@@ -29,13 +29,16 @@ import (
 //	agent                  the agents here, and which is the default
 //	agent <name> [prompt]  a new thread with <name>, opened with prompt
 //
-// One agent per thread, so where the thread comes from depends on the
-// platform. A Google Chat command is itself a message: typed at the top of a
-// space it starts a thread, and that thread becomes the agent's — the answer
-// appears under the command. A Slack slash command belongs to no thread, so
-// switchboard posts a starter message in the channel and the conversation
-// lives in its thread. Typed inside a thread that already has an agent, the
-// command does not switch it: it says which agent the thread talks to.
+// One agent per thread, and the thread is always one switchboard starts: it
+// posts a starter message naming the agent and the prompt, and the
+// conversation lives in its thread. Not the command's own thread on Google
+// Chat, though a Chat command is a message with a thread: Chat will not take
+// an app's reply into a slash command's thread, and silently starts a new
+// top-level thread for each post instead (measured on the GKE deployment,
+// #140) — an answer arriving as a loose message, its follow-ups scattering.
+// An app's own message has no such limit. Typed inside a thread that already
+// has an agent, the command does not switch it: it says which agent the
+// thread talks to.
 //
 // The pickers (a Chat dropdown card, a Slack modal) are a front end to the
 // same path, startAgentThread.
@@ -89,55 +92,38 @@ func (r *Router) agentCommand(ctx context.Context, cmd chat.Command) string {
 			r.logf.Errorf("agent %s: start a thread with %s: %v", cmd.Channel, name, err)
 		}
 	}()
-	switch {
-	case cmd.Conversation == "":
-		return fmt.Sprintf("Starting a thread with %s…", a.label())
-	case prompt == "":
-		return fmt.Sprintf("This thread talks to %s now: reply here.", a.label())
+	if cmd.Conversation != "" {
+		// Google Chat: the starter is the acknowledgment, and an ack would be
+		// one more loose message (it, too, cannot land in the command's thread).
+		return ""
 	}
-	return ""
+	return fmt.Sprintf("Starting a thread with %s…", a.label())
 }
 
-// startAgentThread opens a conversation with agent a in a thread of its own
-// and, if there is a prompt, runs it as the thread's first turn. The thread is
-// the one the command was typed in when the platform gives one (Google Chat),
-// and otherwise a starter message posted in the channel (Slack). Whatever goes
-// wrong is said where the person will look: in the thread, or in the channel
-// if there is no thread yet.
+// startAgentThread opens a conversation with agent a in the thread of a
+// starter message it posts in the channel and, if there is a prompt, runs it
+// as the thread's first turn. Whatever goes wrong before the conversation is
+// open is said in the channel, and a starter with nothing behind it is taken
+// down.
 func (r *Router) startAgentThread(ctx context.Context, cmd chat.Command, a *agent, prompt string) error {
-	conv := cmd.Conversation
-	var starter chat.MessageRef
-	if conv == "" {
-		text := "*→ " + a.label() + "*"
-		if cmd.CallerMention != "" {
-			text = "*" + cmd.CallerMention + " → " + a.label() + "*"
-		}
-		if prompt != "" {
-			text += "\n" + prompt
-		}
-		ref, err := r.out.Send(ctx, chat.Reply{Conversation: cmd.Channel, Text: text, Kind: chat.KindNotice})
-		if err != nil {
-			r.tellAgentFailure(ctx, cmd.Channel, a)
-			return fmt.Errorf("post the starter: %w", err)
-		}
-		if ref.Conversation == "" || ref.Conversation == cmd.Channel {
-			r.tellAgentFailure(ctx, cmd.Channel, a)
-			return fmt.Errorf("the starter landed in no thread (%q)", ref.Conversation)
-		}
-		conv, starter = ref.Conversation, ref
+	ref, err := r.out.Send(ctx, chat.Reply{Conversation: cmd.Channel, Text: starterText(a, cmd.CallerMention, prompt), Kind: chat.KindNotice})
+	if err != nil {
+		r.tellAgentFailure(ctx, cmd.Channel, a)
+		return fmt.Errorf("post the starter: %w", err)
 	}
+	if ref.Conversation == "" || ref.Conversation == cmd.Channel {
+		r.tellAgentFailure(ctx, cmd.Channel, a)
+		return fmt.Errorf("the starter landed in no thread (%q)", ref.Conversation)
+	}
+	conv, starter := ref.Conversation, ref
 	e, err := r.sessionAs(ctx, conv, cmd.Channel, cmd.Caller, a.name)
 	if err != nil {
-		if starter.ID != "" {
-			// Nothing behind it: take the starter down rather than leave a
-			// conversation in the channel that cannot be answered.
-			if derr := r.out.Delete(ctx, starter); derr != nil {
-				r.logf.Warnf("agent %s: delete the starter: %v", conv, derr)
-			}
-			r.tellAgentFailure(ctx, cmd.Channel, a)
-		} else {
-			r.tellAgentFailure(ctx, conv, a)
+		// Nothing behind it: take the starter down rather than leave a
+		// conversation in the channel that cannot be answered.
+		if derr := r.out.Delete(ctx, starter); derr != nil {
+			r.logf.Warnf("agent %s: delete the starter: %v", conv, derr)
 		}
+		r.tellAgentFailure(ctx, cmd.Channel, a)
 		return err
 	}
 	// sessionAs returns an existing conversation as it is: a message that got
@@ -158,6 +144,21 @@ func (r *Router) startAgentThread(ctx context.Context, cmd chat.Command, a *agen
 		}
 	}
 	return nil
+}
+
+// starterText is the message a conversation with an agent opens with: the
+// agent, who asked (where the platform can name them), and the prompt.
+func starterText(a *agent, mention, prompt string) string {
+	text := "**" + a.label() + "**"
+	if mention != "" {
+		text += " · asked by " + mention
+	}
+	if prompt != "" {
+		text += "\n" + prompt
+	} else {
+		text += "\nReply in this thread to talk to it."
+	}
+	return text
 }
 
 // tellAgentFailure says, where it can, that a conversation could not start.
@@ -197,21 +198,19 @@ func (r *Router) agentLabel(name string) string {
 func (r *Router) agentListing(cs channelSettings) string {
 	def, _ := r.agents.channelAgent(cs)
 	def = r.agents.resolve(def)
-	var names []string
+	var lines []string
 	for _, a := range r.agents.allowedIn(cs) {
-		item := "`" + a.name + "`"
-		if a.display != "" {
-			item += " (" + a.display + ")"
-		}
+		item := "• **" + a.label() + "** (`" + a.name + "`)"
 		if a.name == def {
 			item += ", the default"
 		}
-		names = append(names, item)
+		lines = append(lines, item)
 	}
-	if len(names) == 0 {
+	if len(lines) == 0 {
 		return "No agents are available here."
 	}
-	return "Agents here: " + strings.Join(names, "; ") + ". Start a thread with one with `agent <name> <prompt>`; a plain message goes to the default."
+	return "**Agents here**\n" + strings.Join(lines, "\n") +
+		"\nStart a thread with one: `agent <name> <prompt>`. A plain message goes to the default."
 }
 
 func agentAllowed(list []*agent, name string) bool {

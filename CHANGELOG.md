@@ -74,6 +74,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   lists the one-time steps (static IP, DNS, IAM, secrets) and the cutover.
 
 ### Fixed
+- **`agent` on Google Chat answers in a thread, not as loose messages.**
+  Phase 3a used the slash command's own thread for the agent's conversation,
+  but Chat won't take an app's reply into a slash command's thread. Its
+  `REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD` silently started a new top-level
+  thread for every post (measured on the GKE deployment), so the answer
+  arrived as a loose message and follow-ups would have scattered. Chat now
+  starts from switchboard's own starter message, as Slack does. The Chat
+  adapter also reports the thread a post actually landed in, and logs when
+  Chat moved a reply, rather than claiming the thread it asked for. A long
+  reply's later parts follow it there. For the outbound ingress this means a
+  post's response, and the binding it makes, name the thread Chat really
+  used, which can differ from the one requested.
+- **The `agent` listing reads as a list**, and the startup line names the
+  registered agents rather than a stale default daemon URL.
 - **A multi-call tool notice on Google Chat no longer runs together on one
   line.** A frame of several calls was one markdown paragraph, and Chat dropped
   the blank lines between its calls. The header and each call are now separate

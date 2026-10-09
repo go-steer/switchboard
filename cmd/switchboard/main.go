@@ -804,7 +804,11 @@ func runServe(args []string) (err error) {
 	// run, and a JSON stream that opens with three unparseable ones is worse
 	// than no banner at all.
 	if inbound {
-		logf.Infof("bridging %s -> %s", adapter.Name(), *daemonURL)
+		target := *daemonURL
+		if agents != nil && !agents.implicit {
+			target = "agents " + strings.Join(agents.order, ", ")
+		}
+		logf.Infof("bridging %s -> %s", adapter.Name(), target)
 	} else {
 		// Said plainly, because it is the difference between a quiet gateway
 		// and a broken one: nobody can talk to the agent through this process.
