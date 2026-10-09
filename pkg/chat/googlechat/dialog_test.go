@@ -157,3 +157,49 @@ func TestIsAgentDialog(t *testing.T) {
 		}
 	}
 }
+
+// A bare /agent without the dialog flag (the shape measured live: no
+// dialogEventType) posts the listing with a button that opens the picker,
+// and that button's click is answered with the picker.
+func TestTheListingCardOpensThePicker(t *testing.T) {
+	f := &fakeMessenger{}
+	a := newIngressAdapter(t, f)
+	a.cmds = map[int64]string{100: "agent"}
+	a.cards = CardsRich
+	h := &dirHandler{agents: twoChoices()}
+	h.ack = "**Agents here**\n• **Platform agent** (platform), the default"
+	a.runCommand(context.Background(), h, "spaces/AAA:spaces/AAA/threads/C1", chat.Command{Name: "agent", Channel: "spaces/AAA"})
+	if len(f.creates) != 1 || f.creates[0].card == nil {
+		t.Fatalf("creates = %+v, want the listing card", f.creates)
+	}
+	raw, _ := json.Marshal(f.creates[0].card)
+	if s := string(raw); !strings.Contains(s, `"interaction":"OPEN_DIALOG"`) || !strings.Contains(s, `"value":"open"`) || !strings.Contains(s, "Start a conversation") {
+		t.Errorf("listing card = %s, want a button that opens the picker", s)
+	}
+	if s := string(raw); !strings.Contains(s, `"textSyntax":"MARKDOWN"`) || !strings.Contains(s, "**Agents here**") {
+		t.Errorf("listing card = %s, want the listing as a markdown paragraph, its bold intact", s)
+	}
+
+	click := `{"commonEventObject": {"parameters": {"switchboard_dialog": "open"}},
+		"chat": {"user": {"name": "users/5", "email": "ada@example.com"}, "space": {"name": "spaces/AAA"},
+		"buttonClickedPayload": {"space": {"name": "spaces/AAA"},
+		"message": {"name": "spaces/AAA/messages/L1", "thread": {"name": "spaces/AAA/threads/L1"}}}}}`
+	out := serveDialog(t, h, click)
+	resp, _ := json.Marshal(out)
+	if s := string(resp); !strings.Contains(s, `"pushCard"`) || !strings.Contains(s, `"type":"DROPDOWN"`) {
+		t.Errorf("click response = %s, want the picker", s)
+	}
+}
+
+// A listing with nothing to pick from (or a typed command) carries no button.
+func TestNoPickerButtonWithoutChoices(t *testing.T) {
+	f := &fakeMessenger{}
+	a := newIngressAdapter(t, f)
+	a.cards = CardsRich
+	h := &fakeHandler{ack: "This gateway has one agent: just mention the app to talk to it."}
+	a.runCommand(context.Background(), h, "spaces/AAA:spaces/AAA/threads/C1", chat.Command{Name: "agent", Channel: "spaces/AAA"})
+	raw, _ := json.Marshal(f.creates)
+	if strings.Contains(string(raw), "OPEN_DIALOG") {
+		t.Errorf("creates = %s, want no picker button", raw)
+	}
+}

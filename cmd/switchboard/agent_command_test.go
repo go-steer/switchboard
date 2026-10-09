@@ -51,11 +51,11 @@ func TestBareAgentListsTheChannelsAgents(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(ack, "**Agents here**\n") || !strings.Contains(ack, "• **a** (`a`)\n") || !strings.Contains(ack, "• **b** (`b`), the default") {
+	if !strings.Contains(ack, "**Agents here**\n") || !strings.Contains(ack, "• **a** (a)\n") || !strings.Contains(ack, "• **b** (b), the default") {
 		t.Errorf("listing = %q, want both agents with C2's default marked", ack)
 	}
 	r.setChannels(map[string]channelSettings{"C3": {defaultAgent: "b", agents: []string{"b"}}})
-	if ack, _ := r.HandleCommand(context.Background(), agentCmd("", "C3", "")); strings.Contains(ack, "(`a`)") {
+	if ack, _ := r.HandleCommand(context.Background(), agentCmd("", "C3", "")); strings.Contains(ack, "(a)") {
 		t.Errorf("listing = %q offers an agent the channel does not allow", ack)
 	}
 }

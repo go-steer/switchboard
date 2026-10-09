@@ -254,7 +254,9 @@ func (a *Adapter) handleSlashCommand(ctx context.Context, h chat.Handler, req *s
 		ack = "Sorry, that command failed."
 	}
 	if req != nil {
-		if aerr := a.sm.Ack(*req, map[string]any{"response_type": "ephemeral", "text": ack}); aerr != nil {
+		// Through toMrkdwn like every other post: the router writes markdown
+		// (**bold**), and a bare angle bracket would be read as Slack syntax.
+		if aerr := a.sm.Ack(*req, map[string]any{"response_type": "ephemeral", "text": toMrkdwn(ack)}); aerr != nil {
 			a.logf.Errorf("slack: ack slash command: %v", aerr)
 		}
 	}

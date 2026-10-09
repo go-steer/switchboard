@@ -37,6 +37,14 @@ import (
 // the dialog with the command's acknowledgment as a notification. Typed with
 // arguments, the command runs as typed and the dialog response only closes.
 //
+// The command flag is not the only way in, and on an add-on Chat app not a
+// reliable one: with "Opens a dialog" ticked, the slash command still arrived
+// as a plain command, no dialogEventType on it (measured on the GKE
+// deployment). So a bare `agent`'s listing card carries a "Start a
+// conversation…" button whose action has interaction OPEN_DIALOG — the
+// documented way for a message button to open a dialog — and its click
+// (params switchboard_dialog=open) is answered with the picker.
+//
 // HTTP ingress only: a dialog is the synchronous response to the request
 // that asked for it, which Pub/Sub delivery has no way to give. Without the
 // console flag none of this is reached, and `agent` works as text. Any command
@@ -48,6 +56,7 @@ const (
 	// paramDialog marks a dialog's Start button, so its submit is recognised.
 	paramDialog = "switchboard_dialog"
 	dialogAgent = "agent"
+	dialogOpen  = "open" // the listing card's button that opens the picker
 
 	// The dialog's input names, read back from formInputs on submit.
 	inputAgent  = "agent"
@@ -62,8 +71,34 @@ func isAgentDialog(in inbound) bool {
 		return true
 	case in.kind == kindButton && in.dialog == "SUBMIT_DIALOG" && in.params[paramDialog] == dialogAgent:
 		return true
+	case in.kind == kindButton && in.params[paramDialog] == dialogOpen:
+		// The opener's click. Not gated on dialogEventType: its answer must be
+		// a dialog whatever the payload says, as the button asked for one.
+		return true
 	}
 	return false
+}
+
+// isBareAgent reports whether cmd lists the agents rather than starting one.
+func isBareAgent(cmd chat.Command) bool {
+	return (cmd.Name == "agent" || cmd.Name == "agents") && len(cmd.Args) == 0
+}
+
+// agentListingCard is a bare `agent`'s reply: the listing as a MARKDOWN
+// paragraph — the ack card's icon line renders only an HTML subset, and the
+// listing's bold came out as literal asterisks (reported from the GKE
+// deployment) — and, when there is a choice to make and an endpoint to open
+// it from, the button that opens the picker.
+func (a *Adapter) agentListingCard(ack string, h chat.Handler, space string) *chatv1.GoogleAppsCardV1Card {
+	widgets := markdownWidgets(ack)
+	if dir, ok := h.(chat.AgentDirectory); ok && len(dir.AgentChoices(space)) > 0 {
+		if open := actionButton("Start a conversation…", a.actionURL(),
+			&chatv1.GoogleAppsCardV1ActionParameter{Key: paramDialog, Value: dialogOpen}); open != nil {
+			open.OnClick.Action.Interaction = "OPEN_DIALOG"
+			widgets = append(widgets, buttonRow(1, open))
+		}
+	}
+	return widgetCard(widgets...)
 }
 
 // answerDialog answers a step of the agent dialog with the RenderActions it
@@ -71,9 +106,11 @@ func isAgentDialog(in inbound) bool {
 func (a *Adapter) answerDialog(w http.ResponseWriter, runCtx context.Context, h chat.Handler, in inbound) {
 	in.caller = a.callerOf(in)
 	var resp any
-	switch in.kind {
-	case kindCommand:
+	switch {
+	case in.kind == kindCommand:
 		resp = a.dialogForCommand(runCtx, h, in)
+	case in.params[paramDialog] == dialogOpen:
+		resp = a.openPicker(h, in.space)
 	default:
 		resp = a.submitDialog(runCtx, h, in)
 	}
@@ -89,11 +126,24 @@ func (a *Adapter) answerDialog(w http.ResponseWriter, runCtx context.Context, h 
 	}
 }
 
+// openPicker answers the listing card's button with the picker, or closes
+// with a reason when there is nothing to pick.
+func (a *Adapter) openPicker(h chat.Handler, space string) any {
+	if dir, ok := h.(chat.AgentDirectory); ok {
+		if choices := dir.AgentChoices(space); len(choices) > 0 {
+			if card := agentDialogCard(choices, a.actionURL()); card != nil {
+				return openDialog(card)
+			}
+		}
+	}
+	return closeDialog("No agents are available here.")
+}
+
 // dialogForCommand opens the picker for a bare command, or runs a command
 // typed with arguments and closes.
 func (a *Adapter) dialogForCommand(ctx context.Context, h chat.Handler, in inbound) any {
 	cmd := a.commandOf(in)
-	if (cmd.Name == "agent" || cmd.Name == "agents") && len(cmd.Args) == 0 {
+	if isBareAgent(cmd) {
 		if dir, ok := h.(chat.AgentDirectory); ok {
 			if choices := dir.AgentChoices(in.space); len(choices) > 0 {
 				if card := agentDialogCard(choices, a.actionURL()); card != nil {

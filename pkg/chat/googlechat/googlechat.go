@@ -428,7 +428,11 @@ func (a *Adapter) runCommand(ctx context.Context, h chat.Handler, conv string, c
 	if ack == "" {
 		return
 	}
-	if _, err := a.post(ctx, conv, a.ackCardFor(h, cmd.Name, ack), toChatText(ack)); err != nil {
+	card := a.ackCardFor(h, cmd.Name, ack)
+	if isBareAgent(cmd) && a.cards != CardsOff {
+		card = a.agentListingCard(ack, h, cmd.Channel)
+	}
+	if _, err := a.post(ctx, conv, card, toChatText(ack)); err != nil {
 		a.logf.Errorf("googlechat: command ack %s: %v", conv, err)
 	}
 }
