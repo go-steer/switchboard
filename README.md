@@ -404,8 +404,14 @@ show:
 {"name": "general", "display_name": "General agent", "description": "Quick questions; no cluster access", …}
 ```
 
-The Slack modal, adding agents through an API, and showing which agent
-answered come in later steps of #140.
+**The picker on Slack.** A bare `/switchboard agent` opens a modal with the
+same three parts: a select of the channel's agents (the default preselected,
+each described), an optional prompt, and **Start**. The modal comes from the
+slash command's trigger id, so it works over Socket Mode and needs no new
+scope. If Slack won't open it, the command answers with the agent list.
+
+Adding agents through an API, and showing which agent answered, come in later
+steps of #140.
 
 ### Long-turn feedback
 

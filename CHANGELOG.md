@@ -45,6 +45,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `description` in the config file. The listing reply is a markdown card, so
   its bold renders: the plain acknowledgment card's icon line showed literal
   asterisks.
+- **The agent picker on Slack** (#140, phase 3c). A bare
+  `/switchboard agent` opens a modal (`views.open` with the command's
+  trigger id): a select of the channel's agents, the default preselected,
+  each with its `description`; an optional prompt; **Start**, which starts
+  the thread exactly as the typed form does and tells only you. If Slack
+  won't open it, or there's nothing to pick, the command answers with the
+  listing as before. Needs no new scope.
 - **The GKE example runs two agents** (#140). `deploy/examples/gke-demo` adds
   a small general-purpose core-agent (`general`, on `gemini-3.5-flash-lite`,
   no cluster tools) next to the platform agent. Both gateways register both

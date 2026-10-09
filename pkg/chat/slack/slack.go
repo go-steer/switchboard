@@ -225,6 +225,12 @@ func (a *Adapter) handleInteractive(ctx context.Context, h chat.Handler, req *so
 			a.logf.Warnf("slack: ack interaction: %v", err)
 		}
 	}
+	if cmd, ok := agentCommandFromSubmission(cb); ok {
+		// The ack above closed the picker; what the command says back — the
+		// typed form's ephemeral ack — goes to the submitter the same way.
+		go a.runModalCommand(ctx, h, cmd, cb.User.ID)
+		return
+	}
 	press, ok := pressFrom(cb)
 	if !ok {
 		return
@@ -247,6 +253,15 @@ func (a *Adapter) handleInteractive(ctx context.Context, h chat.Handler, req *so
 // 3s ack window. The command's scope is the channel it was issued in.
 func (a *Adapter) handleSlashCommand(ctx context.Context, h chat.Handler, req *socketmode.Request, sc slack.SlashCommand) {
 	cmd := parseSlashCommand(sc)
+	if isBareAgent(cmd) && a.openAgentModal(ctx, h, sc) {
+		// The picker is the answer; the slash command's ack stays empty.
+		if req != nil {
+			if aerr := a.sm.Ack(*req); aerr != nil {
+				a.logf.Errorf("slack: ack slash command: %v", aerr)
+			}
+		}
+		return
+	}
 	cmd.Caller = a.resolveCaller(ctx, sc.UserID)
 	ack, err := h.HandleCommand(ctx, cmd)
 	if err != nil {
