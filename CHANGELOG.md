@@ -30,6 +30,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - A thread whose agent has been removed gets a notice and is not rerouted.
   - Without an `agents` list, nothing changes.
   - The admin API and attribution follow in later phases.
+- **The GKE example runs two agents** (#140). `deploy/examples/gke-demo` adds
+  a small general-purpose core-agent (`general`, on `gemini-3.5-flash-lite`,
+  no cluster tools) next to the platform agent. Both gateways register both
+  agents, with `platform` as the default, and Chat maps slash command 100 to
+  `agent`.
 - **`agent`: talk to a particular agent** (#140, phase 3a).
   - `agent` lists the agents a channel offers and marks the default.
   - `agent <name> <prompt>` starts a thread with that agent. On Google Chat
