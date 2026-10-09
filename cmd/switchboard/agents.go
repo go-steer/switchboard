@@ -18,12 +18,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"regexp"
 	"slices"
 	"strings"
 
 	"github.com/go-steer/switchboard/pkg/approval"
+	"github.com/go-steer/switchboard/pkg/chat"
 	"github.com/go-steer/switchboard/pkg/daemon"
 )
 
@@ -59,6 +61,7 @@ type AgentConfig struct {
 	Name        string            `json:"name"`
 	DisplayName string            `json:"display_name,omitempty"`
 	Description string            `json:"description,omitempty"`
+	IconURL     string            `json:"icon_url,omitempty"`
 	DaemonURL   string            `json:"daemon_url"`
 	TokenEnv    string            `json:"token_env"`
 	Kind        string            `json:"kind,omitempty"`
@@ -74,6 +77,7 @@ type agent struct {
 	name    string
 	display string
 	desc    string
+	icon    string
 	daemon  *daemon.Client
 	// approvals is nil when no channel relays permission prompts: a run with
 	// approvals off everywhere holds no client for a surface it does not offer.
@@ -209,6 +213,20 @@ func (r *Router) approvalsOf(e *sessionEntry) *approval.Client {
 	return nil
 }
 
+// identityOf is how a conversation's agent signs what it writes (phase 5):
+// nil on a gateway with one agent, where there is nobody to tell apart, and
+// for an agent that is gone.
+func (r *Router) identityOf(e *sessionEntry) *chat.AgentIdentity {
+	if r.agents.implicit {
+		return nil
+	}
+	a, ok := r.agents.lookup(e.agent)
+	if !ok {
+		return nil
+	}
+	return &chat.AgentIdentity{Name: a.name, Label: a.label(), IconURL: a.icon}
+}
+
 // errAgentGone is a conversation whose agent is no longer registered — removed
 // from the config since the thread began. Nothing is rerouted: the thread is
 // told, and a new one starts with an agent that exists.
@@ -277,6 +295,11 @@ func buildAgents(list []AgentConfig, def string, wantApprovals bool) (*agentSet,
 		if ac.Kind != "" && !slices.Contains(agentKinds, ac.Kind) {
 			return nil, fmt.Errorf("%s.kind %q: want one of %s", where, ac.Kind, strings.Join(agentKinds, ", "))
 		}
+		if icon := strings.TrimSpace(ac.IconURL); icon != "" {
+			if u, err := url.Parse(icon); err != nil || u.Scheme != "https" || u.Host == "" {
+				return nil, fmt.Errorf("%s.icon_url %q: want an https URL to an image", where, ac.IconURL)
+			}
+		}
 		if strings.TrimSpace(ac.DaemonURL) == "" {
 			return nil, fmt.Errorf("%s.daemon_url is required", where)
 		}
@@ -292,7 +315,7 @@ func buildAgents(list []AgentConfig, def string, wantApprovals bool) (*agentSet,
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", where, err)
 		}
-		a := &agent{name: ac.Name, display: ac.DisplayName, desc: strings.TrimSpace(ac.Description), daemon: dc}
+		a := &agent{name: ac.Name, display: ac.DisplayName, desc: strings.TrimSpace(ac.Description), icon: strings.TrimSpace(ac.IconURL), daemon: dc}
 		if wantApprovals {
 			if a.approvals, err = approval.New(cfg); err != nil {
 				return nil, fmt.Errorf("%s: %w", where, err)

@@ -129,6 +129,13 @@ const (
 	KindDecision ReplyKind = "decision"
 )
 
+// AgentIdentity is how an agent is shown on what it wrote.
+type AgentIdentity struct {
+	Name    string // the registry name, e.g. "general"
+	Label   string // the display name, e.g. "General agent"
+	IconURL string // an https image; empty for the app's own
+}
+
 // Reply is one outbound turn switchboard relays back into a conversation.
 type Reply struct {
 	// Conversation echoes Message.Conversation so the adapter posts into
@@ -142,6 +149,12 @@ type Reply struct {
 	// Kind classifies the reply so an adapter can render it in the
 	// platform's idiom. The zero value (KindAnswer) is an agent turn.
 	Kind ReplyKind
+
+	// Agent names the agent that wrote this reply, for an adapter to show who
+	// answered: Slack posts under the agent's name and icon, Google Chat puts
+	// it in a card header. Nil — a gateway with one agent, or a reply that is
+	// the gateway's own — shows nothing new.
+	Agent *AgentIdentity
 
 	// Usage is what the turn cost, for an adapter to render as a footer on
 	// the reply. Nil — the usual case — means show nothing: the router only

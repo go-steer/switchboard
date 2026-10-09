@@ -105,6 +105,11 @@ answer the previous process may already have posted, instead of posting it
 again (`conversations.replies`). Without them it posts, logs once that it
 could not check, and the worst case after a crash is one duplicate message.
 
+Optional, with several agents (an `agents` list in the config file):
+`chat:write.customize` posts each agent's answers and questions under the
+agent's name and `icon_url`. Without it they go out as the app, and the
+gateway logs once that it could not.
+
 Only `chat:write` is unconditional. `--caller-id id` asserts the raw Slack user
 ID and never calls `users.info`, so both `users:read*` scopes drop away — at the
 cost of provisioning `U0123ABC` in the daemon instead of an address a human can

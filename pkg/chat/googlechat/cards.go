@@ -768,6 +768,20 @@ func cardBytes(card *chatv1.GoogleAppsCardV1Card) int {
 	return len(b)
 }
 
+// withAgentHeader names the agent that wrote a card in the card's header, with
+// its icon when it has one (#140, phase 5). A nil card or agent is left alone.
+func withAgentHeader(card *chatv1.GoogleAppsCardV1Card, ag *chat.AgentIdentity) *chatv1.GoogleAppsCardV1Card {
+	if card == nil || ag == nil || ag.Label == "" {
+		return card
+	}
+	card.Header = &chatv1.GoogleAppsCardV1CardHeader{Title: clamp(ag.Label, maxCardHeader)}
+	if ag.IconURL != "" {
+		card.Header.ImageUrl = ag.IconURL
+		card.Header.ImageType = "CIRCLE"
+	}
+	return card
+}
+
 // withUsageFooter appends the turn's accounting to an answer card as a final
 // iconed line, separated by a divider. It runs after answerCard's widget
 // budget so the footer can never be what pushes a card over — and it appends

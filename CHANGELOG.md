@@ -45,6 +45,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `description` in the config file. The listing reply is a markdown card, so
   its bold renders: the plain acknowledgment card's icon line showed literal
   asterisks.
+- **Which agent answered** (#140, phase 5). With an `agents` list, answers
+  and permission questions name their agent.
+  - **Slack** posts them under the agent's `display_name` and new optional
+    `icon_url`. This needs the `chat:write.customize` scope, now in the
+    sample manifest; without it, replies go out as the app and the log says
+    so once.
+  - **Google Chat** heads the card with the agent's name and icon. A plain
+    answer gets a card for it, as for a usage footer, and a text answer leads
+    with the name.
+  - The gateway's own messages stay the app's, and a single-agent gateway
+    looks as before.
 - **The agent picker on Slack** (#140, phase 3c). A bare
   `/switchboard agent` opens a modal (`views.open` with the command's
   trigger id): a select of the channel's agents, the default preselected,

@@ -2484,6 +2484,7 @@ func (r *Router) deliverText(ctx context.Context, e *sessionEntry, conv, text st
 	ref, err := r.out.Send(ctx, chat.Reply{
 		Conversation: conv,
 		Text:         text,
+		Agent:        r.identityOf(e),
 		Usage:        usage,
 		Key:          answerKey(e.sess, seq),
 		Verify:       seq <= e.verifyThrough.Load(),
