@@ -348,6 +348,14 @@ type Command struct {
 	CallerMention string
 }
 
+// DeleteLeavesTrace is an optional Adapter capability: deleting a message on
+// this platform leaves a visible trace — Google Chat shows "Message deleted
+// by its author" in its place. A router that would delete a transient message
+// (the progress placeholder) edits it into a final line instead.
+type DeleteLeavesTrace interface {
+	DeleteLeavesTrace() bool
+}
+
 // AgentChoice is one agent a picker offers (#140).
 type AgentChoice struct {
 	// Name is what the `agent` command takes.

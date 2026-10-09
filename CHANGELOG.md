@@ -89,6 +89,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   lists the one-time steps (static IP, DNS, IAM, secrets) and the cutover.
 
 ### Fixed
+- **No more "Message deleted by its author" on Google Chat.** Chat leaves
+  that tombstone wherever an app deletes a message in a thread, so every
+  turn's ⏳ placeholder left one. On Chat the placeholder is now edited into a
+  final line instead (**✔ Done · 12s**, or **✖ Stopped · 12s** for a turn that
+  didn't finish), and the clock is no longer moved below narration, since a
+  move is a post and a delete. Adapters report it through a new
+  `chat.DeleteLeavesTrace` capability. On Slack nothing changes.
+  - A clock left by an earlier turn, or by a restart, is finalised as
+    stopped.
+  - With a queued message (#42), the next turn's clock stays above the
+    previous answer instead of moving below it.
+  - A crash inside the half-second persist window after an answer can make
+    the restarted gateway relabel that turn's "Done" as "Stopped".
 - **`agent` on Google Chat answers in a thread, not as loose messages.**
   Phase 3a used the slash command's own thread for the agent's conversation,
   but Chat won't take an app's reply into a slash command's thread. Its
