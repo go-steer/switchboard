@@ -225,10 +225,10 @@ func (a *Adapter) handleInteractive(ctx context.Context, h chat.Handler, req *so
 			a.logf.Warnf("slack: ack interaction: %v", err)
 		}
 	}
-	if cmd, ok := agentCommandFromSubmission(cb); ok {
+	if cmd, responseURL, ok := agentCommandFromSubmission(cb); ok {
 		// The ack above closed the picker; what the command says back — the
 		// typed form's ephemeral ack — goes to the submitter the same way.
-		go a.runModalCommand(ctx, h, cmd, cb.User.ID)
+		go a.runModalCommand(ctx, h, cmd, cb.User.ID, responseURL)
 		return
 	}
 	press, ok := pressFrom(cb)
@@ -262,7 +262,11 @@ func (a *Adapter) handleSlashCommand(ctx context.Context, h chat.Handler, req *s
 		}
 		return
 	}
-	cmd.Caller = a.resolveCaller(ctx, sc.UserID)
+	if !isBareAgent(cmd) {
+		// The listing names no caller, and after a slow picker open there may
+		// be no time left in the ack window for a users.info (caught in review).
+		cmd.Caller = a.resolveCaller(ctx, sc.UserID)
+	}
 	ack, err := h.HandleCommand(ctx, cmd)
 	if err != nil {
 		a.logf.Errorf("slack: slash command %q: %v", cmd.Name, err)

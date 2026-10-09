@@ -16,6 +16,7 @@ package slack
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"time"
 
@@ -31,7 +32,9 @@ import (
 // view_submission; acknowledging it (handleInteractive does, empty) closes the
 // modal, and the choice runs as the `agent` command — the same starter
 // message and thread as the typed form. The channel rides in the view's
-// private metadata, since a view belongs to no channel.
+// private metadata, since a view belongs to no channel, and so does the slash
+// command's response_url: the acknowledgment goes back through it, which —
+// unlike a post — works where the app is not a member (caught in review).
 
 const (
 	agentModalID = "switchboard_agent"
@@ -40,6 +43,8 @@ const (
 	modalAgentAction = "agent_select"
 	modalPromptBlock = "prompt"
 	modalPromptInput = "prompt_input"
+
+	defaultMarker = " (default)"
 
 	openModalTimeout = 2 * time.Second
 	maxSelectOptions = 100 // Slack's cap on a static_select; past it, the listing
@@ -66,23 +71,34 @@ func (a *Adapter) openAgentModal(ctx context.Context, h chat.Handler, sc slack.S
 	// open must leave time to answer as text instead.
 	octx, cancel := context.WithTimeout(ctx, openModalTimeout)
 	defer cancel()
-	if _, err := a.api.OpenViewContext(octx, sc.TriggerID, agentModal(choices, sc.ChannelID)); err != nil {
+	meta := modalMeta{Channel: sc.ChannelID, ResponseURL: sc.ResponseURL}
+	if _, err := a.api.OpenViewContext(octx, sc.TriggerID, agentModal(choices, meta)); err != nil {
+		// A timeout can still have opened it Slack-side, and then the person
+		// sees both the picker and the listing: harmless, and rare.
 		a.logf.Warnf("slack: open the agent picker: %v; answering as text", err)
 		return false
 	}
 	return true
 }
 
+// modalMeta is what the picker carries in its private metadata.
+type modalMeta struct {
+	Channel     string `json:"c"`
+	ResponseURL string `json:"r,omitempty"`
+}
+
 // agentModal is the picker view.
-func agentModal(choices []chat.AgentChoice, channel string) slack.ModalViewRequest {
+func agentModal(choices []chat.AgentChoice, meta modalMeta) slack.ModalViewRequest {
+	raw, _ := json.Marshal(meta) // two strings: cannot fail
 	opts := make([]*slack.OptionBlockObject, 0, len(choices))
 	var initial *slack.OptionBlockObject
 	for _, c := range choices {
-		label := c.Label
+		label := clampRunes(c.Label, 75)
 		if c.Default {
-			label += " (default)"
+			// Clamped first, so a long label cannot cut the marker off.
+			label = clampRunes(c.Label, 75-len(defaultMarker)) + defaultMarker
 		}
-		o := slack.NewOptionBlockObject(c.Name, slack.NewTextBlockObject(slack.PlainTextType, clampRunes(label, 75), false, false), nil)
+		o := slack.NewOptionBlockObject(c.Name, slack.NewTextBlockObject(slack.PlainTextType, label, false, false), nil)
 		if c.Description != "" {
 			o.Description = slack.NewTextBlockObject(slack.PlainTextType, clampRunes(c.Description, 75), false, false)
 		}
@@ -110,7 +126,7 @@ func agentModal(choices []chat.AgentChoice, channel string) slack.ModalViewReque
 	return slack.ModalViewRequest{
 		Type:            slack.VTModal,
 		CallbackID:      agentModalID,
-		PrivateMetadata: channel,
+		PrivateMetadata: string(raw),
 		Title:           slack.NewTextBlockObject(slack.PlainTextType, "Talk to an agent", false, false),
 		Submit:          slack.NewTextBlockObject(slack.PlainTextType, "Start", false, false),
 		Close:           slack.NewTextBlockObject(slack.PlainTextType, "Cancel", false, false),
@@ -119,10 +135,15 @@ func agentModal(choices []chat.AgentChoice, channel string) slack.ModalViewReque
 }
 
 // agentCommandFromSubmission turns the picker's submit into the `agent`
-// command it stands for. ok is false for any other view's submission.
-func agentCommandFromSubmission(cb slack.InteractionCallback) (chat.Command, bool) {
+// command it stands for, and the response_url to acknowledge it through. ok is
+// false for any other view's submission.
+func agentCommandFromSubmission(cb slack.InteractionCallback) (chat.Command, string, bool) {
 	if cb.Type != slack.InteractionTypeViewSubmission || cb.View.CallbackID != agentModalID {
-		return chat.Command{}, false
+		return chat.Command{}, "", false
+	}
+	var meta modalMeta
+	if err := json.Unmarshal([]byte(cb.View.PrivateMetadata), &meta); err != nil {
+		return chat.Command{}, "", false
 	}
 	var name, prompt string
 	if cb.View.State != nil {
@@ -133,30 +154,41 @@ func agentCommandFromSubmission(cb slack.InteractionCallback) (chat.Command, boo
 			prompt = strings.TrimSpace(v.Value)
 		}
 	}
-	if name == "" || cb.View.PrivateMetadata == "" {
-		return chat.Command{}, false
+	if name == "" || meta.Channel == "" {
+		return chat.Command{}, "", false
 	}
 	text := name
 	if prompt != "" {
 		text += " " + prompt
 	}
-	cmd := chat.Command{Name: "agent", Channel: cb.View.PrivateMetadata, Args: strings.Fields(text), Text: text}
+	cmd := chat.Command{Name: "agent", Channel: meta.Channel, Args: strings.Fields(text), Text: text}
 	if cb.User.ID != "" {
 		cmd.CallerMention = "<@" + cb.User.ID + ">"
 	}
-	return cmd, true
+	return cmd, meta.ResponseURL, true
 }
 
 // runModalCommand runs the picker's command and shows its acknowledgment to
-// the submitter alone, as the slash command's ephemeral ack would have.
-func (a *Adapter) runModalCommand(ctx context.Context, h chat.Handler, cmd chat.Command, userID string) {
+// the submitter alone, as the slash command's ephemeral ack would have:
+// through the command's response_url, or an ephemeral post without one.
+func (a *Adapter) runModalCommand(ctx context.Context, h chat.Handler, cmd chat.Command, userID, responseURL string) {
 	cmd.Caller = a.resolveCaller(ctx, userID)
 	ack, err := h.HandleCommand(ctx, cmd)
 	if err != nil {
 		a.logf.Errorf("slack: agent picker: %v", err)
 		ack = "Sorry, that command failed."
 	}
-	if ack == "" || userID == "" {
+	if ack == "" {
+		return
+	}
+	if responseURL != "" {
+		msg := &slack.WebhookMessage{ResponseType: slack.ResponseTypeEphemeral, Text: toMrkdwn(ack)}
+		if err := slack.PostWebhookContext(ctx, responseURL, msg); err != nil {
+			a.logf.Warnf("slack: agent picker ack in %s: %v", cmd.Channel, err)
+		}
+		return
+	}
+	if userID == "" {
 		return
 	}
 	if _, err := a.api.PostEphemeralContext(ctx, cmd.Channel, userID, slack.MsgOptionText(toMrkdwn(ack), false)); err != nil {

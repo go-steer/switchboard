@@ -64,6 +64,7 @@ type slackAPI struct {
 	views    []string
 	ephemera []map[string]string
 	openFail bool
+	lookups  int
 }
 
 func (s *slackAPI) server(t *testing.T) *httptest.Server {
@@ -94,6 +95,13 @@ func (s *slackAPI) server(t *testing.T) *httptest.Server {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"ok":true,"message_ts":"1.2"}`))
 	})
+	mux.HandleFunc("/users.info", func(w http.ResponseWriter, _ *http.Request) {
+		s.mu.Lock()
+		s.lookups++
+		s.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":false,"error":"user_not_found"}`))
+	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	return srv
@@ -107,7 +115,7 @@ func TestABareAgentCommandOpensThePicker(t *testing.T) {
 	h := &agentRouter{choices: twoAgents}
 
 	a.handleSlashCommand(context.Background(), h, nil, slack.SlashCommand{
-		Command: "/switchboard", Text: "agent", ChannelID: "C1", UserID: "U9", TriggerID: "T1",
+		Command: "/switchboard", Text: "agent", ChannelID: "C1", UserID: "U9", TriggerID: "T1", ResponseURL: "https://hooks.example/r1",
 	})
 
 	if len(h.got()) != 0 {
@@ -120,7 +128,7 @@ func TestABareAgentCommandOpensThePicker(t *testing.T) {
 	if err := json.Unmarshal([]byte(api.views[0]), &v); err != nil {
 		t.Fatalf("view: %v", err)
 	}
-	if v.CallbackID != agentModalID || v.PrivateMetadata != "C1" {
+	if v.CallbackID != agentModalID || v.PrivateMetadata != `{"c":"C1","r":"https://hooks.example/r1"}` {
 		t.Errorf("callback %q, metadata %q; want %q and the channel", v.CallbackID, v.PrivateMetadata, agentModalID)
 	}
 	for _, want := range []string{`"value":"platform"`, `"value":"general"`, "Anything else", `"initial_option"`} {
@@ -168,7 +176,7 @@ func TestANamedAgentCommandOpensNoPicker(t *testing.T) {
 	h := &agentRouter{choices: twoAgents}
 
 	a.handleSlashCommand(context.Background(), h, nil, slack.SlashCommand{
-		Command: "/switchboard", Text: "agent general hi", ChannelID: "C1", UserID: "U9", TriggerID: "T1",
+		Command: "/switchboard", Text: "agent general hi", ChannelID: "C1", UserID: "U9", TriggerID: "T1", ResponseURL: "https://hooks.example/r1",
 	})
 
 	if len(api.views) != 0 {
@@ -184,7 +192,7 @@ func submission(agent, prompt string) slack.InteractionCallback {
 	cb.Type = slack.InteractionTypeViewSubmission
 	cb.User.ID = "U9"
 	cb.View.CallbackID = agentModalID
-	cb.View.PrivateMetadata = "C1"
+	cb.View.PrivateMetadata = `{"c":"C1"}`
 	cb.View.State = &slack.ViewState{Values: map[string]map[string]slack.BlockAction{
 		modalAgentBlock:  {modalAgentAction: {SelectedOption: slack.OptionBlockObject{Value: agent}}},
 		modalPromptBlock: {modalPromptInput: {Value: prompt}}},
@@ -238,7 +246,7 @@ func TestThePickersSubmitRunsTheAgentCommand(t *testing.T) {
 }
 
 func TestASubmitWithNoPromptJustNamesTheAgent(t *testing.T) {
-	cmd, ok := agentCommandFromSubmission(submission("general", "  "))
+	cmd, _, ok := agentCommandFromSubmission(submission("general", "  "))
 	if !ok || cmd.Text != "general" || len(cmd.Args) != 1 {
 		t.Errorf("cmd = %+v, ok %v", cmd, ok)
 	}
@@ -252,8 +260,72 @@ func TestOtherSubmissionsAreNotTheAgentCommand(t *testing.T) {
 	block := submission("general", "")
 	block.Type = slack.InteractionTypeBlockActions
 	for name, cb := range map[string]slack.InteractionCallback{"other view": other, "no agent": empty, "block action": block} {
-		if _, ok := agentCommandFromSubmission(cb); ok {
+		if _, _, ok := agentCommandFromSubmission(cb); ok {
 			t.Errorf("%s: read as the agent command", name)
 		}
+	}
+}
+
+// With the slash command's response_url, the acknowledgment goes back through
+// it — which works where the app is not in the channel — not as a post.
+func TestThePickersAckGoesThroughTheResponseURL(t *testing.T) {
+	api := &slackAPI{}
+	a := newTestAdapter(api.server(t).URL)
+	h := &agentRouter{ack: "Starting a thread with General…"}
+	got := make(chan map[string]any, 1)
+	hook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		got <- body
+	}))
+	t.Cleanup(hook.Close)
+
+	cb := submission("general", "hi")
+	cb.View.PrivateMetadata = `{"c":"C1","r":"` + hook.URL + `"}`
+	a.handleInteractive(context.Background(), h, nil, cb)
+
+	select {
+	case body := <-got:
+		if body["response_type"] != "ephemeral" || !strings.HasPrefix(body["text"].(string), "Starting") {
+			t.Errorf("response_url body = %v", body)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("nothing posted to the response_url")
+	}
+	api.mu.Lock()
+	defer api.mu.Unlock()
+	if len(api.ephemera) != 0 {
+		t.Errorf("also posted ephemerally: %+v", api.ephemera)
+	}
+}
+
+// A long default label is clamped before the marker, not through it.
+func TestALongDefaultLabelKeepsItsMarker(t *testing.T) {
+	v := agentModal([]chat.AgentChoice{{Name: "x", Label: strings.Repeat("x", 90), Default: true}}, modalMeta{Channel: "C1"})
+	sel := v.Blocks.BlockSet[0].(*slack.InputBlock).Element.(*slack.SelectBlockElement)
+	text := sel.Options[0].Text.Text
+	if !strings.HasSuffix(text, defaultMarker) || len([]rune(text)) > 75 {
+		t.Errorf("label = %q (%d runes)", text, len([]rune(text)))
+	}
+}
+
+// The listing fallback skips resolving the caller: it names none, and a slow
+// picker open may have used the ack window up.
+func TestTheListingFallbackResolvesNoCaller(t *testing.T) {
+	api := &slackAPI{openFail: true}
+	a := newTestAdapter(api.server(t).URL)
+	h := &agentRouter{choices: twoAgents, ack: "**Agents here**"}
+
+	a.handleSlashCommand(context.Background(), h, nil, slack.SlashCommand{
+		Command: "/switchboard", Text: "agent", ChannelID: "C1", UserID: "U9", TriggerID: "T1",
+	})
+
+	api.mu.Lock()
+	defer api.mu.Unlock()
+	if api.lookups != 0 {
+		t.Errorf("users.info called %d times for the listing", api.lookups)
+	}
+	if got := h.got(); len(got) != 1 {
+		t.Errorf("commands = %+v, want the listing", got)
 	}
 }
