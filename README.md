@@ -410,8 +410,24 @@ each described), an optional prompt, and **Start**. The modal comes from the
 slash command's trigger id, so it works over Socket Mode and needs no new
 scope. If Slack won't open it, the command answers with the agent list.
 
-Adding agents through an API, and showing which agent answered, come in later
-steps of #140.
+**Who answered.** With an `agents` list, each answer and permission question
+names its agent:
+
+- **Slack** posts it under the agent's `display_name`, with its `icon_url` as
+  the avatar. This needs the `chat:write.customize` scope; without it, replies
+  go out as the app.
+- **Google Chat** heads the card with the agent's name and icon, and a text
+  answer (cards off, or a card Chat refused) leads with the name, unless the
+  name would push it past one message: the name never splits a reply.
+
+The progress line and notices stay the app's. A gateway with one agent
+looks as before.
+
+```json
+{"name": "general", "display_name": "General agent", "icon_url": "https://example.com/general.png", …}
+```
+
+Adding agents through an API comes in a later step of #140.
 
 ### Long-turn feedback
 

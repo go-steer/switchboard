@@ -235,6 +235,7 @@ func (r *Router) postPrompt(ctx context.Context, conv string, e *sessionEntry, p
 		Text:         chat.DecisionReplyText(body, d),
 		Kind:         chat.KindDecision,
 		Decision:     d,
+		Agent:        r.identityOf(e),
 	}); err != nil {
 		// Give the claim back. The prompt is still pending on the daemon, so
 		// the next reconnect is seeded with it again — which is the only retry
@@ -338,6 +339,7 @@ func (r *Router) traceDecision(ctx context.Context, e *sessionEntry, p chat.Pres
 		Conversation: p.Conversation,
 		Text:         text,
 		Kind:         chat.KindDecision,
+		Agent:        r.identityOf(e), // so a card keeps its header
 	})
 	if err == nil {
 		return

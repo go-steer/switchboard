@@ -34,6 +34,8 @@ The registry is the set of agents switchboard can route to. Each entry has:
 |---|---|
 | `name` | short, stable id used in commands and records (`platform`) |
 | `display_name` | shown in the picker and on answers |
+| `description` | one line for the picker |
+| `icon_url` | optional https image: the agent's avatar on Slack, its card header icon on Chat |
 | `daemon_url` | the agent's attach endpoint |
 | `token` | a **reference** to the daemon credential: an env var name, or a Kubernetes Secret name and key. Never the value. |
 | `kind` | `core-agent` or `mast`. Informational today; it marks where contract differences would hang. |
@@ -122,10 +124,13 @@ Each agent conversation is its own thread.
 - **An agent removed or unavailable** for a bound thread: a message there gets
   a notice to start a new thread. Nothing is routed elsewhere silently.
 
-**Attribution.** On Slack, each agent's messages can carry its own name and
-icon (per-message `username` / `icon_url`, under the `chat:write.customize`
-scope). Google Chat cannot change the app's identity per message, so its answer
-cards carry the agent's name in a small header.
+**Attribution.** On Slack, each agent's answers and questions carry its own
+name and icon (per-message `username` / `icon_url`, under the
+`chat:write.customize` scope; without it they post as the app). Google Chat
+cannot change the app's identity per message, so its answer and question cards
+carry the agent's name, and icon, in the card header, and a text answer leads
+with the name. The gateway's own messages (the progress line, notices) stay
+the app's. A gateway with one agent shows nothing new.
 
 ## Routing
 

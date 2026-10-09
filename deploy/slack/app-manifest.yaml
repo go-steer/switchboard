@@ -46,6 +46,9 @@ oauth_config:
       - users:read # users.info, to resolve the caller (not needed with --caller-id id)
       - users:read.email # the caller's email (not needed with --caller-id id)
       - commands # the /switchboard slash command above
+      # Optional, with several agents: post each agent's replies under its
+      # own name and icon. Without it they go out as the app.
+      - chat:write.customize
       # Optional: let a restarted gateway (--state-dir) check a thread for an
       # answer it may already have posted, instead of posting it again.
       - channels:history

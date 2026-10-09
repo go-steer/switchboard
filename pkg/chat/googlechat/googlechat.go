@@ -560,7 +560,7 @@ func choicesOf(h chat.Handler, name string) []string {
 // goes as Chat text split across as many in-thread posts as it needs so nothing
 // is truncated. An empty reply posts nothing.
 func (a *Adapter) Send(ctx context.Context, r chat.Reply) (chat.MessageRef, error) {
-	return a.postKeyed(ctx, r.Conversation, a.cardFor(r), toChatText(strings.TrimSpace(r.Text)), r.Key)
+	return a.postKeyed(ctx, r.Conversation, a.cardFor(r), replyText(r), r.Key)
 }
 
 // requestID turns a reply's key, and which of its messages this is, into a
@@ -578,6 +578,29 @@ func requestID(key, part string) string {
 	return "switchboard-" + hex.EncodeToString(sum[:16])
 }
 
+// replyText is the reply as Chat text: the text path's body, and a card's
+// fallback. An agent's reply leads with its name, which is the card header's
+// stand-in where there is no card (#140, phase 5).
+//
+// Only where the name still leaves the reply one message. The name must never
+// change how a reply is split: split after it, the name alone was the first
+// message, and the usage footer's edit — which measures the reply without it
+// and rewrites the first message whole — then put the answer in the thread
+// twice; a replay with a different identity would also post a part again
+// (both caught in review). A reply long enough to be split goes unnamed.
+func replyText(r chat.Reply) string {
+	text := toChatText(strings.TrimSpace(r.Text))
+	if r.Agent == nil || text == "" || r.Agent.Label == "" || len(text) > chatTextLimit {
+		return text
+	}
+	// The name's own markup stripped, as a card header's is.
+	named := "*" + cardHeaderCleanRE.ReplaceAllString(r.Agent.Label, "") + "*\n" + text
+	if len(named) > chatTextLimit {
+		return text
+	}
+	return named
+}
+
 // cardFor picks the card that renders this reply, or nil for the text path.
 func (a *Adapter) cardFor(r chat.Reply) *chatv1.GoogleAppsCardV1Card {
 	if a.cards == CardsOff || strings.TrimSpace(r.Text) == "" {
@@ -588,19 +611,19 @@ func (a *Adapter) cardFor(r chat.Reply) *chatv1.GoogleAppsCardV1Card {
 			return nil
 		}
 		card := answerCard(r.Text)
-		if card == nil && r.Usage != nil {
+		if card == nil && (r.Usage != nil || r.Agent != nil) {
 			// The footer needs a card to ride, and an unstructured answer
 			// does not earn one on its own — which left every plain answer
 			// without the cost the operator asked to see. With usage on, it
-			// gets a plain one.
+			// gets a plain one; so it does for the agent's name in the header.
 			card = plainAnswerCard(r.Text)
 		}
-		return withUsageFooter(card, r.Usage)
+		return withAgentHeader(withUsageFooter(card, r.Usage), r.Agent)
 	}
 	if r.Kind == chat.KindDecision {
 		// A card only where its buttons can be pressed; elsewhere the text,
 		// which names the answers in prose, is the whole of the question.
-		return decisionCard(r.Text, r.Decision, a.actionURL())
+		return withAgentHeader(decisionCard(r.Text, r.Decision, a.actionURL()), r.Agent)
 	}
 	if r.Kind == chat.KindActivity && strings.Contains(r.Text, "```") {
 		// A stream notice carrying its commands in code blocks. An icon line
@@ -716,7 +739,7 @@ func (a *Adapter) Update(ctx context.Context, ref chat.MessageRef, r chat.Reply)
 	if ref.ID == "" {
 		return nil
 	}
-	return a.rewrite(ctx, ref.ID, a.cardFor(r), toChatText(strings.TrimSpace(r.Text)))
+	return a.rewrite(ctx, ref.ID, a.cardFor(r), replyText(r))
 }
 
 // rewrite patches one message to the given card or text, falling back to text

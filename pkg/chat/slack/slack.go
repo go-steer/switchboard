@@ -28,6 +28,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"unicode"
 
 	"github.com/slack-go/slack"
@@ -88,6 +89,10 @@ type Adapter struct {
 	mode       CallerMode
 	richBlocks bool
 	logf       chat.Logf
+
+	// noCustomize is set once Slack refuses to post under an agent's name
+	// for want of chat:write.customize; see identity.go.
+	noCustomize atomic.Bool
 
 	// botUserID is this bot's own user ID, resolved at Run start and
 	// used to ignore our own posts (loop guard).
@@ -379,7 +384,7 @@ func (a *Adapter) Send(ctx context.Context, r chat.Reply) (chat.MessageRef, erro
 			slack.MsgOptionBlocks(toSlackBlocks(blocks)...),
 			slack.MsgOptionText(clamp(rendered, maxSectionText), false),
 		)
-		_, ts, err := a.api.PostMessageContext(ctx, channel, opts...)
+		ts, err := a.postAs(ctx, channel, r.Agent, opts...)
 		if err == nil {
 			return chat.MessageRef{Conversation: landedKey(channel, thread, ts), ID: ts}, nil
 		}
@@ -404,7 +409,7 @@ func (a *Adapter) Send(ctx context.Context, r chat.Reply) (chat.MessageRef, erro
 				slack.MsgOptionText(clamp(rendered, maxSectionText), false),
 			)
 			opts = append(opts, metadataOpt(partKey(r.Key, -1))...)
-			_, ts, err := a.api.PostMessageContext(ctx, channel, opts...)
+			ts, err := a.postAs(ctx, channel, r.Agent, opts...)
 			if err == nil {
 				return chat.MessageRef{Conversation: landedKey(channel, thread, ts), ID: ts}, nil
 			}
@@ -433,7 +438,7 @@ func (a *Adapter) Send(ctx context.Context, r chat.Reply) (chat.MessageRef, erro
 		}
 		opts := append(threadOpt(thread), slack.MsgOptionText(chunk, false))
 		opts = append(opts, metadataOpt(key)...)
-		_, ts, err := a.api.PostMessageContext(ctx, channel, opts...)
+		ts, err := a.postAs(ctx, channel, r.Agent, opts...)
 		if err != nil {
 			return ref, fmt.Errorf("slack: post to %s: %w", r.Conversation, platformErr(err))
 		}
