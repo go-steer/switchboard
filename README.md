@@ -357,19 +357,20 @@ channel's default. To pick another agent, use the `agent` command:
 | `agent <name> <prompt>` | starts a thread with that agent, opened with the prompt |
 | `agent <name>` | starts a thread with that agent, with no first turn |
 
-Where the thread comes from depends on the platform:
+switchboard posts a starter message in the channel (the agent's name, then
+the prompt) and the conversation lives in that message's thread: the answer,
+and every follow-up you reply there.
 
-- **Google Chat:** a slash command is itself a message, so typed at the top
-  of a space its own thread becomes the agent's, and the answer appears under
-  it. Register a slash command (say `/agent`) in the Chat API console and map
-  its ID to the verb in `googlechat_commands`, e.g. `{"1": "progress", "3":
-  "agent"}`. A catch-all command whose text carries the verb (`/switchboard
-  agent infra …`) works too.
+- **Google Chat:** register a slash command (say `/agent`) in the Chat API
+  console and map its ID to the verb in `googlechat_commands`, e.g.
+  `{"1": "progress", "100": "agent"}`. A catch-all command whose text carries
+  the verb (`/switchboard agent infra …`) works too. The agent's thread is the
+  starter's, not the command's own: Chat won't take an app's reply into a
+  slash command's thread, and silently starts a new one for each post
+  instead.
 - **Slack:** `/switchboard agent infra <prompt>`, on the existing slash
-  command. A slash command belongs to no thread, so switchboard posts a
-  starter message in the channel ("*you → Infra agent*" plus the prompt) and
-  the conversation lives in its thread. The acknowledgment is visible only to
-  you.
+  command. The starter names you (`asked by @you`), and the acknowledgment is
+  visible only to you.
 - **Inside a thread that already has an agent,** `agent` doesn't switch it. It
   says which agent the thread talks to. Naming that same agent with a prompt
   is just the thread's next turn. A thread never changes agent, a DM thread

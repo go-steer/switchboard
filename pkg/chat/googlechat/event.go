@@ -682,18 +682,23 @@ func splitConversation(key string) (space, thread string, ok bool) {
 // its thread. Here the id is a message resource name, and the result was the
 // malformed key spaces/AAA:spaces/AAA/messages/CCC (#39).
 //
-// When the caller already named a thread the key is returned unchanged: it is
-// the more specific of the two and Chat cannot have moved the message. Chat
-// reporting no thread at all is not expected on a created message, and the
-// original key is the honest answer to it rather than one invented here.
+// A reply that named a thread normally lands in it, and the key is returned
+// unchanged. But Chat can move it: REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD puts a
+// reply it will not take in that thread (a slash command's, measured, #140)
+// into a new one, silently. The key then names where it went. Chat reporting
+// no thread at all is not expected on a created message, and the original key
+// is the honest answer to it rather than one invented here.
 func landedKey(conv, space, thread string, created *chatv1.Message) string {
-	if thread != "" {
+	t := threadOf(created)
+	if t == "" || t == thread {
 		return conv
 	}
-	if t := threadOf(created); t != "" {
-		return conversationKey(space, t)
-	}
-	return conv
+	// Either a post into a bare space (Chat assigned the thread), or a reply
+	// Chat would not take into the thread asked for and put in a new one
+	// instead — REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD does that silently, and
+	// a slash command's thread is one such (measured, #140). Either way the
+	// message is where Chat says, and the ref must say so.
+	return conversationKey(space, t)
 }
 
 // chunk splits s into pieces no longer than limit bytes for posting as several

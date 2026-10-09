@@ -50,37 +50,51 @@ func TestBareAgentListsTheChannelsAgents(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(ack, "`a`") || !strings.Contains(ack, "`b`, the default") {
+	if !strings.Contains(ack, "**Agents here**\n") || !strings.Contains(ack, "• **a** (`a`)\n") || !strings.Contains(ack, "• **b** (`b`), the default") {
 		t.Errorf("listing = %q, want both agents with C2's default marked", ack)
 	}
 	r.setChannels(map[string]channelSettings{"C3": {defaultAgent: "b", agents: []string{"b"}}})
-	if ack, _ := r.HandleCommand(context.Background(), agentCmd("", "C3", "")); strings.Contains(ack, "`a`") {
+	if ack, _ := r.HandleCommand(context.Background(), agentCmd("", "C3", "")); strings.Contains(ack, "(`a`)") {
 		t.Errorf("listing = %q offers an agent the channel does not allow", ack)
 	}
 }
 
-// Google Chat: the command's own thread becomes the agent's, and the prompt is
-// its first turn — on the chosen agent, not the channel's default.
-func TestAgentStartsTheCommandsThreadOnTheChosenAgent(t *testing.T) {
-	r, a, b, _ := twoAgentRouter(t)
+// Google Chat: a command arrives in a thread of its own, but Chat will not take
+// an app's reply there (measured), so the agent's thread is a starter's, as on
+// Slack — on the chosen agent, not the channel's default — and the command
+// gets no separate acknowledgment.
+func TestAgentOnChatStartsFromAStarterNotTheCommandsThread(t *testing.T) {
+	_, a, b, _ := twoAgentRouter(t)
+	fake := &fakeSender{replies: make(chan chat.Reply, 8)}
+	r := NewRouter(nil, slackThreadingSender{fake}, ProgressOff, nil, nil)
+	set, _ := newAgentSet("a", &agent{name: "a", daemon: a.client}, &agent{name: "b", display: "Infra agent", daemon: b.client})
+	r.setAgents(set)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
 	ack, err := r.HandleCommand(ctx, agentCmd("C1:77", "C1", "b how many pods?"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if ack != "" {
-		t.Errorf("ack = %q, want none: the answer is the reply", ack)
+		t.Errorf("ack = %q, want none: the starter is the acknowledgment", ack)
+	}
+	starter := recvReply(t, fake.replies)
+	if starter.Conversation != "C1" || !strings.HasPrefix(starter.Text, "**Infra agent**\nhow many pods?") {
+		t.Errorf("starter = %+v, want the agent and the prompt posted in the channel", starter)
 	}
 	waitCount(t, &b.injects, 1, "agent b injects")
 	if a.creates.Load() != 0 {
 		t.Error("the channel's default agent got a session")
 	}
-	if got, _ := r.conversationAgent("C1:77"); got != "b" {
-		t.Errorf("thread agent = %q, want b", got)
+	if _, has := r.conversationAgent("C1:77"); has {
+		t.Error("the command's own thread was given the agent; Chat will not take replies there")
 	}
-	// The thread's next plain message stays with b.
-	if err := r.Handle(ctx, chat.Message{Conversation: "C1:77", Channel: "C1", Caller: "u@x.com", Text: "and nodes?"}); err != nil {
+	if got, _ := r.conversationAgent("C1:ts1"); got != "b" {
+		t.Errorf("starter thread agent = %q, want b", got)
+	}
+	// The starter thread's next plain message stays with b.
+	if err := r.Handle(ctx, chat.Message{Conversation: "C1:ts1", Channel: "C1", Caller: "u@x.com", Text: "and nodes?"}); err != nil {
 		t.Fatal(err)
 	}
 	waitCount(t, &b.injects, 2, "agent b injects")
@@ -103,7 +117,7 @@ func TestAgentOpensAThreadWithAStarterWhenTheCommandHasNone(t *testing.T) {
 		t.Fatal(err)
 	}
 	starter := recvReply(t, fake.replies)
-	if starter.Conversation != "C1" || !strings.Contains(starter.Text, "<@U1> → Infra agent") || !strings.Contains(starter.Text, "list\n  the nodes") {
+	if starter.Conversation != "C1" || !strings.Contains(starter.Text, "**Infra agent** · asked by <@U1>") || !strings.Contains(starter.Text, "list\n  the nodes") {
 		t.Errorf("starter = %+v, want the caller's mention, the agent and the prompt as typed, in the channel", starter)
 	}
 	if strings.Contains(starter.Text, "u@x.com") {
@@ -264,9 +278,12 @@ func TestStartingOnAThreadAlreadyOnAnotherAgentSaysSo(t *testing.T) {
 	}
 	waitCount(t, &a.injects, 1, "agent a injects")
 
-	if err := r.startAgentThread(ctx, agentCmd("C1:9", "C1", "b go"), r.agents.byName["b"], "go"); err != nil {
+	// The starter lands in a conversation something else opened first.
+	r.out = landsIn{fake, "C1:9"}
+	if err := r.startAgentThread(ctx, agentCmd("", "C1", "b go"), r.agents.byName["b"], "go"); err != nil {
 		t.Fatal(err)
 	}
+	recvReply(t, fake.replies) // the starter
 	got := recvReply(t, fake.replies)
 	if !strings.Contains(got.Text, "This thread talks to a") {
 		t.Errorf("notice = %q", got.Text)
@@ -274,4 +291,16 @@ func TestStartingOnAThreadAlreadyOnAnotherAgentSaysSo(t *testing.T) {
 	if b.creates.Load()+b.injects.Load() != 0 || a.injects.Load() != 1 {
 		t.Errorf("the prompt was run anyway (a injects %d, b %d)", a.injects.Load(), b.injects.Load())
 	}
+}
+
+// landsIn sends everything through fake but reports it landed in conv.
+type landsIn struct {
+	*fakeSender
+	conv string
+}
+
+func (l landsIn) Send(ctx context.Context, r chat.Reply) (chat.MessageRef, error) {
+	ref, err := l.fakeSender.Send(ctx, r)
+	ref.Conversation = l.conv
+	return ref, err
 }

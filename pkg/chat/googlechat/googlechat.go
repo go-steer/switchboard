@@ -663,7 +663,7 @@ func (a *Adapter) postKeyed(ctx context.Context, conv string, card *chatv1.Googl
 		// With one, Chat answers the second with the first.
 		created, err := a.msg.create(ctx, space, msg, requestID(key, "part-0"))
 		if err == nil {
-			return chat.MessageRef{Conversation: landedKey(conv, space, thread, created), ID: created.Name}, nil
+			return chat.MessageRef{Conversation: a.landed(conv, space, thread, created), ID: created.Name}, nil
 		}
 		if !isCardRejection(err) {
 			return chat.MessageRef{}, fmt.Errorf("googlechat: post card to %s: %w", conv, platformErr(err))
@@ -687,13 +687,15 @@ func (a *Adapter) postKeyed(ctx context.Context, conv string, card *chatv1.Googl
 		if first.ID == "" {
 			// landedKey reads the thread this message was assigned, so it must
 			// run before the adoption below overwrites the thread we asked for.
-			first = chat.MessageRef{Conversation: landedKey(conv, space, thread, created), ID: created.Name}
+			first = chat.MessageRef{Conversation: a.landed(conv, space, thread, created), ID: created.Name}
 		}
-		// If we started without a thread (a flat space), adopt the thread the
-		// first message landed in so the rest of a chunked reply stays together
-		// rather than scattering into separate new threads.
-		if thread == "" && created.Thread != nil && created.Thread.Name != "" {
-			thread = created.Thread.Name
+		// Follow the thread the message landed in, so the rest of a chunked
+		// reply stays together: the one Chat assigned in a flat space, or the
+		// new one it fell back to for a thread it would not take a reply in —
+		// where posting the next chunk to the thread asked for would fall back
+		// again, into a thread of its own (caught in review).
+		if t := threadOf(created); t != "" && t != thread {
+			thread = t
 		}
 	}
 	return first, nil
@@ -766,6 +768,19 @@ func (a *Adapter) Delete(ctx context.Context, ref chat.MessageRef) error {
 		return fmt.Errorf("googlechat: delete %s: %w", ref.ID, platformErr(err))
 	}
 	return nil
+}
+
+// landed is landedKey, noting a reply Chat moved out of the thread it was
+// asked into. At info rather than warn: in an unthreaded space every message
+// has a thread of its own and a reply may legitimately not join it, so this
+// can be routine there; in a threaded space it is the fallback that sent an
+// agent's answer adrift (#140), and worth finding in the log.
+func (a *Adapter) landed(conv, space, thread string, created *chatv1.Message) string {
+	key := landedKey(conv, space, thread, created)
+	if thread != "" && key != conv {
+		a.logf.Infof("googlechat: a reply to %s landed in %s: Chat started a new thread rather than reply in that one", conv, key)
+	}
+	return key
 }
 
 // FitsOneMessage reports whether text renders into a single Chat message rather
