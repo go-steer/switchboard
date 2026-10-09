@@ -18,6 +18,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-steer/switchboard/pkg/approval"
 	"github.com/go-steer/switchboard/pkg/chat"
@@ -51,6 +52,39 @@ func TestAPromptNamesItsAgent(t *testing.T) {
 	got := recvReply(t, fake.replies)
 	if got.Kind != chat.KindDecision || got.Agent == nil || got.Agent.Name != "b" {
 		t.Errorf("reply = kind %q agent %+v, want a decision signed by b", got.Kind, got.Agent)
+	}
+}
+
+// The usage footer's edit rewrites the answer whole, so it must sign it too:
+// unsigned, it took the agent's card header off (caught in review).
+func TestTheFooterEditKeepsTheAnswerSigned(t *testing.T) {
+	fake := &fakeSender{replies: make(chan chat.Reply, 8)}
+	dc := answerFirstDaemon(t)
+	r, ctx := narrationRouter(t, nil, fitsAllSender{fake}, time.Hour)
+	set, err := newAgentSet("x", &agent{name: "x", display: "Agent X", daemon: dc})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.setAgents(set)
+	r.setShowUsage(true)
+	r.footDelay = 50 * time.Millisecond
+
+	handleOne(t, r, ctx, fake)
+	if answer := recvReply(t, fake.replies); answer.Agent == nil {
+		t.Fatalf("answer %q unsigned", answer.Text)
+	}
+	waitFor(t, func() bool {
+		for _, u := range fake.updatedCalls() {
+			if u.reply.Usage != nil {
+				return true
+			}
+		}
+		return false
+	}, "the footer edit")
+	for _, u := range fake.updatedCalls() {
+		if u.reply.Usage != nil && (u.reply.Agent == nil || u.reply.Agent.Label != "Agent X") {
+			t.Errorf("footer edit agent = %+v, want Agent X", u.reply.Agent)
+		}
 	}
 }
 

@@ -26,9 +26,11 @@ import (
 // Agent attribution (#140, phase 5): with several agents behind one app, an
 // agent's reply is posted under the agent's name, and its icon when it has
 // one, so a thread shows who answered. That is chat.postMessage's username and
-// icon_url, which need the chat:write.customize scope. An app without it is
-// told once, in the log, and goes on posting as itself: a missing scope must
-// never cost a reply.
+// icon_url, which need the chat:write.customize scope. Without it Slack is
+// believed to ignore them and post as the app (unmeasured, review); should it
+// refuse with missing_scope instead, the post is retried as the app, the app
+// stops asking, and the log says so once: a missing scope must never cost a
+// reply.
 
 // postAs posts a message as the reply's agent where it names one.
 func (a *Adapter) postAs(ctx context.Context, channel string, ag *chat.AgentIdentity, opts ...slack.MsgOption) (string, error) {

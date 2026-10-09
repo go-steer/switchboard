@@ -2735,6 +2735,7 @@ func (r *Router) footLastAnswer(ctx context.Context, e *sessionEntry, conv strin
 	err := r.out.Update(ctx, t.ref, chat.Reply{
 		Conversation: conv,
 		Text:         t.text,
+		Agent:        r.identityOf(e), // the edit keeps the answer signed (caught in review)
 		Usage: &chat.Usage{
 			Model: u.Model, TokensIn: u.TokensIn, TokensOut: u.TokensOut,
 			CostUSD: u.CostUSD, Latency: u.Latency,

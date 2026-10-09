@@ -55,6 +55,9 @@ const defaultAgentName = "default"
 // and free of the separators those formats use ('@', '#', '/', ':').
 var agentNameRE = regexp.MustCompile(`^[a-z][a-z0-9-]{0,39}$`)
 
+// maxIconURL bounds an agent's icon_url.
+const maxIconURL = 1024
+
 // AgentConfig is one agent in the config file's agents list. The credential is
 // named, never given: TokenEnv is the variable holding it (see checkNoSecrets).
 type AgentConfig struct {
@@ -296,8 +299,10 @@ func buildAgents(list []AgentConfig, def string, wantApprovals bool) (*agentSet,
 			return nil, fmt.Errorf("%s.kind %q: want one of %s", where, ac.Kind, strings.Join(agentKinds, ", "))
 		}
 		if icon := strings.TrimSpace(ac.IconURL); icon != "" {
-			if u, err := url.Parse(icon); err != nil || u.Scheme != "https" || u.Host == "" {
-				return nil, fmt.Errorf("%s.icon_url %q: want an https URL to an image", where, ac.IconURL)
+			// Capped: it rides on every signed card, whose size budget is
+			// measured before the header goes on (caught in review).
+			if u, err := url.Parse(icon); err != nil || u.Scheme != "https" || u.Host == "" || len(icon) > maxIconURL {
+				return nil, fmt.Errorf("%s.icon_url %q: want an https URL to an image, at most %d characters", where, ac.IconURL, maxIconURL)
 			}
 		}
 		if strings.TrimSpace(ac.DaemonURL) == "" {

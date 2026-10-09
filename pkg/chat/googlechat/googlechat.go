@@ -581,12 +581,24 @@ func requestID(key, part string) string {
 // replyText is the reply as Chat text: the text path's body, and a card's
 // fallback. An agent's reply leads with its name, which is the card header's
 // stand-in where there is no card (#140, phase 5).
+//
+// Only where the name still leaves the reply one message. The name must never
+// change how a reply is split: split after it, the name alone was the first
+// message, and the usage footer's edit — which measures the reply without it
+// and rewrites the first message whole — then put the answer in the thread
+// twice; a replay with a different identity would also post a part again
+// (both caught in review). A reply long enough to be split goes unnamed.
 func replyText(r chat.Reply) string {
 	text := toChatText(strings.TrimSpace(r.Text))
-	if r.Agent == nil || text == "" || r.Agent.Label == "" {
+	if r.Agent == nil || text == "" || r.Agent.Label == "" || len(text) > chatTextLimit {
 		return text
 	}
-	return "*" + strings.ReplaceAll(r.Agent.Label, "*", "") + "*\n" + text
+	// The name's own markup stripped, as a card header's is.
+	named := "*" + cardHeaderCleanRE.ReplaceAllString(r.Agent.Label, "") + "*\n" + text
+	if len(named) > chatTextLimit {
+		return text
+	}
+	return named
 }
 
 // cardFor picks the card that renders this reply, or nil for the text path.

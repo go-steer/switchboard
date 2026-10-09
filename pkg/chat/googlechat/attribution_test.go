@@ -55,6 +55,44 @@ func TestAnAgentsQuestionIsHeadedWithTheAgent(t *testing.T) {
 	}
 }
 
+// The name never changes how a reply is split. An answer that fits one
+// message only without it goes unnamed: split after the name, the name alone
+// was the first message, and the footer's edit then rewrote that message with
+// the whole answer — in the thread twice (caught in review).
+func TestTheNameNeverSplitsAReply(t *testing.T) {
+	f := &fakeMessenger{}
+	a := newTestAdapter(f) // cards off
+	near := strings.Repeat("a", chatTextLimit-3)
+	ref, err := a.Send(context.Background(), chat.Reply{Conversation: "spaces/A:spaces/A/threads/T", Text: near, Agent: agentB})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(f.creates) != 1 || f.creates[0].text != near {
+		t.Fatalf("posted %d parts, first %d bytes; want the answer alone in one", len(f.creates), len(f.creates[0].text))
+	}
+	if !a.FitsOneMessage(near) {
+		t.Fatal("FitsOneMessage disagrees with what Send posted")
+	}
+	if err := a.Update(context.Background(), ref, chat.Reply{Conversation: ref.Conversation, Text: near, Agent: agentB, Usage: &chat.Usage{TokensOut: 1}}); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(f.patches); n != 1 {
+		t.Errorf("patches = %d, want the one message edited", n)
+	}
+
+	long := strings.Repeat("word ", chatTextLimit/5+50)
+	if got := replyText(chat.Reply{Text: long, Agent: agentB}); strings.HasPrefix(got, "*Agent B*") {
+		t.Error("a reply that is split anyway was named")
+	}
+}
+
+func TestTheNamesMarkupIsStripped(t *testing.T) {
+	got := replyText(chat.Reply{Text: "hi", Agent: &chat.AgentIdentity{Label: "*Big* _agent_ `x`"}})
+	if got != "*Big agent x*\nhi" {
+		t.Errorf("replyText = %q", got)
+	}
+}
+
 // Without a card, the agent's name leads the text.
 func TestAnAgentsTextAnswerLeadsWithItsName(t *testing.T) {
 	f := &fakeMessenger{}

@@ -49,13 +49,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and permission questions name their agent.
   - **Slack** posts them under the agent's `display_name` and new optional
     `icon_url`. This needs the `chat:write.customize` scope, now in the
-    sample manifest; without it, replies go out as the app and the log says
-    so once.
+    sample manifest; without it, replies go out as the app.
   - **Google Chat** heads the card with the agent's name and icon. A plain
-    answer gets a card for it, as for a usage footer, and a text answer leads
-    with the name.
-  - The gateway's own messages stay the app's, and a single-agent gateway
-    looks as before.
+    answer gets a card for it, as for a usage footer. A text answer leads
+    with the name when it still fits one message; a longer one goes unnamed,
+    so the name never changes how a reply is split.
+  - `icon_url` must be https, at most 1024 characters.
+  - The gateway's own messages stay the app's. A gateway without an `agents`
+    list looks as before.
 - **The agent picker on Slack** (#140, phase 3c). A bare
   `/switchboard agent` opens a modal (`views.open` with the command's
   trigger id): a select of the channel's agents, the default preselected,

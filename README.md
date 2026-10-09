@@ -415,9 +415,10 @@ names its agent:
 
 - **Slack** posts it under the agent's `display_name`, with its `icon_url` as
   the avatar. This needs the `chat:write.customize` scope; without it, replies
-  go out as the app, and the log says so once.
+  go out as the app.
 - **Google Chat** heads the card with the agent's name and icon, and a text
-  answer (cards off, or a card Chat refused) leads with the name.
+  answer (cards off, or a card Chat refused) leads with the name, unless the
+  name would push it past one message: the name never splits a reply.
 
 The progress line and notices stay the app's. A gateway with one agent
 looks as before.
