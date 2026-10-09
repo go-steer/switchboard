@@ -6,6 +6,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+- **Go 1.26.9 and `golang.org/x/net` v0.60.0** for net/http advisories
+  GO-2026-6608, -6610, -6611, -6612, -6613 and -6617, which govulncheck reported
+  against Go 1.26.6 and x/net v0.57.0. The `go` directive, which the release
+  image builds with, and the Dockerfile's default `GO_VERSION` both move to
+  1.26.9. The images had been building with 1.26.3 while CI used the 1.26.6
+  toolchain line.
+
 ### Added
 - **Several agents behind one gateway, phase 1 of multi-agent** (#140). A
   config file can register several core-agent or mast daemons (`agents`, each
