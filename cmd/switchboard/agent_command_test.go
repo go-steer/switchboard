@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -303,4 +304,81 @@ func (l landsIn) Send(ctx context.Context, r chat.Reply) (chat.MessageRef, error
 	ref, err := l.fakeSender.Send(ctx, r)
 	ref.Conversation = l.conv
 	return ref, err
+}
+
+// The router is the picker's directory: the channel's allowed agents, its
+// default marked, descriptions passed through; none on a one-agent gateway.
+func TestAgentChoicesForAPicker(t *testing.T) {
+	r, _, _, _ := twoAgentRouter(t)
+	r.agents.byName["b"].desc = "Infra questions"
+	r.setChannels(map[string]channelSettings{"C3": {defaultAgent: "b", agents: []string{"b"}}})
+	got := r.AgentChoices("C3")
+	if len(got) != 1 || got[0].Name != "b" || !got[0].Default || got[0].Description != "Infra questions" {
+		t.Errorf("C3 choices = %+v, want only b, the default, described", got)
+	}
+	if all := r.AgentChoices("C1"); len(all) != 2 || !all[0].Default || all[1].Default {
+		t.Errorf("C1 choices = %+v, want a (default) and b", all)
+	}
+	single := NewRouter(newRecordingDaemon(t, "s").client, &fakeSender{replies: make(chan chat.Reply, 1)}, ProgressOff, nil, nil)
+	if c := single.AgentChoices("C1"); c != nil {
+		t.Errorf("one-agent gateway offers %+v, want no picker", c)
+	}
+}
+
+// Naming a thread's own agent with a prompt is the thread's next turn, run in
+// the background: the command answers within a deadline (a Slack ack, a Chat
+// dialog response) however slow the daemon's inject (caught in review).
+func TestTheSameAgentsNextTurnDoesNotHoldTheCommand(t *testing.T) {
+	release := make(chan struct{})
+	var injects atomic.Int64
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /sessions", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		fmt.Fprint(w, `{"app":"core-agent","sessionID":"s1"}`)
+	})
+	mux.HandleFunc("POST /sessions/{app}/{sid}/inject", func(w http.ResponseWriter, r *http.Request) {
+		if injects.Add(1) > 1 { // the first turn is quick; the command's turn hangs
+			select {
+			case <-release:
+			case <-r.Context().Done():
+			}
+		}
+		fmt.Fprint(w, `{"injected":"ok"}`)
+	})
+	mux.HandleFunc("GET /sessions/{app}/{sid}/events", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	dc, err := daemon.New(daemon.Config{BaseURL: srv.URL, BearerToken: "tok", HTTPClient: srv.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeSender{replies: make(chan chat.Reply, 8)}
+	r := NewRouter(nil, fake, ProgressOff, nil, nil)
+	set, _ := newAgentSet("a", &agent{name: "a", daemon: dc}, &agent{name: "b", daemon: dc})
+	r.setAgents(set)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	defer close(release)
+	if err := r.Handle(ctx, chat.Message{Conversation: "C1:5", Channel: "C1", Caller: "u@x.com", Text: "hi"}); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan string, 1)
+	go func() {
+		ack, _ := r.HandleCommand(ctx, agentCmd("C1:5", "C1", "a next question"))
+		done <- ack
+	}()
+	select {
+	case ack := <-done:
+		if ack != "" {
+			t.Errorf("ack = %q, want none", ack)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("the command waited on the daemon's inject")
+	}
 }

@@ -4,6 +4,7 @@
     {
       "name": "platform",
       "display_name": "Platform agent",
+      "description": "Operates the GKE fleet: clusters, workloads, incidents",
       "daemon_url": "http://core-agent.switchboard.svc.cluster.local:7777",
       "token_env": "SWITCHBOARD_DAEMON_TOKEN",
       "kind": "core-agent"
@@ -11,6 +12,7 @@
     {
       "name": "general",
       "display_name": "General agent",
+      "description": "Quick questions and writing help; no cluster access",
       "daemon_url": "http://general-agent.switchboard.svc.cluster.local:7777",
       "token_env": "SWITCHBOARD_DAEMON_TOKEN",
       "kind": "core-agent"

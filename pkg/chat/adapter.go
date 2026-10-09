@@ -348,6 +348,25 @@ type Command struct {
 	CallerMention string
 }
 
+// AgentChoice is one agent a picker offers (#140).
+type AgentChoice struct {
+	// Name is what the `agent` command takes.
+	Name string
+	// Label is how a person sees it; Description, if any, says what it is for.
+	Label       string
+	Description string
+	// Default marks the agent a plain message in the channel goes to.
+	Default bool
+}
+
+// AgentDirectory is an optional Handler capability: the agents a channel
+// offers, for an adapter that can show a picker (a Google Chat dialog, a Slack
+// modal). Choosing one is the `agent` command, run through HandleCommand like
+// any other, so a picker is a front end and holds no routing of its own.
+type AgentDirectory interface {
+	AgentChoices(channel string) []AgentChoice
+}
+
 // Handler receives normalized inbound turns and gateway commands. The
 // router implements it; an Adapter calls Handle once per inbound message
 // and HandleCommand once per recognized command.

@@ -69,10 +69,17 @@ func (r *Router) agentCommand(ctx context.Context, cmd chat.Command) string {
 			curLabel := r.agentLabel(cur)
 			if cur == name {
 				if prompt != "" {
-					// Same agent: the prompt is just this thread's next turn.
-					if err := r.Handle(ctx, chat.Message{Conversation: cmd.Conversation, Channel: cmd.Channel, Caller: cmd.Caller, Text: prompt}); err != nil {
-						r.logf.Warnf("agent %s: %v", cmd.Conversation, err)
-					}
+					// Same agent: the prompt is just this thread's next turn —
+					// run in the background like a new thread is, since the
+					// command answers within a deadline (a Slack ack, a Chat
+					// dialog response) and Handle waits on the daemon (caught
+					// in review).
+					msg := chat.Message{Conversation: cmd.Conversation, Channel: cmd.Channel, Caller: cmd.Caller, Text: prompt}
+					go func() {
+						if err := r.Handle(ctx, msg); err != nil {
+							r.logf.Warnf("agent %s: %v", cmd.Conversation, err)
+						}
+					}()
 					return ""
 				}
 				return fmt.Sprintf("This thread already talks to %s.", curLabel)
@@ -146,6 +153,10 @@ func (r *Router) startAgentThread(ctx context.Context, cmd chat.Command, a *agen
 	return nil
 }
 
+// maxStarterPrompt bounds the prompt a starter message shows, well inside one
+// chat message on either platform.
+const maxStarterPrompt = 1500
+
 // starterText is the message a conversation with an agent opens with: the
 // agent, who asked (where the platform can name them), and the prompt.
 func starterText(a *agent, mention, prompt string) string {
@@ -154,7 +165,9 @@ func starterText(a *agent, mention, prompt string) string {
 		text += " · asked by " + mention
 	}
 	if prompt != "" {
-		text += "\n" + prompt
+		// Clamped for show: the starter is one message and a dialog's prompt
+		// box sets no limit. The agent still gets the prompt in full.
+		text += "\n" + clampRunes(prompt, maxStarterPrompt)
 	} else {
 		text += "\nReply in this thread to talk to it."
 	}
@@ -167,6 +180,26 @@ func (r *Router) tellAgentFailure(ctx context.Context, conv string, a *agent) {
 	if err := r.surfaceNotice(ctx, conv, notice); err != nil {
 		r.logf.Warnf("agent %s: %v", conv, err)
 	}
+}
+
+// The router is the directory a picker reads (a Chat dialog, a Slack modal).
+var _ chat.AgentDirectory = (*Router)(nil)
+
+// AgentChoices implements chat.AgentDirectory: the agents a channel offers,
+// its default marked. None for a gateway with one agent, which needs no
+// picker.
+func (r *Router) AgentChoices(channel string) []chat.AgentChoice {
+	if r.agents.implicit {
+		return nil
+	}
+	cs := r.settingsFor(channel)
+	def, _ := r.agents.channelAgent(cs)
+	def = r.agents.resolve(def)
+	var out []chat.AgentChoice
+	for _, a := range r.agents.allowedIn(cs) {
+		out = append(out, chat.AgentChoice{Name: a.name, Label: a.label(), Description: a.desc, Default: a.name == def})
+	}
+	return out
 }
 
 // conversationAgent reports the agent a conversation already belongs to — a

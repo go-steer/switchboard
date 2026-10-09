@@ -172,6 +172,12 @@ type inbound struct {
 	// confirmation be built and undone from the click alone (#92).
 	hosting *chatv1.GoogleAppsCardV1Card
 
+	// dialog is the dialog step an event asks for: REQUEST_DIALOG (a command
+	// marked "Opens a dialog") or SUBMIT_DIALOG (a dialog's button). Empty for
+	// every other event. form holds a dialog's inputs, first value each.
+	dialog string
+	form   map[string]string
+
 	// params are the action parameters carried by a button click. Add-ons
 	// that extend Chat never populate commonEventObject.invokedFunction, so
 	// parameters is where a card action's identity has to live.
@@ -229,6 +235,8 @@ type addonAppCommandPayload struct {
 	Message            *chatv1.Message       `json:"message"`
 	Space              *chatv1.Space         `json:"space"`
 	Thread             *chatv1.Thread        `json:"thread"`
+	// DialogEventType is REQUEST_DIALOG on a command marked "Opens a dialog".
+	DialogEventType string `json:"dialogEventType"`
 }
 
 // addonCommandMetadata identifies the invoked command. The reference types
@@ -282,6 +290,9 @@ func (c *commandID) UnmarshalJSON(b []byte) error {
 type addonButtonPayload struct {
 	Message *chatv1.Message `json:"message"`
 	Space   *chatv1.Space   `json:"space"`
+	// DialogEventType is SUBMIT_DIALOG for a button inside a dialog (or
+	// REQUEST_DIALOG for one that opens a dialog).
+	DialogEventType string `json:"dialogEventType"`
 }
 
 type addonAddedPayload struct {
@@ -369,6 +380,7 @@ func normalizeAddon(ev *wireEvent) inbound {
 		if in.space == "" {
 			return inbound{}
 		}
+		in.dialog = p.DialogEventType
 		in.kind = kindCommand
 		return in
 
@@ -387,10 +399,12 @@ func normalizeAddon(ev *wireEvent) inbound {
 		}
 		if ev.Common != nil {
 			in.params = ev.Common.Parameters
+			in.form = formValues(ev.Common.FormInputs)
 		}
 		if in.space == "" || len(in.params) == 0 {
 			return inbound{} // not one of our buttons
 		}
+		in.dialog = p.DialogEventType
 		in.kind = kindButton
 		return in
 
@@ -743,4 +757,18 @@ var configCompleteToken = regexp.MustCompile(`("configCompleteRedirectUr[il]"\s*
 func redactCredentials(s string) string {
 	s = credentialField.ReplaceAllString(s, `$1"REDACTED"`)
 	return configCompleteToken.ReplaceAllString(s, `${1}REDACTED`)
+}
+
+// formValues flattens a dialog's inputs to the first string value of each.
+func formValues(in map[string]chatv1.Inputs) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		if v.StringInputs != nil && len(v.StringInputs.Value) > 0 {
+			out[k] = v.StringInputs.Value[0]
+		}
+	}
+	return out
 }
