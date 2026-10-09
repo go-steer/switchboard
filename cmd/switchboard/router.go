@@ -614,6 +614,13 @@ type sessionEntry struct {
 	sess  daemon.Session
 	err   error
 
+	// emu orders edits to the progress message. A tick reads the message
+	// under pmu and edits it after letting go, so without this a tick in
+	// flight could land after the edit that finalises the placeholder and
+	// put the clock back (caught in review): every editor holds emu across
+	// its edit and re-checks that the message is still the current one.
+	emu sync.Mutex
+
 	// agent names the registry entry whose daemon holds sess (#140): resolved
 	// when the conversation began and fixed for its life. Empty only for an
 	// entry revived from a record written before the registry existed, which
@@ -1355,8 +1362,15 @@ func (e *sessionEntry) claimSettle(id string, want settleState) (text string, kn
 // with the rest of the turn's ticker state, and stops the ticker: the message
 // it renders into is about to be deleted.
 func (e *sessionEntry) takeProgress() chat.MessageRef {
+	ref, _ := e.takeProgressStart()
+	return ref
+}
+
+// takeProgressStart is takeProgress, also returning when the turn started,
+// for the final line a placeholder is retired with.
+func (e *sessionEntry) takeProgressStart() (chat.MessageRef, time.Time) {
 	e.pmu.Lock()
-	ref, stop := e.progressMsg, e.tickStop
+	ref, stop, start := e.progressMsg, e.tickStop, e.turnStart
 	e.progressMsg, e.tickStop = chat.MessageRef{}, nil
 	e.turnStart, e.tools, e.step = time.Time{}, nil, 0
 	e.pmu.Unlock()
@@ -1365,7 +1379,7 @@ func (e *sessionEntry) takeProgress() chat.MessageRef {
 	if stop != nil {
 		close(stop)
 	}
-	return ref
+	return ref, start
 }
 
 // stopTicker halts the turn's ticker while leaving the progress message in
@@ -1873,7 +1887,7 @@ func (r *Router) Handle(ctx context.Context, msg chat.Message) (err error) {
 		// The turn never reached the daemon, so nothing on the stream will ever
 		// conclude it, and the progress message would linger; undo both here.
 		entry.endTurn()
-		r.clearProgress(ctx, entry, msg.Conversation)
+		r.failProgress(ctx, entry, msg.Conversation)
 		if isMissingSession(err) && r.sessionGone(ctx, entry, msg.Caller) {
 			// The daemon no longer has the session this thread was using. Say
 			// so, and drop the entry (and the binding, if it was one): the next
@@ -2083,7 +2097,7 @@ func (r *Router) failTurn(ctx context.Context, e *sessionEntry, conv, kind, noti
 	if queued {
 		e.stopTicker()
 	} else {
-		r.clearProgress(ctx, e, conv)
+		r.failProgress(ctx, e, conv)
 	}
 	r.metrics.recordTurnFailed(kind)
 	if _, err := r.out.Send(ctx, chat.Reply{Conversation: conv, Text: notice, Kind: chat.KindNotice}); err != nil {
@@ -2175,9 +2189,11 @@ func (r *Router) startProgress(ctx context.Context, e *sessionEntry, conv string
 	}
 	stale, stop := e.beginTurn(ref, start)
 	if stale.ID != "" {
-		if derr := r.out.Delete(ctx, stale); derr != nil {
-			r.logf.Warnf("progress %s: clear stale: %v", conv, derr)
-		}
+		// A previous turn's, left frozen — often by a turn that ended without
+		// an answer, so "stopped" rather than "done" (caught in review).
+		e.emu.Lock()
+		r.retireMessage(ctx, conv, stale, time.Time{}, false)
+		e.emu.Unlock()
 	}
 	if r.tickInterval > 0 {
 		go r.tick(ctx, e, conv, start, stop)
@@ -2230,7 +2246,7 @@ func (r *Router) tick(ctx context.Context, e *sessionEntry, conv string, start t
 		if !ok {
 			return // the turn ended between the tick firing and this read
 		}
-		if err := r.out.Update(ctx, ref, chat.Reply{Conversation: conv, Text: text, Kind: chat.KindProgress}); err != nil {
+		if err := r.editProgress(ctx, e, conv, ref, text); err != nil {
 			r.logf.Warnf("progress %s: tick: %v", conv, err)
 			interval = min(interval*2, progressTickMaxBackoff)
 		} else {
@@ -2333,15 +2349,72 @@ func (r *Router) resumeProgress(ctx context.Context, e *sessionEntry, conv strin
 	}
 }
 
-// clearProgress deletes and forgets the entry's outstanding progress message,
-// if any. Called before a reply is relayed so the transient message gives way
-// to the answer. No-op when none is outstanding.
+// clearProgress retires and forgets the entry's outstanding progress message,
+// if any — the turn is done. Called before a reply is relayed so the transient
+// message gives way to the answer. No-op when none is outstanding.
 func (r *Router) clearProgress(ctx context.Context, e *sessionEntry, conv string) {
-	if ref := e.takeProgress(); ref.ID != "" {
-		if err := r.out.Delete(ctx, ref); err != nil {
-			r.logf.Warnf("progress %s: clear: %v", conv, err)
-		}
+	r.retireProgress(ctx, e, conv, true)
+}
+
+// failProgress is clearProgress for a turn that did not finish: refused, its
+// stream lost, never sent.
+func (r *Router) failProgress(ctx context.Context, e *sessionEntry, conv string) {
+	r.retireProgress(ctx, e, conv, false)
+}
+
+// retireProgress takes the placeholder out of service. Deleted, where that
+// leaves nothing behind; where it leaves a trace (Google Chat's "Message
+// deleted by its author", reported from the GKE deployment), edited instead
+// into a final line — "✔ Done · 12s", or "✖ Stopped · 12s" — which says
+// something true where the clock was.
+func (r *Router) retireProgress(ctx context.Context, e *sessionEntry, conv string, done bool) {
+	// Under emu: a tick in flight finishes its edit first, and one after this
+	// finds the message no longer current and leaves it alone.
+	e.emu.Lock()
+	defer e.emu.Unlock()
+	ref, start := e.takeProgressStart()
+	if ref.ID == "" {
+		return
 	}
+	r.retireMessage(ctx, conv, ref, start, done)
+}
+
+// editProgress edits the progress message to text, if ref is still the
+// entry's current one, ordered against every other editor (emu).
+func (r *Router) editProgress(ctx context.Context, e *sessionEntry, conv string, ref chat.MessageRef, text string) error {
+	e.emu.Lock()
+	defer e.emu.Unlock()
+	if e.currentProgress().ID != ref.ID {
+		return nil // retired or replaced while this edit waited
+	}
+	return r.out.Update(ctx, ref, chat.Reply{Conversation: conv, Text: text, Kind: chat.KindProgress})
+}
+
+// retireMessage deletes a placeholder, or finalises it where deleting leaves a
+// trace. start is when its turn began; zero when unknown.
+func (r *Router) retireMessage(ctx context.Context, conv string, ref chat.MessageRef, start time.Time, done bool) {
+	if t, ok := r.out.(chat.DeleteLeavesTrace); ok && t.DeleteLeavesTrace() {
+		text := markFailed + " Stopped"
+		if done {
+			text = markOK + " Done"
+		}
+		if !start.IsZero() {
+			text += " · " + formatElapsed(time.Since(start))
+		}
+		if err := r.out.Update(ctx, ref, chat.Reply{Conversation: conv, Text: text, Kind: chat.KindActivity}); err != nil {
+			r.logf.Warnf("progress %s: finalise: %v", conv, err)
+		}
+		return
+	}
+	if err := r.out.Delete(ctx, ref); err != nil {
+		r.logf.Warnf("progress %s: clear: %v", conv, err)
+	}
+}
+
+// deletesCleanly reports whether deleting a message leaves nothing behind.
+func (r *Router) deletesCleanly() bool {
+	t, ok := r.out.(chat.DeleteLeavesTrace)
+	return !ok || !t.DeleteLeavesTrace()
 }
 
 // deliverText relays a model turn's text: retire the transient progress message
@@ -2515,6 +2588,11 @@ func (r *Router) reanchorProgress(ctx context.Context, e *sessionEntry, conv str
 	if !mode.clocked() {
 		return // off never posted one
 	}
+	if !r.deletesCleanly() {
+		// Moving the clock is a post and a delete, and where a delete leaves
+		// a trace every move would leave one in the thread. It stays put.
+		return
+	}
 	old, text, ok := e.tickRender(mode)
 	if !ok {
 		return // no placeholder outstanding: nothing to move
@@ -2551,7 +2629,7 @@ func (r *Router) reanchorProgress(ctx context.Context, e *sessionEntry, conv str
 func (r *Router) postActivity(ctx context.Context, e *sessionEntry, conv string, mode ProgressMode, calls []daemon.ToolCall) {
 	if mode == ProgressStatus {
 		if ref, text, ok := e.noteActivity(toolNames(calls)); ok {
-			if err := r.out.Update(ctx, ref, chat.Reply{Conversation: conv, Text: text, Kind: chat.KindProgress}); err != nil {
+			if err := r.editProgress(ctx, e, conv, ref, text); err != nil {
 				r.logf.Warnf("relay %s: status activity: %v", conv, err)
 			}
 			return
@@ -2827,9 +2905,9 @@ func (r *Router) reviveLocked(ctx context.Context, conv, channel string, rec ses
 		go func() {
 			pctx, cancel := platformContext(ctx)
 			defer cancel()
-			if err := r.out.Delete(pctx, chat.MessageRef{Conversation: conv, ID: rec.Placeholder}); err != nil {
-				r.logf.Warnf("session %s: clear the placeholder a restart left: %v", conv, err)
-			}
+			// Its turn was cut off by the restart: stopped, as far as this
+			// placeholder can honestly say.
+			r.retireMessage(pctx, conv, chat.MessageRef{Conversation: conv, ID: rec.Placeholder}, time.Time{}, false)
 		}()
 	}
 	return e
@@ -3274,7 +3352,7 @@ func (r *Router) relay(ctx context.Context, conv string, e *sessionEntry, owner 
 				// stream, so take its placeholder down rather than leave a
 				// frozen "Working…" above the notice that explains why.
 				e.endTurn()
-				r.clearProgress(notify, e, conv)
+				r.failProgress(notify, e, conv)
 				if sendErr := r.surfaceNotice(notify, conv, notice); sendErr != nil {
 					r.logf.Errorf("relay %s: surface lost session: %v", conv, sendErr)
 				}

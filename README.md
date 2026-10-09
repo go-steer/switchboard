@@ -414,7 +414,7 @@ the process default:
 
 | Mode | Behavior |
 |------|----------|
-| `indicator` (default) | posts a "⏳ Working…" placeholder with a running clock, deleted when the reply lands |
+| `indicator` (default) | posts a "⏳ Working…" placeholder with a running clock, deleted when the reply lands (on Google Chat, finalised as "✔ Done · 12s" instead) |
 | `status` | keeps one message per turn, edited in place with the clock and the running tool |
 | `stream` | the `indicator` clock, plus a notice per tool frame — tool, argument, verdict, how long it took — that stays as a log |
 | `off` | silent until the reply is ready |
@@ -431,6 +431,15 @@ cost two more API calls per tool frame.
 ⏳ Working… 45s
 ⏳ Working… 2m30s · running `bash` (step 7)
 ```
+
+**On Google Chat the placeholder is finalised, not deleted.** Chat leaves a
+"Message deleted by its author" tombstone wherever an app deletes a message in
+a thread. So when the answer lands, the placeholder is edited into a final
+line instead: **✔ Done · 12s**, or **✖ Stopped · 12s** for a turn that was
+refused, lost its stream or never reached the agent. For the same reason, the
+clock isn't moved below narration on Chat. Moving it is a post and a delete,
+so it stays where it is. On Slack, where a delete leaves nothing, the
+placeholder is deleted as before.
 
 The clock is what makes a long turn readable. A turn that runs for four minutes
 without calling a tool has nothing else to say for itself, and a static

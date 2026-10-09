@@ -787,6 +787,11 @@ func (a *Adapter) landed(conv, space, thread string, created *chatv1.Message) st
 	return key
 }
 
+// DeleteLeavesTrace implements chat.DeleteLeavesTrace: Chat puts "Message
+// deleted by its author" where an app deleted a message in a thread
+// (reported from the GKE deployment, for the progress placeholder).
+func (a *Adapter) DeleteLeavesTrace() bool { return true }
+
 // FitsOneMessage reports whether text renders into a single Chat message rather
 // than being split across several by Send. It measures the rendered form,
 // because the markup translation can change the length. Implements
