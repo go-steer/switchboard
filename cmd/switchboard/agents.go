@@ -58,6 +58,7 @@ var agentNameRE = regexp.MustCompile(`^[a-z][a-z0-9-]{0,39}$`)
 type AgentConfig struct {
 	Name        string            `json:"name"`
 	DisplayName string            `json:"display_name,omitempty"`
+	Description string            `json:"description,omitempty"`
 	DaemonURL   string            `json:"daemon_url"`
 	TokenEnv    string            `json:"token_env"`
 	Kind        string            `json:"kind,omitempty"`
@@ -72,6 +73,7 @@ var agentKinds = []string{"core-agent", "mast"}
 type agent struct {
 	name    string
 	display string
+	desc    string
 	daemon  *daemon.Client
 	// approvals is nil when no channel relays permission prompts: a run with
 	// approvals off everywhere holds no client for a surface it does not offer.
@@ -290,7 +292,7 @@ func buildAgents(list []AgentConfig, def string, wantApprovals bool) (*agentSet,
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", where, err)
 		}
-		a := &agent{name: ac.Name, display: ac.DisplayName, daemon: dc}
+		a := &agent{name: ac.Name, display: ac.DisplayName, desc: strings.TrimSpace(ac.Description), daemon: dc}
 		if wantApprovals {
 			if a.approvals, err = approval.New(cfg); err != nil {
 				return nil, fmt.Errorf("%s: %w", where, err)

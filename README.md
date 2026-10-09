@@ -379,9 +379,25 @@ and every follow-up you reply there.
   and the thread opens a moment later. If it can't be opened, the channel or
   thread is told and a Slack starter message is taken down.
 
-A picker (a dropdown card on Google Chat, a modal on Slack), adding agents
-through an API, and showing which agent answered come in later steps of
-#140.
+**The picker on Google Chat.** Tick **Opens a dialog** on the slash command
+in the Chat API console, and a bare `/agent` opens a dialog instead. It has a
+dropdown of the agents this space offers, with the default selected and each
+agent's `description` under it, an optional prompt, and **Start**. Starting
+posts the same starter message and thread as the typed form. With the box
+ticked, `/agent <name> <prompt>` still works and simply starts the thread.
+Dialogs need the HTTP ingress (`googlechat_ingress: "http"`), because a dialog
+is the synchronous answer to the request that asked for it. Without the box,
+nothing changes.
+
+Give agents a one-line `description` in the config file for the picker to
+show:
+
+```json
+{"name": "general", "display_name": "General agent", "description": "Quick questions; no cluster access", …}
+```
+
+The Slack modal, adding agents through an API, and showing which agent
+answered come in later steps of #140.
 
 ### Long-turn feedback
 

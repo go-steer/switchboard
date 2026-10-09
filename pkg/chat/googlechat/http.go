@@ -447,6 +447,23 @@ func (a *Adapter) eventHandler(runCtx context.Context, turns *turnGroup, h chat.
 		}
 		a.learnURL(r)
 
+		// A step of the agent dialog is answered in the response itself: the
+		// dialog to open, or the close. There is nowhere else to put either.
+		if in, err := decodeEvent(body); err == nil && isAgentDialog(in) {
+			if a.logEvents {
+				// handleEvent is not reached, and its line is how a payload
+				// becomes a fixture.
+				a.logf.Infof("googlechat: event: %s", redactCredentials(compactJSON(body)))
+			}
+			if runCtx.Err() != nil || !turns.start() {
+				refuseDraining(w)
+				return
+			}
+			defer turns.done()
+			a.answerDialog(w, runCtx, h, in)
+			return
+		}
+
 		// A click is the one event worth holding the response for: what it
 		// changes is the card it was pressed on, and the response is where
 		// that change shows up at once. Only the add-on dialect's envelope is

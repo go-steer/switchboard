@@ -30,6 +30,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - A thread whose agent has been removed gets a notice and is not rerouted.
   - Without an `agents` list, nothing changes.
   - The admin API and attribution follow in later phases.
+- **The agent picker on Google Chat** (#140, phase 3b). With **Opens a
+  dialog** ticked on the `agent` slash command, a bare `/agent` opens a
+  dialog: a dropdown of the space's agents (the default selected, each
+  agent's new `description` under it), an optional prompt, and **Start**,
+  which starts the thread exactly as the typed form does. Typed with
+  arguments while ticked, the command runs as text. HTTP ingress only.
+  Agents gain an optional `description` in the config file.
 - **The GKE example runs two agents** (#140). `deploy/examples/gke-demo` adds
   a small general-purpose core-agent (`general`, on `gemini-3.5-flash-lite`,
   no cluster tools) next to the platform agent. Both gateways register both
