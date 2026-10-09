@@ -71,6 +71,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode"
 
 	"cloud.google.com/go/pubsub"
 	chatv1 "google.golang.org/api/chat/v1"
@@ -363,7 +364,11 @@ func (a *Adapter) handleEvent(ctx context.Context, h chat.Handler, data []byte) 
 			a.logf.Errorf("googlechat: handle %s: %v", conv, err)
 		}
 	case kindCommand:
-		a.runCommand(ctx, h, conv, a.commandOf(in))
+		cmd := a.commandOf(in)
+		// A Chat command is a message in a thread: the one it was typed in, or
+		// the new one it started at the top of the space.
+		cmd.Conversation = conv
+		a.runCommand(ctx, h, conv, cmd)
 	case kindButton:
 		a.runButton(ctx, h, in, conv)
 	case kindWelcome:
@@ -396,11 +401,16 @@ func (a *Adapter) commandOf(in inbound) chat.Command {
 	if verb, ok := a.cmds[in.cmdID]; ok && verb != "" {
 		cmd.Name = strings.ToLower(verb)
 		cmd.Args = fields
+		cmd.Text = strings.TrimSpace(in.cmdArgs)
 		return cmd
 	}
 	if len(fields) > 0 {
 		cmd.Name = strings.ToLower(fields[0])
 		cmd.Args = fields[1:]
+		rest := strings.TrimSpace(in.cmdArgs)
+		if i := strings.IndexFunc(rest, unicode.IsSpace); i >= 0 {
+			cmd.Text = strings.TrimSpace(rest[i:])
+		}
 	}
 	return cmd
 }

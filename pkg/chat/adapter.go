@@ -332,6 +332,20 @@ type Command struct {
 
 	// Args are the remaining whitespace-separated tokens, e.g. ["status"].
 	Args []string
+
+	// Text is the argument text after the verb, as typed: Args joined loses
+	// the spacing and line breaks a free-text argument (a prompt) needs.
+	Text string
+
+	// Conversation is the conversation the command was typed in, when the
+	// platform says: a Google Chat command is a message in a thread. Empty
+	// for a Slack slash command, which belongs to a channel and no thread.
+	Conversation string
+
+	// CallerMention is how to name the invoker in a message others see — a
+	// platform mention, not Caller's asserted identity (an email the
+	// workspace may hide). Empty where the adapter has none.
+	CallerMention string
 }
 
 // Handler receives normalized inbound turns and gateway commands. The

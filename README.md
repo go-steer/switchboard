@@ -348,8 +348,39 @@ file:
   warns about it. `daemon_url` and `token_env` are ignored once a list exists,
   and startup warns if they're still set.
 
-Choosing an agent per thread (`/agent`), adding agents through an API, and
-showing which agent answered come in later steps of #140.
+**Talking to a particular agent: `agent`.** A plain message goes to the
+channel's default. To pick another agent, use the `agent` command:
+
+| | does |
+|---|---|
+| `agent` | lists the agents this channel offers and marks the default |
+| `agent <name> <prompt>` | starts a thread with that agent, opened with the prompt |
+| `agent <name>` | starts a thread with that agent, with no first turn |
+
+Where the thread comes from depends on the platform:
+
+- **Google Chat:** a slash command is itself a message, so typed at the top
+  of a space its own thread becomes the agent's, and the answer appears under
+  it. Register a slash command (say `/agent`) in the Chat API console and map
+  its ID to the verb in `googlechat_commands`, e.g. `{"1": "progress", "3":
+  "agent"}`. A catch-all command whose text carries the verb (`/switchboard
+  agent infra …`) works too.
+- **Slack:** `/switchboard agent infra <prompt>`, on the existing slash
+  command. A slash command belongs to no thread, so switchboard posts a
+  starter message in the channel ("*you → Infra agent*" plus the prompt) and
+  the conversation lives in its thread. The acknowledgment is visible only to
+  you.
+- **Inside a thread that already has an agent,** `agent` doesn't switch it. It
+  says which agent the thread talks to. Naming that same agent with a prompt
+  is just the thread's next turn. A thread never changes agent, a DM thread
+  included: to talk to another agent, start a new thread.
+- **The command answers at once** ("*Starting a thread with Infra agent…*"),
+  and the thread opens a moment later. If it can't be opened, the channel or
+  thread is told and a Slack starter message is taken down.
+
+A picker (a dropdown card on Google Chat, a modal on Slack), adding agents
+through an API, and showing which agent answered come in later steps of
+#140.
 
 ### Long-turn feedback
 

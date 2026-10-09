@@ -29,7 +29,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     implicit.
   - A thread whose agent has been removed gets a notice and is not rerouted.
   - Without an `agents` list, nothing changes.
-  - The `/agent` picker, the admin API and attribution follow in later phases.
+  - The admin API and attribution follow in later phases.
+- **`agent`: talk to a particular agent** (#140, phase 3a).
+  - `agent` lists the agents a channel offers and marks the default.
+  - `agent <name> <prompt>` starts a thread with that agent. On Google Chat
+    the command's own thread becomes the agent's. On Slack
+    (`/switchboard agent …`) a starter message opens the thread.
+  - Inside a thread that already has an agent, it names that agent rather
+    than switching.
+  - Commands now carry their argument text as typed and, on Chat, the
+    conversation they were typed in.
+  - The dropdown and modal pickers follow.
 
 ### Changed
 - **Stream notices for MCP tools show what the call acts on.** The argument

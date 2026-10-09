@@ -28,6 +28,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"unicode"
 
 	"github.com/slack-go/slack"
 	"github.com/slack-go/slack/slackevents"
@@ -667,11 +668,24 @@ func parseMentionCommand(text string) (chat.Command, bool) {
 // guard); the router validates. Caller is filled in by the dispatcher.
 func parseSlashCommand(sc slack.SlashCommand) chat.Command {
 	cmd := chat.Command{Channel: sc.ChannelID}
+	if sc.UserID != "" {
+		cmd.CallerMention = "<@" + sc.UserID + ">"
+	}
 	if fields := strings.Fields(sc.Text); len(fields) > 0 {
 		cmd.Name = strings.ToLower(fields[0])
 		cmd.Args = fields[1:]
+		cmd.Text = argumentText(sc.Text)
 	}
 	return cmd
+}
+
+// argumentText is the text after a command's verb, with its spacing kept.
+func argumentText(s string) string {
+	s = strings.TrimSpace(s)
+	if i := strings.IndexFunc(s, unicode.IsSpace); i >= 0 {
+		return strings.TrimSpace(s[i:])
+	}
+	return ""
 }
 
 // threadRoot returns the thread timestamp to key a conversation on: the
