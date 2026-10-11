@@ -6,6 +6,44 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [v0.7.0] — 2026-10-11
+
+A release about running more than one agent behind one chat app. A
+switchboard used to front exactly one daemon. It can now front several
+core-agent or mast daemons, and a person chooses which one a conversation
+goes to.
+
+**Several agents, one per thread.** A config file lists the agents, a global
+`default_agent`, and per-channel defaults and allow lists. A thread belongs
+to the agent it started on for its whole life, and its approvals go to that
+agent's daemon. `agent` lists a channel's agents, and
+`agent <name> <prompt>` starts a thread with one. A bare `agent` opens a
+picker: a dialog on Google Chat, a modal on Slack. Answers and permission
+questions name their agent: on Slack they post under the agent's name and
+icon (with the optional `chat:write.customize` scope), and on Google Chat
+the card carries it in a header.
+
+**Google Chat threads behave.** The agent's answer starts its own thread
+from a starter message, since Chat won't take an app's reply into a slash
+command's thread. The ⏳ placeholder is edited into **✔ Done** or
+**✖ Stopped** instead of being deleted, so turns no longer leave
+"Message deleted by its author" behind. core-agent's checkpoint summaries no
+longer appear before each follow-up.
+
+**Tool notices are quieter and say more.** MCP calls show what they act on
+(`pod · us-central1/std-simian-test`) rather than an output format or an
+internal handle, and the marks are monochrome `▸` `✔` `✖`.
+
+**A GKE example** (`deploy/examples/gke-demo`) runs a platform agent and a
+small general-purpose one behind both gateways, with the Chat HTTP ingress,
+Workload Identity and durable state.
+
+Upgrading needs no flag or config change. Without an `agents` list nothing
+about routing changes and no reply is signed. When moving to a list, make
+the daemon you were using its `default_agent`, and existing threads and
+approval buttons keep working without a migration. Images are built with Go
+1.26.9 for the net/http advisories listed under Security.
+
 ### Security
 - **Go 1.26.9 and `golang.org/x/net` v0.60.0** for net/http advisories
   GO-2026-6608, -6610, -6611, -6612, -6613 and -6617, which govulncheck reported
@@ -29,7 +67,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     implicit.
   - A thread whose agent has been removed gets a notice and is not rerouted.
   - Without an `agents` list, nothing changes.
-  - The admin API and attribution follow in later phases.
+  - The admin API follows in a later phase.
 - **The agent picker on Google Chat** (#140, phase 3b). A bare `/agent`
   replies with the agent list and a **Start a conversation…** button
   (`interaction: OPEN_DIALOG`). It opens a dialog with:
@@ -78,7 +116,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     than switching.
   - Commands now carry their argument text as typed and, on Chat, the
     conversation they were typed in.
-  - The dropdown and modal pickers follow.
+  - The pickers (above) build on it.
+- **A GKE deployment example: `deploy/examples/gke-demo`** (#131). It runs a
+  switchboard-dedicated gke-platform-agent daemon (core-agent `:main`, ask-mode
+  approvals) with switchboard's Google Chat and Slack gateways in front of it,
+  in one namespace. Chat uses the HTTP ingress behind a GKE Gateway with a
+  Certificate Manager map and calls the Chat API by Workload Identity, with no
+  key file. Both gateways keep durable state and track `:main`. The README
+  lists the one-time steps (static IP, DNS, IAM, secrets) and the cutover.
 
 ### Changed
 - **Stream notices for MCP tools show what the call acts on.** The argument
@@ -97,15 +142,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `✖` failed, replacing 🔧/✅/❌, which read as clutter in a busy thread. ✔ and
   ✖ carry the text-style variation selector, so clients draw the glyph rather
   than a colour emoji. Approval records ("✅ **Allowed**…") are unchanged.
-
-### Added
-- **A GKE deployment example: `deploy/examples/gke-demo`** (#131). It runs a
-  switchboard-dedicated gke-platform-agent daemon (core-agent `:main`, ask-mode
-  approvals) with switchboard's Google Chat and Slack gateways in front of it,
-  in one namespace. Chat uses the HTTP ingress behind a GKE Gateway with a
-  Certificate Manager map and calls the Chat API by Workload Identity, with no
-  key file. Both gateways keep durable state and track `:main`. The README
-  lists the one-time steps (static IP, DNS, IAM, secrets) and the cutover.
 
 ### Fixed
 - **No more "Message deleted by its author" on Google Chat.** Chat leaves
