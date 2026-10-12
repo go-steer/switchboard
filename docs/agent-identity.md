@@ -1,7 +1,7 @@
 # Agent identity — switchboard authenticates as itself, and the admin API
 
-**Status:** proposal (2026-10-12) · **Tracks:** _filled in when the issues are
-filed_ · **Builds on:** multi-agent (#140, `docs/multi-agent.md`) ·
+**Status:** proposal (2026-10-12) · **Tracks:** #155 (S1 #156, S2 #157, S3 #158,
+S4 #159; core-agent#1313) · **Builds on:** multi-agent (#140, `docs/multi-agent.md`) ·
 **Depends on:** purser phase 2 (go-steer/purser#19)
 
 ## The problem
