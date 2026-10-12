@@ -66,6 +66,12 @@ entries, removing them when their lease lapses.
 
 ## The admin API
 
+> **Superseded in part by `docs/agent-identity.md`** (2026-10-12): the API is
+> authenticated by purser (OIDC or mTLS) rather than a static token, and an
+> agent added through it names how switchboard authenticates to it, ideally
+> switchboard's own workload identity, rather than a token reference. The
+> endpoints below stand.
+
 It is served on its own listener, `--admin-addr`, kept off the public Gateway,
 with a bearer token read from an env var (`--admin-token-env`), as the outbound
 ingress does.
@@ -169,7 +175,8 @@ switchboard, core-agent and mast alike, which this design deliberately avoids.
 1. **Registry and routing:** config-file agents, a client per agent, `Agent`
    in records and decision ids (with the default-agent fallback for old ones),
    defaults, allow lists, attribution.
-2. **Admin API:** agents, defaults, channel settings; validation; audit;
+2. **Admin API** (redesigned in `docs/agent-identity.md`): agents, defaults,
+   channel settings; validation; audit;
    the file-backed registry store.
 3. **Picker:** the Chat `/agent` dropdown card, the Slack `/agent` modal,
    `/agent <name> <prompt>`, the in-thread guard.
