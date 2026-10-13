@@ -99,7 +99,15 @@ func (a *agent) label() string {
 type agentSet struct {
 	byName map[string]*agent
 	order  []string // registration order, for listings
-	def    string
+	// def is where a new conversation goes when its channel names no agent.
+	// The admin API can move it (#156).
+	def string
+	// legacy is the agent a record or button naming no agent belongs to:
+	// the default as the config file made it at startup. Kept apart from def
+	// so that moving the default at runtime does not move every thread
+	// recorded before the agents list existed to a daemon that has never
+	// heard of its session.
+	legacy string
 	// implicit marks the registry of a deployment with no agents list: one
 	// agent, never named in a record or a button (see stored).
 	implicit bool
@@ -108,7 +116,7 @@ type agentSet struct {
 // newAgentSet builds a registry. def names the global default and must be one
 // of the agents.
 func newAgentSet(def string, agents ...*agent) (*agentSet, error) {
-	s := &agentSet{byName: make(map[string]*agent, len(agents)), def: def}
+	s := &agentSet{byName: make(map[string]*agent, len(agents)), def: def, legacy: def}
 	for _, a := range agents {
 		if _, dup := s.byName[a.name]; dup {
 			return nil, fmt.Errorf("agent %q is registered twice", a.name)
@@ -138,11 +146,11 @@ func (s *agentSet) stored(name string) string {
 	return s.resolve(name)
 }
 
-// lookup finds an agent by name; the empty name is the default, which is what
-// a record or decision id written before the registry existed names.
+// lookup finds an agent by name; the empty name is the legacy default, which
+// is what a record or decision id written before the registry existed names.
 func (s *agentSet) lookup(name string) (*agent, bool) {
 	if name == "" {
-		name = s.def
+		name = s.legacy
 	}
 	a, ok := s.byName[name]
 	return a, ok
@@ -152,7 +160,7 @@ func (s *agentSet) lookup(name string) (*agent, bool) {
 // actually got rather than the empty default it was asked for.
 func (s *agentSet) resolve(name string) string {
 	if name == "" {
-		return s.def
+		return s.legacy
 	}
 	return name
 }
@@ -191,14 +199,11 @@ func (goneDaemon) HeadSeq(context.Context, daemon.Session, string) (int64, error
 	return 0, errAgentGone
 }
 
-// setAgents installs the registry. Called once at startup, before dispatch.
-func (r *Router) setAgents(s *agentSet) { r.agents = s }
-
 // daemonFor is the daemon client of a named agent — the default for "". A name
 // the registry no longer has gets a client that refuses every call with
 // errAgentGone, so a caller handles it like any other daemon failure.
 func (r *Router) daemonFor(name string) daemonAPI {
-	if a, ok := r.agents.lookup(name); ok {
+	if a, ok := r.agents().lookup(name); ok {
 		return a.daemon
 	}
 	return goneDaemon{}
@@ -210,7 +215,7 @@ func (r *Router) daemonOf(e *sessionEntry) daemonAPI { return r.daemonFor(e.agen
 // approvalsOf is the approval client of a conversation's agent, nil when it
 // relays no prompts or the agent is gone.
 func (r *Router) approvalsOf(e *sessionEntry) *approval.Client {
-	if a, ok := r.agents.lookup(e.agent); ok {
+	if a, ok := r.agents().lookup(e.agent); ok {
 		return a.approvals
 	}
 	return nil
@@ -220,10 +225,10 @@ func (r *Router) approvalsOf(e *sessionEntry) *approval.Client {
 // nil on a gateway with one agent, where there is nobody to tell apart, and
 // for an agent that is gone.
 func (r *Router) identityOf(e *sessionEntry) *chat.AgentIdentity {
-	if r.agents.implicit {
+	if r.agents().implicit {
 		return nil
 	}
-	a, ok := r.agents.lookup(e.agent)
+	a, ok := r.agents().lookup(e.agent)
 	if !ok {
 		return nil
 	}
@@ -291,40 +296,12 @@ func buildAgents(list []AgentConfig, def string, wantApprovals bool) (*agentSet,
 	agents := make([]*agent, 0, len(list))
 	for i, ac := range list {
 		where := fmt.Sprintf("agents[%d]", i)
-		if !agentNameRE.MatchString(ac.Name) {
-			return nil, fmt.Errorf("%s.name %q: want a short lowercase name (letters, digits, '-'), like %q", where, ac.Name, "platform")
+		if agentNameRE.MatchString(ac.Name) {
+			where = fmt.Sprintf("agents[%q]", ac.Name)
 		}
-		where = fmt.Sprintf("agents[%q]", ac.Name)
-		if ac.Kind != "" && !slices.Contains(agentKinds, ac.Kind) {
-			return nil, fmt.Errorf("%s.kind %q: want one of %s", where, ac.Kind, strings.Join(agentKinds, ", "))
-		}
-		if icon := strings.TrimSpace(ac.IconURL); icon != "" {
-			// Capped: it rides on every signed card, whose size budget is
-			// measured before the header goes on (caught in review).
-			if u, err := url.Parse(icon); err != nil || u.Scheme != "https" || u.Host == "" || len(icon) > maxIconURL {
-				return nil, fmt.Errorf("%s.icon_url %q: want an https URL to an image, at most %d characters", where, ac.IconURL, maxIconURL)
-			}
-		}
-		if strings.TrimSpace(ac.DaemonURL) == "" {
-			return nil, fmt.Errorf("%s.daemon_url is required", where)
-		}
-		if strings.TrimSpace(ac.TokenEnv) == "" {
-			return nil, fmt.Errorf("%s.token_env is required: name the variable holding the daemon token", where)
-		}
-		token := os.Getenv(ac.TokenEnv)
-		if token == "" {
-			return nil, fmt.Errorf("%s: no daemon token in $%s", where, ac.TokenEnv)
-		}
-		cfg := daemon.Config{BaseURL: ac.DaemonURL, BearerToken: token}
-		dc, err := daemon.New(cfg)
+		a, err := buildAgent(ac, wantApprovals)
 		if err != nil {
-			return nil, fmt.Errorf("%s: %w", where, err)
-		}
-		a := &agent{name: ac.Name, display: ac.DisplayName, desc: strings.TrimSpace(ac.Description), icon: strings.TrimSpace(ac.IconURL), daemon: dc}
-		if wantApprovals {
-			if a.approvals, err = approval.New(cfg); err != nil {
-				return nil, fmt.Errorf("%s: %w", where, err)
-			}
+			return nil, fmt.Errorf("%s%w", where, err)
 		}
 		agents = append(agents, a)
 	}
@@ -332,6 +309,47 @@ func buildAgents(list []AgentConfig, def string, wantApprovals bool) (*agentSet,
 		def = agents[0].name
 	}
 	return newAgentSet(def, agents...)
+}
+
+// buildAgent validates one agent entry and builds its clients, from the config
+// file or the admin API alike. Its errors start with the field (".name …",
+// ": no daemon token …") for the caller to prefix with where the entry is.
+func buildAgent(ac AgentConfig, wantApprovals bool) (*agent, error) {
+	if !agentNameRE.MatchString(ac.Name) {
+		return nil, fmt.Errorf(".name %q: want a short lowercase name (letters, digits, '-'), like %q", ac.Name, "platform")
+	}
+	if ac.Kind != "" && !slices.Contains(agentKinds, ac.Kind) {
+		return nil, fmt.Errorf(".kind %q: want one of %s", ac.Kind, strings.Join(agentKinds, ", "))
+	}
+	if icon := strings.TrimSpace(ac.IconURL); icon != "" {
+		// Capped: it rides on every signed card, whose size budget is
+		// measured before the header goes on (caught in review).
+		if u, err := url.Parse(icon); err != nil || u.Scheme != "https" || u.Host == "" || len(icon) > maxIconURL {
+			return nil, fmt.Errorf(".icon_url %q: want an https URL to an image, at most %d characters", ac.IconURL, maxIconURL)
+		}
+	}
+	if strings.TrimSpace(ac.DaemonURL) == "" {
+		return nil, fmt.Errorf(".daemon_url is required")
+	}
+	if strings.TrimSpace(ac.TokenEnv) == "" {
+		return nil, fmt.Errorf(".token_env is required: name the variable holding the daemon token")
+	}
+	token := os.Getenv(ac.TokenEnv)
+	if token == "" {
+		return nil, fmt.Errorf(": no daemon token in $%s", ac.TokenEnv)
+	}
+	cfg := daemon.Config{BaseURL: ac.DaemonURL, BearerToken: token}
+	dc, err := daemon.New(cfg)
+	if err != nil {
+		return nil, fmt.Errorf(": %w", err)
+	}
+	a := &agent{name: ac.Name, display: ac.DisplayName, desc: strings.TrimSpace(ac.Description), icon: strings.TrimSpace(ac.IconURL), daemon: dc}
+	if wantApprovals {
+		if a.approvals, err = approval.New(cfg); err != nil {
+			return nil, fmt.Errorf(": %w", err)
+		}
+	}
+	return a, nil
 }
 
 // agentsFrom builds the registry a bridged run routes through: the config

@@ -459,11 +459,17 @@ func formatElapsed(d time.Duration) string {
 // per-turn) is what keeps the daemon from replaying prior turns on every
 // message.
 type Router struct {
-	// agents is the registry every conversation's daemon is found in (#140).
-	agents  *agentSet
-	out     sender
-	metrics *metrics
-	logf    logging.Logf
+	// reg is the routing snapshot — the agents every conversation's daemon is
+	// found in (#140), and the agent settings the admin API gave channels
+	// (#156) — swapped whole on each change so a turn never sees half of one.
+	// Read through agents() and settingsFor.
+	reg atomic.Pointer[registry]
+	// regAdmin changes reg at runtime; nil when nothing may (a test, an
+	// outbound-only run).
+	regAdmin *registryAdmin
+	out      sender
+	metrics  *metrics
+	logf     logging.Logf
 
 	// parkWait overrides parkRespondTimeout; zero means the constant. A test
 	// seam.
@@ -1673,8 +1679,7 @@ func NewRouter(client *daemon.Client, out sender, progress ProgressMode, m *metr
 	if progress == "" {
 		progress = ProgressOff
 	}
-	return &Router{
-		agents:        singleAgent(client, nil),
+	r := &Router{
 		out:           out,
 		defaults:      channelSettings{progress: progress},
 		metrics:       m,
@@ -1693,6 +1698,8 @@ func NewRouter(client *daemon.Client, out sender, progress ProgressMode, m *metr
 		reserving:     make(map[string]string),
 		overrides:     make(map[string]ProgressMode),
 	}
+	r.reg.Store(&registry{agents: singleAgent(client, nil)})
+	return r
 }
 
 // setShowUsage turns the per-turn usage footer on for every channel that does
@@ -1718,7 +1725,17 @@ func (r *Router) setChannels(m map[string]channelSettings) { r.byChannel = m }
 // only setting a chat command can change. That ordering is deliberate for the
 // others: a config file saying who may approve in a room must not be reachable
 // from inside the room.
+//
+// A channel's agent settings — its default agent and allow list — may instead
+// come from the admin API (#156), which is reachable only by an operator; they
+// replace the config's for that channel, never the other settings.
 func (r *Router) settingsFor(channel string) channelSettings {
+	return r.settingsIn(r.reg.Load(), channel)
+}
+
+// settingsIn is settingsFor against a given registry snapshot, whose runtime
+// agent settings for the channel (#156) replace the config's.
+func (r *Router) settingsIn(reg *registry, channel string) channelSettings {
 	s := r.defaults
 	if channel == "" {
 		return s
@@ -1726,6 +1743,7 @@ func (r *Router) settingsFor(channel string) channelSettings {
 	if cs, ok := r.byChannel[channel]; ok {
 		s = cs
 	}
+	s = reg.overlay(channel, s)
 	r.omu.Lock()
 	m, ok := r.overrides[channel]
 	r.omu.Unlock()
@@ -2813,13 +2831,14 @@ func (r *Router) sessionAs(ctx context.Context, conv, channel, caller, agent str
 	// double-create, and release the map lock before the network call.
 	b, adopted := r.bindings[conv]
 	e := &sessionEntry{ready: make(chan struct{}), channel: channel, adopted: adopted}
+	set, cs := r.routing(channel) // one snapshot: the agents and what the channel allows agree
 	switch {
 	case adopted:
-		e.agent = r.agents.stored(b.agent)
+		e.agent = set.stored(b.agent)
 	case agent != "":
-		e.agent, e.err = r.agents.chosenAgent(r.settingsFor(channel), agent)
+		e.agent, e.err = set.chosenAgent(cs, agent)
 	default:
-		e.agent, e.err = r.agents.channelAgent(r.settingsFor(channel))
+		e.agent, e.err = set.channelAgent(cs)
 	}
 	if e.err != nil {
 		// No agent this channel may use. Not published: nothing to wait on and
@@ -2887,7 +2906,7 @@ func (r *Router) reviveLocked(ctx context.Context, conv, channel string, rec ses
 	e.touch()
 	r.sessions[conv] = e
 	r.mu.Unlock()
-	if _, ok := r.agents.lookup(e.agent); rec.Adopted && stale && ok {
+	if _, ok := r.agents().lookup(e.agent); rec.Adopted && stale && ok {
 		// An adopted session the thread stopped following long ago has been
 		// working the whole time; resuming from where the thread left off
 		// would replay all of it at once. The same head re-measure adoption

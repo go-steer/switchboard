@@ -719,6 +719,40 @@ func runServe(args []string) (err error) {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	// The runtime registry (#156), restored before the routing table: a
+	// restored thread is checked against the agents, and one on an agent the
+	// API added must find it.
+	if inbound {
+		var rstore registryStore
+		if *stateDir != "" {
+			f, err := openRegistryFile(*stateDir)
+			if err != nil {
+				return err
+			}
+			rstore = f
+		}
+		regAdmin := newRegistryAdmin(router, registryConfig{
+			Base:          agents,
+			PinnedDefault: cfg.DefaultAgent != nil || cfg.Defaults.DefaultAgent != nil,
+			Defaults:      defaults,
+			ByChannel:     byChannel,
+			AgentChannels: agentChannels(cfg),
+			WantApprovals: wantApprovals,
+			Store:         rstore,
+			Logf:          logf,
+		})
+		if rstore != nil {
+			st, err := rstore.load()
+			if err != nil {
+				// Refused rather than set aside: unlike the routing table, the
+				// registry is what an operator put there by hand.
+				return fmt.Errorf("registry: %w", err)
+			}
+			regAdmin.restore(st)
+		}
+		router.setRegistryAdmin(regAdmin)
+	}
+
 	// The routing table, restored before anything is dispatched so the first
 	// message in a thread finds the session it had (#86). Restored on ctx
 	// because the relays it re-attaches run on it, as every relay does.

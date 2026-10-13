@@ -45,7 +45,7 @@ import (
 // c is the default agent's client (#140); nil turns relaying off for it. The
 // other agents keep the clients their registry was built with.
 func (r *Router) setApprovals(c *approval.Client, on bool) {
-	if a, ok := r.agents.lookup(""); ok {
+	if a, ok := r.agents().lookup(""); ok {
 		a.approvals = c
 	}
 	r.defaults.approvals = on
@@ -53,7 +53,7 @@ func (r *Router) setApprovals(c *approval.Client, on bool) {
 
 // defaultApprovals is the default agent's approval client, nil if it has none.
 func (r *Router) defaultApprovals() *approval.Client {
-	if a, ok := r.agents.lookup(""); ok {
+	if a, ok := r.agents().lookup(""); ok {
 		return a.approvals
 	}
 	return nil
@@ -699,7 +699,7 @@ func (r *Router) HandlePress(ctx context.Context, p chat.Press) error {
 	// is: a channel this gateway does not relay prompts into gets one answer, and
 	// it is not one that reveals whether a prompt exists.
 	settings := r.settingsFor(p.Channel)
-	if !r.agents.anyApprovals() || !settings.approvals {
+	if !r.agents().anyApprovals() || !settings.approvals {
 		rec.Outcome = auditDisabled
 		return errors.New("permission prompts are not enabled on this gateway")
 	}
@@ -755,7 +755,7 @@ func (r *Router) HandlePress(ctx context.Context, p chat.Press) error {
 		rec.Outcome = auditStale
 		return r.surfaceNotice(ctx, p.Conversation, noticeStalePress)
 	}
-	if sess != sessionRef(e.sess) || (pressAgent != "" && pressAgent != r.agents.stored(e.agent)) {
+	if sess != sessionRef(e.sess) || (pressAgent != "" && pressAgent != r.agents().stored(e.agent)) {
 		// The conversation is on a different session than the one that asked.
 		// A bound session the daemon lost is discarded and the next message in
 		// the thread opens a new one, which leaves the old question on screen

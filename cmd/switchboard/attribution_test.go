@@ -28,8 +28,8 @@ import (
 // adapter can show who answered.
 func TestAnAnswerNamesItsAgent(t *testing.T) {
 	r, _, _, fake := twoAgentRouter(t)
-	r.agents.byName["b"].display = "Agent B"
-	r.agents.byName["b"].icon = "https://example.com/b.png"
+	r.agents().byName["b"].display = "Agent B"
+	r.agents().byName["b"].icon = "https://example.com/b.png"
 	e := liveEntryIn(r, "C2:1", "C2")
 	e.agent = "b"
 
