@@ -195,7 +195,15 @@ func (s *fileStore) save(st routerState) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	tmp := s.path + ".tmp"
+	return writeFileAtomic(s.path, raw)
+}
+
+// writeFileAtomic replaces path with raw: written to a temporary file beside
+// it, synced, and renamed over it, so a crash mid-write leaves the previous
+// file rather than half of a new one. Callers serialize: the temp name is
+// fixed.
+func writeFileAtomic(path string, raw []byte) error {
+	tmp := path + ".tmp"
 	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		return err
@@ -211,12 +219,12 @@ func (s *fileStore) save(st routerState) error {
 	if err := f.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(tmp, s.path); err != nil {
+	if err := os.Rename(tmp, path); err != nil {
 		return err
 	}
 	// The rename is durable once the directory is; best effort, since a
 	// filesystem that cannot sync a directory still renamed the file.
-	if d, err := os.Open(filepath.Dir(s.path)); err == nil {
+	if d, err := os.Open(filepath.Dir(path)); err == nil {
 		_ = d.Sync()
 		d.Close()
 	}

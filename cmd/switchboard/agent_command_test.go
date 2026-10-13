@@ -281,7 +281,7 @@ func TestStartingOnAThreadAlreadyOnAnotherAgentSaysSo(t *testing.T) {
 
 	// The starter lands in a conversation something else opened first.
 	r.out = landsIn{fake, "C1:9"}
-	if err := r.startAgentThread(ctx, agentCmd("", "C1", "b go"), r.agents.byName["b"], "go"); err != nil {
+	if err := r.startAgentThread(ctx, agentCmd("", "C1", "b go"), r.agents().byName["b"], "go"); err != nil {
 		t.Fatal(err)
 	}
 	recvReply(t, fake.replies) // the starter
@@ -310,7 +310,7 @@ func (l landsIn) Send(ctx context.Context, r chat.Reply) (chat.MessageRef, error
 // default marked, descriptions passed through; none on a one-agent gateway.
 func TestAgentChoicesForAPicker(t *testing.T) {
 	r, _, _, _ := twoAgentRouter(t)
-	r.agents.byName["b"].desc = "Infra questions"
+	r.agents().byName["b"].desc = "Infra questions"
 	r.setChannels(map[string]channelSettings{"C3": {defaultAgent: "b", agents: []string{"b"}}})
 	got := r.AgentChoices("C3")
 	if len(got) != 1 || got[0].Name != "b" || !got[0].Default || got[0].Description != "Infra questions" {

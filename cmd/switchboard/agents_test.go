@@ -36,6 +36,7 @@ import (
 type recordingDaemon struct {
 	creates, injects atomic.Int64
 	client           *daemon.Client
+	url              string
 }
 
 func newRecordingDaemon(t *testing.T, sid string) *recordingDaemon {
@@ -64,6 +65,7 @@ func newRecordingDaemon(t *testing.T, sid string) *recordingDaemon {
 		t.Fatal(err)
 	}
 	d.client = c
+	d.url = srv.URL
 	return d
 }
 
@@ -145,7 +147,7 @@ func TestARecordKeepsItsAgent(t *testing.T) {
 	}
 	legacy := rec
 	legacy.Agent = ""
-	if e, _ := entryFromRecord(legacy, ""); r.daemonOf(e) != daemonAPI(r.agents.byName["a"].daemon) {
+	if e, _ := entryFromRecord(legacy, ""); r.daemonOf(e) != daemonAPI(r.agents().byName["a"].daemon) {
 		t.Error("a record with no agent did not resolve to the default agent")
 	}
 }
@@ -287,7 +289,7 @@ func TestAPressForAnotherAgentIsNotAnswered(t *testing.T) {
 	// A gateway with no agents list names no agent on its buttons.
 	if err := r.HandlePress(context.Background(), chat.Press{
 		Conversation: "C1:1", Caller: "presser@example.com",
-		DecisionID: agentDecisionRef(r.agents.stored(""), testSession, "pr1"),
+		DecisionID: agentDecisionRef(r.agents().stored(""), testSession, "pr1"),
 		Option:     "allow-once",
 	}); err != nil {
 		t.Fatalf("HandlePress with the conversation's own agent: %v", err)
@@ -356,7 +358,7 @@ func TestMovingToAnAgentsListKeepsSingleDaemonThreads(t *testing.T) {
 	r.mu.Lock()
 	live := r.sessions["C1:1"]
 	r.mu.Unlock()
-	if ref := agentDecisionRef(r.agents.stored(live.agent), live.sess, "p"); strings.Contains(ref, "@") {
+	if ref := agentDecisionRef(r.agents().stored(live.agent), live.sess, "p"); strings.Contains(ref, "@") {
 		t.Errorf("single-daemon button id %q names an agent", ref)
 	}
 

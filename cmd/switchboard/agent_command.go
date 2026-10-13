@@ -50,17 +50,17 @@ func (r *Router) agentCommand(ctx context.Context, cmd chat.Command) string {
 	if cmd.Channel == "" {
 		return "Agents are chosen in a channel or a direct message."
 	}
-	if r.agents.implicit {
+	set, cs := r.routing(cmd.Channel)
+	if set.implicit {
 		return "This gateway has one agent: just mention the app to talk to it."
 	}
-	cs := r.settingsFor(cmd.Channel)
 	if len(cmd.Args) == 0 {
-		return r.agentListing(cs)
+		return agentListing(set, cs)
 	}
 	name := strings.ToLower(cmd.Args[0])
-	a, ok := r.agents.byName[name]
-	if !ok || !agentAllowed(r.agents.allowedIn(cs), name) {
-		return fmt.Sprintf("There is no agent %q here. %s", name, r.agentListing(cs))
+	a, ok := set.byName[name]
+	if !ok || !agentAllowed(set.allowedIn(cs), name) {
+		return fmt.Sprintf("There is no agent %q here. %s", name, agentListing(set, cs))
 	}
 	prompt := afterFirstWord(cmd.Text)
 
@@ -135,7 +135,7 @@ func (r *Router) startAgentThread(ctx context.Context, cmd chat.Command, a *agen
 	}
 	// sessionAs returns an existing conversation as it is: a message that got
 	// here first may have opened it on another agent (caught in review).
-	if cur := r.agents.resolve(e.agent); cur != a.name {
+	if cur := r.agents().resolve(e.agent); cur != a.name {
 		notice := fmt.Sprintf("This thread talks to %s. To talk to %s, start a new thread with `agent %s <prompt>`.",
 			r.agentLabel(cur), a.label(), a.name)
 		if err := r.surfaceNotice(ctx, conv, notice); err != nil {
@@ -189,14 +189,14 @@ var _ chat.AgentDirectory = (*Router)(nil)
 // its default marked. None for a gateway with one agent, which needs no
 // picker.
 func (r *Router) AgentChoices(channel string) []chat.AgentChoice {
-	if r.agents.implicit {
+	set, cs := r.routing(channel)
+	if set.implicit {
 		return nil
 	}
-	cs := r.settingsFor(channel)
-	def, _ := r.agents.channelAgent(cs)
-	def = r.agents.resolve(def)
+	def, _ := set.channelAgent(cs)
+	def = set.resolve(def)
 	var out []chat.AgentChoice
-	for _, a := range r.agents.allowedIn(cs) {
+	for _, a := range set.allowedIn(cs) {
 		out = append(out, chat.AgentChoice{Name: a.name, Label: a.label(), Description: a.desc, Default: a.name == def})
 	}
 	return out
@@ -208,31 +208,31 @@ func (r *Router) conversationAgent(conv string) (string, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if e, ok := r.sessions[conv]; ok {
-		return r.agents.resolve(e.agent), true
+		return r.agents().resolve(e.agent), true
 	}
 	if rec, ok := r.dormant[conv]; ok {
-		return r.agents.resolve(rec.Agent), true
+		return r.agents().resolve(rec.Agent), true
 	}
 	if b, ok := r.bindings[conv]; ok {
-		return r.agents.resolve(b.agent), true
+		return r.agents().resolve(b.agent), true
 	}
 	return "", false
 }
 
 // agentLabel names an agent to a person, falling back to its name.
 func (r *Router) agentLabel(name string) string {
-	if a, ok := r.agents.byName[name]; ok {
+	if a, ok := r.agents().byName[name]; ok {
 		return a.label()
 	}
 	return name
 }
 
 // agentListing is the reply to a bare `agent`: who is here, and how to start.
-func (r *Router) agentListing(cs channelSettings) string {
-	def, _ := r.agents.channelAgent(cs)
-	def = r.agents.resolve(def)
+func agentListing(set *agentSet, cs channelSettings) string {
+	def, _ := set.channelAgent(cs)
+	def = set.resolve(def)
 	var lines []string
-	for _, a := range r.agents.allowedIn(cs) {
+	for _, a := range set.allowedIn(cs) {
 		item := "• **" + a.label() + "** (" + a.name + ")"
 		if a.name == def {
 			item += ", the default"
