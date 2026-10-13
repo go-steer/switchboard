@@ -43,7 +43,7 @@ func newRegistryFixture(t *testing.T, store *registryFile) *registryFixture {
 	base, err := buildAgents([]AgentConfig{
 		{Name: "a", DaemonURL: f.a.url, TokenEnv: "TOK_REG"},
 		{Name: "b", DaemonURL: f.b.url, TokenEnv: "TOK_REG"},
-	}, "a", false)
+	}, "a", agentBuilder{})
 	if err != nil {
 		t.Fatal(err)
 	}

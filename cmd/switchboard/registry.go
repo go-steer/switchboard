@@ -177,7 +177,7 @@ type registryAdmin struct {
 	store registryStore // nil: changes last until the process exits
 	logf  logging.Logf
 
-	wantApprovals bool
+	builder agentBuilder
 	// What the config file declared: pinned.
 	pinned         []*agent
 	pinnedDefault  bool   // the file names default_agent
@@ -214,7 +214,7 @@ type registryConfig struct {
 	// AgentChannels are the channel IDs whose config block names a default
 	// agent or an allow list.
 	AgentChannels map[string]bool
-	WantApprovals bool
+	Builder       agentBuilder
 	Store         registryStore
 	Logf          logging.Logf
 }
@@ -224,7 +224,7 @@ func newRegistryAdmin(r *Router, c registryConfig) *registryAdmin {
 		r:              r,
 		store:          c.Store,
 		logf:           c.Logf,
-		wantApprovals:  c.WantApprovals,
+		builder:        c.Builder,
 		pinnedDefault:  c.PinnedDefault,
 		configDefault:  c.Base.def,
 		defaults:       c.Defaults,
@@ -298,7 +298,7 @@ func (a *registryAdmin) compile(st registryState) (*registry, []error) {
 			problems = append(problems, fmt.Errorf("runtime agent %q is listed twice; the first entry is used", ac.Name))
 			continue
 		}
-		built, err := buildAgent(ac, a.wantApprovals)
+		built, err := buildAgent(ac, a.builder)
 		if err != nil {
 			problems = append(problems, fmt.Errorf("runtime agent %q%w", ac.Name, err))
 			continue

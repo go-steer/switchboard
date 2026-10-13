@@ -335,6 +335,46 @@ file:
 - **The credential is named, never written:** `token_env` holds the name of
   the variable carrying the token, and the config file's secret scan applies
   as everywhere else.
+- **Or no shared secret at all:** an agent can name `auth` instead of
+  `token_env`, and switchboard authenticates to it with its own certificate
+  (see *Authenticating as the gateway* below).
+
+**Authenticating as the gateway.** Instead of a bearer token per agent,
+switchboard can present one workload identity of its own to every agent that
+accepts it, through [purser](https://github.com/go-steer/purser)'s client
+half (`docs/agent-identity.md`). The daemon then grants that identity the
+right to assert callers. It needs a daemon that accepts mTLS;
+core-agent's support is tracked in go-steer/core-agent#1313.
+
+```json
+{
+  "identity": "spiffe-files",
+  "spiffe_trust_domain": "my-project.svc.id.goog",
+  "agents": [
+    {"name": "platform", "daemon_url": "https://platform:7777",
+     "auth": {"method": "spiffe", "server_id": "spiffe://my-project.svc.id.goog/ns/agents/sa/core-agent"}},
+    {"name": "legacy", "daemon_url": "http://legacy:7777", "token_env": "LEGACY_TOKEN"}
+  ]
+}
+```
+
+| `--identity` | the gateway's certificate | per-agent `auth` |
+|---|---|---|
+| `none` (default) | none: bearer tokens only | — |
+| `spiffe-files` | an SVID as files under `--spiffe-dir` (default: GKE managed workload identity's mount), for `--spiffe-trust-domain` | `{"method": "spiffe", "server_id": "spiffe://…"}`: the daemon must present exactly that ID |
+| `spiffe-workload-api` | an SVID from the Workload API at `--spiffe-endpoint-socket` (SPIRE) | the same |
+| `pki` | `--tls-cert-file` / `--tls-key-file`, verified against `--tls-ca-file` | `{"method": "pki", "server_name": "…"}`; `server_name` only if the certificate doesn't carry the URL's host |
+
+- A certificate method needs an `https` `daemon_url` and sends no bearer
+  token. An entry naming both `auth` and `token_env` is refused.
+- The gateway's own credentials rotate in place: the SVID and its bundle are
+  re-read as they change, and a renewed `--tls-cert-file` is picked up at the
+  next connection. A failed reload is logged, and an expired certificate is
+  not presented. `--tls-ca-file` is read once, at startup: a new CA needs a
+  restart.
+- An agent's client follows no redirect, and reuses its connections across
+  registry changes.
+- These settings are paths and names, never secrets.
 - **Removed agents.** If an agent is removed while threads still belong to it,
   a message in one of those threads gets a notice to start a new thread.
   Nothing is rerouted.

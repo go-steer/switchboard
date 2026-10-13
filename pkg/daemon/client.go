@@ -57,11 +57,19 @@ type Config struct {
 	BaseURL string
 
 	// BearerToken authenticates switchboard to the daemon. Loaded
-	// from an env var by main.go (never a bare flag).
+	// from an env var by main.go (never a bare flag). Empty only with
+	// MutualTLS.
 	BearerToken string
 
-	// HTTPClient lets tests swap in a client pointed at an
-	// httptest.Server. Nil in production.
+	// MutualTLS says HTTPClient authenticates switchboard itself, with a
+	// client certificate (docs/agent-identity.md), so no bearer token is
+	// sent. It needs an https BaseURL and an HTTPClient that presents the
+	// certificate.
+	MutualTLS bool
+
+	// HTTPClient is the client every request goes through: a test's,
+	// pointed at an httptest.Server, or one whose transport presents
+	// switchboard's certificate. Nil uses a plain client.
 	HTTPClient *http.Client
 }
 
@@ -84,6 +92,18 @@ func (c Config) Validate() error {
 	if strings.HasSuffix(c.BaseURL, "/") {
 		return fmt.Errorf("daemon: BaseURL must not end with '/' (got %q)", c.BaseURL)
 	}
+	if c.MutualTLS {
+		if c.BearerToken != "" {
+			return errors.New("daemon: MutualTLS and a BearerToken both given; the certificate is the credential")
+		}
+		if c.HTTPClient == nil {
+			return errors.New("daemon: MutualTLS needs an HTTPClient that presents the client certificate")
+		}
+		if !strings.HasPrefix(c.BaseURL, "https://") {
+			return fmt.Errorf("daemon: MutualTLS needs an https BaseURL (got %q)", c.BaseURL)
+		}
+		return nil
+	}
 	if c.BearerToken == "" {
 		return errors.New("daemon: BearerToken is required")
 	}
@@ -101,10 +121,17 @@ func New(cfg Config) (*Client, error) {
 		// response body, which force-closes the long-lived Subscribe SSE
 		// stream. Unary calls get a deadline via context in do() instead;
 		// Subscribe is bounded only by its caller's context.
-		hc = &http.Client{}
+		hc = &http.Client{CheckRedirect: NoRedirects}
 	}
 	return &Client{cfg: cfg, http: hc}, nil
 }
+
+// NoRedirects is the redirect policy of the default client: the contract has
+// no redirects, and following one would resend the bearer token (net/http
+// keeps Authorization on a same-host hop, https to http included) and the
+// asserted caller to wherever it pointed. The 3xx is returned as the answer,
+// which every verb reads as a failure.
+func NoRedirects(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 
 // unaryTimeout bounds a single create/inject/wake round-trip. It is
 // applied per-request via context so it never touches the streaming
@@ -1482,7 +1509,9 @@ func (c *Client) newRequest(ctx context.Context, method, path, assertedCaller st
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+c.cfg.BearerToken)
+	if c.cfg.BearerToken != "" { // empty only under MutualTLS
+		req.Header.Set("Authorization", "Bearer "+c.cfg.BearerToken)
+	}
 	if assertedCaller != "" {
 		req.Header.Set("X-Asserted-Caller", assertedCaller)
 	}

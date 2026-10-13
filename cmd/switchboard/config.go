@@ -67,19 +67,31 @@ import (
 // say nothing about the rest.
 type Config struct {
 	// Process-wide settings, none of which vary by channel.
-	DaemonURL       *string `json:"daemon_url,omitempty"`
-	Platform        *string `json:"platform,omitempty"`
-	OutboundOnly    *bool   `json:"outbound_only,omitempty"`
-	CallerID        *string `json:"caller_id,omitempty"`
-	LogFormat       *string `json:"log_format,omitempty"`
-	AuditLog        *string `json:"audit_log,omitempty"`
-	StateDir        *string `json:"state_dir,omitempty"`
-	SessionIdleTTL  *string `json:"session_idle_ttl,omitempty"`
-	MetricsAddr     *string `json:"metrics_addr,omitempty"`
-	IngressAddr     *string `json:"ingress_addr,omitempty"`
-	GoogleProject   *string `json:"google_project,omitempty"`
-	GoogleSub       *string `json:"google_subscription,omitempty"`
-	GoogleLogEvents *bool   `json:"googlechat_log_events,omitempty"`
+	DaemonURL    *string `json:"daemon_url,omitempty"`
+	Platform     *string `json:"platform,omitempty"`
+	OutboundOnly *bool   `json:"outbound_only,omitempty"`
+	CallerID     *string `json:"caller_id,omitempty"`
+	LogFormat    *string `json:"log_format,omitempty"`
+	AuditLog     *string `json:"audit_log,omitempty"`
+	StateDir     *string `json:"state_dir,omitempty"`
+
+	// The gateway's own identity (#158): how it authenticates to an agent
+	// whose auth.method is spiffe or pki. Paths and names, never secrets.
+	Identity *string `json:"identity,omitempty"`
+	// Not "spiffe_credentials_dir": checkNoSecrets reads any key naming a
+	// credential as a secret (caught in review).
+	SPIFFEDir            *string `json:"spiffe_dir,omitempty"`
+	SPIFFETrustDomain    *string `json:"spiffe_trust_domain,omitempty"`
+	SPIFFEEndpointSocket *string `json:"spiffe_endpoint_socket,omitempty"`
+	TLSCertFile          *string `json:"tls_cert_file,omitempty"`
+	TLSKeyFile           *string `json:"tls_key_file,omitempty"`
+	TLSCAFile            *string `json:"tls_ca_file,omitempty"`
+	SessionIdleTTL       *string `json:"session_idle_ttl,omitempty"`
+	MetricsAddr          *string `json:"metrics_addr,omitempty"`
+	IngressAddr          *string `json:"ingress_addr,omitempty"`
+	GoogleProject        *string `json:"google_project,omitempty"`
+	GoogleSub            *string `json:"google_subscription,omitempty"`
+	GoogleLogEvents      *bool   `json:"googlechat_log_events,omitempty"`
 
 	// The HTTP interaction endpoint (#29). GoogleIngress picks the transport;
 	// the other three configure the endpoint and the identity its callers must

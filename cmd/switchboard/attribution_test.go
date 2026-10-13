@@ -124,12 +124,12 @@ func TestAGoneAgentSignsNothing(t *testing.T) {
 func TestIconURLMustBeHTTPS(t *testing.T) {
 	t.Setenv("TOK_A", "a")
 	for _, icon := range []string{"http://example.com/a.png", "example.com/a.png", "https://"} {
-		_, err := buildAgents([]AgentConfig{{Name: "a", DaemonURL: "http://a", TokenEnv: "TOK_A", IconURL: icon}}, "", false)
+		_, err := buildAgents([]AgentConfig{{Name: "a", DaemonURL: "http://a", TokenEnv: "TOK_A", IconURL: icon}}, "", agentBuilder{})
 		if err == nil || !strings.Contains(err.Error(), "icon_url") {
 			t.Errorf("icon %q: err = %v, want an icon_url error", icon, err)
 		}
 	}
-	set, err := buildAgents([]AgentConfig{{Name: "a", DaemonURL: "http://a", TokenEnv: "TOK_A", IconURL: " https://example.com/a.png "}}, "", false)
+	set, err := buildAgents([]AgentConfig{{Name: "a", DaemonURL: "http://a", TokenEnv: "TOK_A", IconURL: " https://example.com/a.png "}}, "", agentBuilder{})
 	if err != nil {
 		t.Fatal(err)
 	}
