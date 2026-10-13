@@ -179,6 +179,7 @@ type registryAdmin struct {
 
 	builder agentBuilder
 	// What the config file declared: pinned.
+	pinnedConfigs  []AgentConfig
 	pinned         []*agent
 	pinnedDefault  bool   // the file names default_agent
 	configDefault  string // the default the file gives, or the first agent
@@ -207,7 +208,8 @@ func agentChannels(cfg *Config) map[string]bool {
 
 // registryConfig is what newRegistryAdmin needs from startup.
 type registryConfig struct {
-	Base          *agentSet // the registry the config file built
+	Base          *agentSet     // the registry the config file built
+	PinnedConfigs []AgentConfig // the config file's agents list, for the API to show
 	PinnedDefault bool
 	Defaults      channelSettings
 	ByChannel     map[string]channelSettings
@@ -230,6 +232,7 @@ func newRegistryAdmin(r *Router, c registryConfig) *registryAdmin {
 		defaults:       c.Defaults,
 		byChannel:      c.ByChannel,
 		pinnedChannels: c.AgentChannels,
+		pinnedConfigs:  c.PinnedConfigs,
 		state:          registryState{Version: registryVersion},
 	}
 	if !c.Base.implicit {
@@ -530,6 +533,27 @@ func (a *registryAdmin) clearChannel(id string) error {
 	}
 	delete(st.Channels, id)
 	return a.apply(st)
+}
+
+// view is what the API shows: its own state, the config's agents, and the
+// problems keeping entries out of the registry now.
+func (a *registryAdmin) view() (registryState, []AgentConfig, []error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	_, problems := a.compile(a.state)
+	return a.snapshotState(), slices.Clone(a.pinnedConfigs), problems
+}
+
+// agentEntry is an agent's entry, the config's or the API's.
+func (a *registryAdmin) agentEntry(name string) (AgentConfig, bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, l := range [][]AgentConfig{a.pinnedConfigs, a.state.Agents} {
+		if i := slices.IndexFunc(l, func(x AgentConfig) bool { return x.Name == name }); i >= 0 {
+			return l[i], true
+		}
+	}
+	return AgentConfig{}, false
 }
 
 // current is what the API has said, including entries left out for now.

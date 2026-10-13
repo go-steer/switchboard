@@ -117,6 +117,14 @@ type Config struct {
 	IngressAllow   []string          `json:"ingress_allow,omitempty"`
 	GoogleCommands map[string]string `json:"googlechat_commands,omitempty"`
 
+	// The admin API (#157). AdminAllow grants the admin role; AdminAudiences
+	// are the OIDC audiences its tokens must carry.
+	AdminAddr      *string  `json:"admin_addr,omitempty"`
+	AdminAuth      *string  `json:"admin_auth,omitempty"`
+	AdminIssuer    *string  `json:"admin_oidc_issuer,omitempty"`
+	AdminAudiences []string `json:"admin_oidc_audience,omitempty"`
+	AdminAllow     []string `json:"admin_allow,omitempty"`
+
 	// Token *variable names*, never token values — see checkNoSecrets. These
 	// exist in the file for the same reason they exist as flags: naming the
 	// variable is configuration, and what is in it is not.
@@ -124,6 +132,7 @@ type Config struct {
 	AppTokenEnv     *string `json:"slack_app_token_env,omitempty"`
 	BotTokenEnv     *string `json:"slack_bot_token_env,omitempty"`
 	IngressTokenEnv *string `json:"ingress_token_env,omitempty"`
+	AdminTokenEnv   *string `json:"admin_token_env,omitempty"`
 
 	// Agents is the registry of daemons this gateway routes to (#140). Absent,
 	// the gateway has one agent, built from daemon_url and token_env, exactly

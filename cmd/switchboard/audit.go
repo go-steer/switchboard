@@ -53,7 +53,12 @@ const auditStdout = "stdout"
 const (
 	auditTurn  = "turn"
 	auditPress = "press"
+	auditAdmin = "admin" // a change through the admin API (#157)
 )
+
+// An admin change's outcome: auditApplied, or refused (pinned, unknown, or
+// one that would break the registry; Admin.Reason says which).
+const auditRefused = "refused"
 
 // Turn outcomes.
 const (
@@ -105,6 +110,20 @@ type auditRecord struct {
 	// Approver is who the daemon says it recorded, which can differ from
 	// Caller and is the one to believe.
 	Approver string `json:"approver,omitempty"`
+
+	// Admin only. Caller is the identity purser authenticated.
+	Admin *auditAdminChange `json:"admin,omitempty"`
+}
+
+// auditAdminChange is what an admin record adds: the change, and the entry
+// before and after it.
+type auditAdminChange struct {
+	Change     string          `json:"change"`
+	AuthSource string          `json:"auth_source,omitempty"`
+	ProxiedBy  string          `json:"proxied_by,omitempty"`
+	Before     json.RawMessage `json:"before,omitempty"`
+	After      json.RawMessage `json:"after,omitempty"`
+	Reason     string          `json:"reason,omitempty"`
 }
 
 // auditLog writes records. A nil *auditLog records nothing, so the router can
