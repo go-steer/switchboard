@@ -91,7 +91,7 @@ func New(cfg daemon.Config) (*Client, error) {
 	hc := cfg.HTTPClient
 	switch {
 	case hc == nil:
-		hc = &http.Client{}
+		hc = &http.Client{CheckRedirect: daemon.NoRedirects}
 	case hc.Timeout != 0:
 		clone := *hc
 		clone.Timeout = 0

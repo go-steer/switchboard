@@ -77,8 +77,10 @@ type Config struct {
 
 	// The gateway's own identity (#158): how it authenticates to an agent
 	// whose auth.method is spiffe or pki. Paths and names, never secrets.
-	Identity             *string `json:"identity,omitempty"`
-	SPIFFECredentialsDir *string `json:"spiffe_credentials_dir,omitempty"`
+	Identity *string `json:"identity,omitempty"`
+	// Not "spiffe_credentials_dir": checkNoSecrets reads any key naming a
+	// credential as a secret (caught in review).
+	SPIFFEDir            *string `json:"spiffe_dir,omitempty"`
 	SPIFFETrustDomain    *string `json:"spiffe_trust_domain,omitempty"`
 	SPIFFEEndpointSocket *string `json:"spiffe_endpoint_socket,omitempty"`
 	TLSCertFile          *string `json:"tls_cert_file,omitempty"`

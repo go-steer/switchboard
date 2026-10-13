@@ -218,7 +218,7 @@ func runServe(args []string) (err error) {
 			"\"none\" (bearer tokens only), \"spiffe-files\" (an SVID as files, as GKE managed "+
 			"workload identity delivers it), \"spiffe-workload-api\" (a SPIFFE Workload API socket) "+
 			"or \"pki\" (a certificate from a standard CA)")
-	spiffeDir := fs.String("spiffe-credentials-dir", "",
+	spiffeDir := fs.String("spiffe-dir", "",
 		"with --identity spiffe-files: the directory holding certificates.pem, private_key.pem and "+
 			"ca_certificates.pem; empty = GKE managed workload identity's mount")
 	spiffeTD := fs.String("spiffe-trust-domain", "",
@@ -291,7 +291,7 @@ func runServe(args []string) (err error) {
 	res.str("audit-log", "SWITCHBOARD_AUDIT_LOG", cfg.AuditLog, auditLogDest)
 	res.str("state-dir", "SWITCHBOARD_STATE_DIR", cfg.StateDir, stateDir)
 	res.str("identity", "SWITCHBOARD_IDENTITY", cfg.Identity, identity)
-	res.str("spiffe-credentials-dir", "SWITCHBOARD_SPIFFE_CREDENTIALS_DIR", cfg.SPIFFECredentialsDir, spiffeDir)
+	res.str("spiffe-dir", "SWITCHBOARD_SPIFFE_DIR", cfg.SPIFFEDir, spiffeDir)
 	res.str("spiffe-trust-domain", "SWITCHBOARD_SPIFFE_TRUST_DOMAIN", cfg.SPIFFETrustDomain, spiffeTD)
 	res.str("spiffe-endpoint-socket", "", cfg.SPIFFEEndpointSocket, spiffeSocket)
 	res.str("tls-cert-file", "SWITCHBOARD_TLS_CERT_FILE", cfg.TLSCertFile, tlsCertFile)
@@ -450,7 +450,7 @@ func runServe(args []string) (err error) {
 			CertFile:          *tlsCertFile,
 			KeyFile:           *tlsKeyFile,
 			CAFile:            *tlsCAFile,
-		})
+		}, logf)
 		if err != nil {
 			return err
 		}

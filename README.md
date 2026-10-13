@@ -361,14 +361,19 @@ core-agent's support is tracked in go-steer/core-agent#1313.
 | `--identity` | the gateway's certificate | per-agent `auth` |
 |---|---|---|
 | `none` (default) | none: bearer tokens only | — |
-| `spiffe-files` | an SVID as files under `--spiffe-credentials-dir` (default: GKE managed workload identity's mount), for `--spiffe-trust-domain` | `{"method": "spiffe", "server_id": "spiffe://…"}`: the daemon must present exactly that ID |
+| `spiffe-files` | an SVID as files under `--spiffe-dir` (default: GKE managed workload identity's mount), for `--spiffe-trust-domain` | `{"method": "spiffe", "server_id": "spiffe://…"}`: the daemon must present exactly that ID |
 | `spiffe-workload-api` | an SVID from the Workload API at `--spiffe-endpoint-socket` (SPIRE) | the same |
 | `pki` | `--tls-cert-file` / `--tls-key-file`, verified against `--tls-ca-file` | `{"method": "pki", "server_name": "…"}`; `server_name` only if the certificate doesn't carry the URL's host |
 
 - A certificate method needs an `https` `daemon_url` and sends no bearer
   token. An entry naming both `auth` and `token_env` is refused.
-- Credentials rotate in place: the SVID is read per handshake, and a renewed
-  `--tls-cert-file` is picked up at the next connection.
+- The gateway's own credentials rotate in place: the SVID and its bundle are
+  re-read as they change, and a renewed `--tls-cert-file` is picked up at the
+  next connection. A failed reload is logged, and an expired certificate is
+  not presented. `--tls-ca-file` is read once, at startup: a new CA needs a
+  restart.
+- An agent's client follows no redirect, and reuses its connections across
+  registry changes.
 - These settings are paths and names, never secrets.
 - **Removed agents.** If an agent is removed while threads still belong to it,
   a message in one of those threads gets a notice to start a new thread.

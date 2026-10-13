@@ -93,6 +93,9 @@ func (c Config) Validate() error {
 		return fmt.Errorf("daemon: BaseURL must not end with '/' (got %q)", c.BaseURL)
 	}
 	if c.MutualTLS {
+		if c.BearerToken != "" {
+			return errors.New("daemon: MutualTLS and a BearerToken both given; the certificate is the credential")
+		}
 		if c.HTTPClient == nil {
 			return errors.New("daemon: MutualTLS needs an HTTPClient that presents the client certificate")
 		}
@@ -118,10 +121,17 @@ func New(cfg Config) (*Client, error) {
 		// response body, which force-closes the long-lived Subscribe SSE
 		// stream. Unary calls get a deadline via context in do() instead;
 		// Subscribe is bounded only by its caller's context.
-		hc = &http.Client{}
+		hc = &http.Client{CheckRedirect: NoRedirects}
 	}
 	return &Client{cfg: cfg, http: hc}, nil
 }
+
+// NoRedirects is the redirect policy of the default client: the contract has
+// no redirects, and following one would resend the bearer token (net/http
+// keeps Authorization on a same-host hop, https to http included) and the
+// asserted caller to wherever it pointed. The 3xx is returned as the answer,
+// which every verb reads as a failure.
+func NoRedirects(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 
 // unaryTimeout bounds a single create/inject/wake round-trip. It is
 // applied per-request via context so it never touches the streaming

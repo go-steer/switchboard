@@ -382,6 +382,9 @@ func daemonConfigFor(ac AgentConfig, id *gatewayIdentity) (daemon.Config, error)
 	}
 	switch method {
 	case authBearer:
+		if ac.Auth != nil && (ac.Auth.ServerID != "" || ac.Auth.ServerName != "") {
+			return daemon.Config{}, fmt.Errorf(".auth: server_id and server_name are for the certificate methods, not bearer")
+		}
 		if strings.TrimSpace(ac.TokenEnv) == "" {
 			return daemon.Config{}, fmt.Errorf(".token_env is required: name the variable holding the daemon token")
 		}

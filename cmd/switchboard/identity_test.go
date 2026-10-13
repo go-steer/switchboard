@@ -36,6 +36,8 @@ import (
 	"github.com/spiffe/go-spiffe/v2/bundle/x509bundle"
 	"github.com/spiffe/go-spiffe/v2/spiffeid"
 	"github.com/spiffe/go-spiffe/v2/svid/x509svid"
+
+	"github.com/go-steer/switchboard/internal/logging"
 )
 
 const (
@@ -150,7 +152,7 @@ func spiffeIdentity(t *testing.T, ca *authtest.CA) *gatewayIdentity {
 	t.Helper()
 	gid, err := loadIdentity(context.Background(), identityConfig{
 		Kind: "spiffe-files", SPIFFEDir: spiffeDir(t, ca, testClientID), SPIFFETrustDomain: testTD,
-	})
+	}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -198,8 +200,8 @@ func TestASPIFFEAgentPresentingTheWrongIdentityIsRefused(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := a.daemon.CreateSession(context.Background(), "u@x.com"); err == nil {
-		t.Fatal("reached a daemon presenting the wrong SPIFFE ID")
+	if _, err := a.daemon.CreateSession(context.Background(), "u@x.com"); err == nil || !strings.Contains(err.Error(), "not authorized") {
+		t.Fatalf("err = %v, want the daemon refused for its SPIFFE ID", err)
 	}
 	seen.mu.Lock()
 	defer seen.mu.Unlock()
@@ -231,7 +233,7 @@ func TestAPKIAgentIsReachedWithTheGatewaysCertificate(t *testing.T) {
 	srv.StartTLS()
 	defer srv.Close()
 
-	gid, err := loadIdentity(context.Background(), pkiFiles(t, ca, "switchboard"))
+	gid, err := loadIdentity(context.Background(), pkiFiles(t, ca, "switchboard"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -293,6 +295,11 @@ func TestCertificateAgentsAreValidated(t *testing.T) {
 		"a token as well":            {AgentConfig{Name: "a", DaemonURL: "https://a", TokenEnv: "TOK_ID", Auth: &AgentAuth{Method: authSPIFFE, ServerID: testServerID}}, spiffe, "both given"},
 		"an unknown method":          {AgentConfig{Name: "a", DaemonURL: "https://a", Auth: &AgentAuth{Method: "kerberos"}}, spiffe, "want bearer, spiffe or pki"},
 		"bearer with no token_env":   {AgentConfig{Name: "a", DaemonURL: "https://a", Auth: &AgentAuth{Method: authBearer}}, none, ".token_env is required"},
+		"spiffe with server_name":    {AgentConfig{Name: "a", DaemonURL: "https://a", Auth: &AgentAuth{Method: authSPIFFE, ServerID: testServerID, ServerName: "a"}}, spiffe, "server_name is for pki"},
+		"pki with server_id":         {AgentConfig{Name: "a", DaemonURL: "https://a", Auth: &AgentAuth{Method: authPKI, ServerID: testServerID}}, spiffe, "server_id is for spiffe"},
+		"bearer with server_id":      {AgentConfig{Name: "a", DaemonURL: "https://a", TokenEnv: "TOK_ID", Auth: &AgentAuth{Method: authBearer, ServerID: testServerID}}, none, "not bearer"},
+		"a foreign trust domain":     {AgentConfig{Name: "a", DaemonURL: "https://a", Auth: &AgentAuth{Method: authSPIFFE, ServerID: "spiffe://elsewhere.org/x"}}, spiffe, "no trust bundle"},
+		"an upper-case scheme":       {AgentConfig{Name: "a", DaemonURL: "HTTPS://a", Auth: &AgentAuth{Method: authSPIFFE, ServerID: testServerID}}, spiffe, "needs an https URL"},
 	} {
 		if _, err := buildAgent(tc.ac, agentBuilder{identity: tc.id}); err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("%s: err = %v, want %q", name, err, tc.want)
@@ -315,11 +322,139 @@ func TestIdentitySettingsAreValidated(t *testing.T) {
 		"pki, no files":          {identityConfig{Kind: "pki"}, "needs --tls-cert-file"},
 		"pki, empty ca":          {identityConfig{Kind: "pki", CertFile: "x", KeyFile: "y", CAFile: os.DevNull}, "no certificates"},
 	} {
-		if _, err := loadIdentity(context.Background(), tc.c); err == nil || !strings.Contains(err.Error(), tc.want) {
+		if _, err := loadIdentity(context.Background(), tc.c, nil); err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("%s: err = %v, want %q", name, err, tc.want)
 		}
 	}
-	if gid, err := loadIdentity(context.Background(), identityConfig{}); err != nil || gid.kind != identityNone {
+	if gid, err := loadIdentity(context.Background(), identityConfig{}, nil); err != nil || gid.kind != identityNone {
 		t.Errorf("the default: %+v, %v; want none", gid, err)
+	}
+}
+
+// Every identity key loads from the config file. spiffe_credentials_dir,
+// the first spelling, was refused by the secret scan (caught in review).
+func TestTheIdentityKeysLoadFromTheConfigFile(t *testing.T) {
+	cfg, err := loadConfig(writeConfig(t, `{
+		"identity": "spiffe-files", "spiffe_dir": "/var/run/svid", "spiffe_trust_domain": "example.org",
+		"spiffe_endpoint_socket": "unix:///run/spire.sock",
+		"tls_cert_file": "/tls/tls.crt", "tls_key_file": "/tls/tls.key", "tls_ca_file": "/tls/ca.crt",
+		"agents": [{"name": "p", "daemon_url": "https://p:7777",
+		            "auth": {"method": "spiffe", "server_id": "spiffe://example.org/ns/a/sa/p"}}]
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SPIFFEDir == nil || *cfg.SPIFFEDir != "/var/run/svid" || cfg.Agents[0].Auth.ServerID == "" {
+		t.Errorf("cfg = %+v", cfg)
+	}
+}
+
+// An mTLS daemon's redirect is not followed: it could carry the asserted
+// caller and the message to a plain-http URL (caught in review).
+func TestAnMTLSAgentsRedirectIsNotFollowed(t *testing.T) {
+	ca := authtest.NewCA(t, "trust")
+	var followed int
+	plain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { followed++ }))
+	defer plain.Close()
+	cert := svidCert(t, ca, testServerID)
+	id, _ := spiffeid.FromString(testServerID)
+	td, _ := spiffeid.TrustDomainFromString(testTD)
+	cfg, _, err := mtls.NewSPIFFE(mtls.SPIFFEOptions{
+		SVIDSource:   staticSVID{&x509svid.SVID{ID: id, Certificates: []*x509.Certificate{cert.Leaf}, PrivateKey: cert.PrivateKey.(crypto.Signer)}},
+		BundleSource: x509bundle.FromX509Authorities(td, []*x509.Certificate{ca.Cert()}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	url := serveTLS(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, plain.URL+r.URL.Path, http.StatusTemporaryRedirect)
+	}), cfg)
+	a, err := buildAgent(AgentConfig{Name: "p", DaemonURL: url, Auth: &AgentAuth{Method: authSPIFFE, ServerID: testServerID}},
+		agentBuilder{identity: spiffeIdentity(t, ca)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.daemon.CreateSession(context.Background(), "u@x.com"); err == nil {
+		t.Error("a redirect was taken for a session")
+	}
+	if followed != 0 {
+		t.Errorf("the redirect to plain http was followed %d time(s)", followed)
+	}
+}
+
+// A PKI daemon whose certificate another CA issued is refused.
+func TestAPKIAgentFromAnotherCAIsRefused(t *testing.T) {
+	ca, other := authtest.NewCA(t, "trust"), authtest.NewCA(t, "other")
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	srv.TLS = &tls.Config{Certificates: []tls.Certificate{other.IssueServer(t, "127.0.0.1")}, MinVersion: tls.VersionTLS13}
+	srv.StartTLS()
+	defer srv.Close()
+	gid, err := loadIdentity(context.Background(), pkiFiles(t, ca, "switchboard"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := buildAgent(AgentConfig{Name: "g", DaemonURL: srv.URL, Auth: &AgentAuth{Method: authPKI}}, agentBuilder{identity: gid})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.daemon.CreateSession(context.Background(), "u@x.com"); err == nil || !strings.Contains(err.Error(), "certificate") {
+		t.Errorf("err = %v, want a certificate verification failure", err)
+	}
+}
+
+// The same agent built again — every registry change rebuilds them — reuses
+// its client and the connections in it (caught in review).
+func TestAnAgentsClientIsReusedAcrossRebuilds(t *testing.T) {
+	ca := authtest.NewCA(t, "trust")
+	gid := spiffeIdentity(t, ca)
+	auth := &AgentAuth{Method: authSPIFFE, ServerID: testServerID}
+	first, err := gid.httpClientFor(auth, "https://p:7777")
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := gid.httpClientFor(&AgentAuth{Method: authSPIFFE, ServerID: testServerID}, "https://p:7777")
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := gid.httpClientFor(auth, "https://q:7777")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first != again || first == other {
+		t.Error("the client was rebuilt for the same agent, or shared with another")
+	}
+}
+
+// An expired certificate is not presented, and a reload that keeps failing
+// is said once (caught in review).
+func TestAKeyPairThatStopsWorkingIsReported(t *testing.T) {
+	ca := authtest.NewCA(t, "trust")
+	c := pkiFiles(t, ca, "switchboard")
+	var warnings int
+	logf := logging.Logf(func(lvl logging.Level, format string, args ...any) {
+		if lvl == logging.LevelWarn {
+			warnings++
+		}
+	})
+	kp := &keyPairFile{certFile: c.CertFile, keyFile: c.KeyFile, logf: logf}
+	if _, err := kp.get(nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(c.CertFile, []byte("half a rotation"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	later := time.Now().Add(time.Minute)
+	_ = os.Chtimes(c.CertFile, later, later)
+	for range 3 {
+		if _, err := kp.get(nil); err != nil {
+			t.Fatalf("mid-rotation: %v, want the previous pair", err)
+		}
+	}
+	if warnings != 1 {
+		t.Errorf("warnings = %d, want one", warnings)
+	}
+	kp.now = func() time.Time { return time.Now().Add(100 * 365 * 24 * time.Hour) }
+	if _, err := kp.get(nil); err == nil || !strings.Contains(err.Error(), "expired") {
+		t.Errorf("an expired certificate: err = %v", err)
 	}
 }

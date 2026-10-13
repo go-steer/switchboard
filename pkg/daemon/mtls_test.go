@@ -61,3 +61,32 @@ func TestMutualTLSIsValidated(t *testing.T) {
 		}
 	}
 }
+
+// The default client follows no redirect: it would resend the bearer token
+// and the asserted caller wherever the 3xx pointed (caught in review).
+func TestTheDefaultClientFollowsNoRedirect(t *testing.T) {
+	var followed int
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { followed++ }))
+	defer target.Close()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+r.URL.Path, http.StatusTemporaryRedirect)
+	}))
+	defer srv.Close()
+	c, err := New(Config{BaseURL: srv.URL, BearerToken: "tok"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.CreateSession(context.Background(), "u@x.com"); err == nil {
+		t.Error("a 307 was taken for a session")
+	}
+	if followed != 0 {
+		t.Errorf("the redirect was followed %d time(s)", followed)
+	}
+}
+
+func TestMutualTLSRefusesATokenToo(t *testing.T) {
+	err := Config{BaseURL: "https://d", MutualTLS: true, BearerToken: "tok", HTTPClient: http.DefaultClient}.Validate()
+	if err == nil || !strings.Contains(err.Error(), "both given") {
+		t.Errorf("err = %v", err)
+	}
+}

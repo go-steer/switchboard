@@ -94,7 +94,7 @@ used for every `spiffe` or `pki` agent:
 | flag | meaning |
 |---|---|
 | `--identity` | `spiffe-files`, `spiffe-workload-api`, `pki`, or `none` (the default: bearer only) |
-| `--spiffe-credentials-dir` | for `spiffe-files`; defaults to GKE's managed workload identity path |
+| `--spiffe-dir` | for `spiffe-files`; defaults to GKE's managed workload identity path |
 | `--spiffe-endpoint-socket` | for `spiffe-workload-api` |
 | `--tls-cert-file`, `--tls-key-file`, `--tls-ca-file` | for `pki` |
 

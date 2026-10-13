@@ -35,6 +35,9 @@ import (
 	"github.com/spiffe/go-spiffe/v2/spiffeid"
 	"github.com/spiffe/go-spiffe/v2/svid/x509svid"
 	"github.com/spiffe/go-spiffe/v2/workloadapi"
+
+	"github.com/go-steer/switchboard/internal/logging"
+	"github.com/go-steer/switchboard/pkg/daemon"
 )
 
 // The gateway's own identity (#158, docs/agent-identity.md).
@@ -81,11 +84,17 @@ type gatewayIdentity struct {
 	roots      *x509.CertPool
 
 	closer io.Closer
+
+	// clients caches each agent's HTTP client by what builds it, so a
+	// registry change (which rebuilds every runtime agent, twice) keeps the
+	// connections it has rather than handshaking again (caught in review).
+	mu      sync.Mutex
+	clients map[string]*http.Client
 }
 
 // loadIdentity sets up the identity c describes, reading its credentials once
 // so a missing or malformed file stops startup rather than the first turn.
-func loadIdentity(ctx context.Context, c identityConfig) (*gatewayIdentity, error) {
+func loadIdentity(ctx context.Context, c identityConfig, logf logging.Logf) (*gatewayIdentity, error) {
 	kind := identityKind(strings.TrimSpace(c.Kind))
 	if kind == "" {
 		kind = identityNone
@@ -107,6 +116,9 @@ func loadIdentity(ctx context.Context, c identityConfig) (*gatewayIdentity, erro
 			opts.KeyPath = filepath.Join(c.SPIFFEDir, mtls.GKEKeyFile)
 			opts.BundlePath = filepath.Join(c.SPIFFEDir, mtls.GKEBundleFile)
 		}
+		// Reported, or a mount gone bad is only noticed when the SVID
+		// expires (caught in review).
+		opts.OnError = func(err error) { logf.Warnf("identity: reload the SVID files: %v", err) }
 		src, err := mtls.NewSPIFFEFileSource(opts)
 		if err != nil {
 			return nil, fmt.Errorf("identity: %w", err)
@@ -138,7 +150,7 @@ func loadIdentity(ctx context.Context, c identityConfig) (*gatewayIdentity, erro
 		if !roots.AppendCertsFromPEM(pem) {
 			return nil, fmt.Errorf("--tls-ca-file %s: no certificates in it", c.CAFile)
 		}
-		kp := &keyPairFile{certFile: c.CertFile, keyFile: c.KeyFile}
+		kp := &keyPairFile{certFile: c.CertFile, keyFile: c.KeyFile, logf: logf}
 		if _, err := kp.get(nil); err != nil {
 			return nil, err
 		}
@@ -163,8 +175,14 @@ func (g *gatewayIdentity) spiffe() bool {
 // only in a TLS handshake.
 func (g *gatewayIdentity) httpClientFor(auth *AgentAuth, daemonURL string) (*http.Client, error) {
 	u, err := url.Parse(daemonURL)
-	if err != nil || u.Scheme != "https" {
+	if err != nil || !strings.HasPrefix(daemonURL, "https://") || u.Host == "" {
 		return nil, fmt.Errorf(".daemon_url %q: auth.method %q needs an https URL", daemonURL, auth.Method)
+	}
+	switch {
+	case auth.Method == authSPIFFE && auth.ServerName != "":
+		return nil, errors.New(".auth.server_name is for pki; a spiffe daemon is named by server_id")
+	case auth.Method == authPKI && auth.ServerID != "":
+		return nil, errors.New(".auth.server_id is for spiffe; a pki daemon is named by server_name")
 	}
 	var cfg *tls.Config
 	switch auth.Method {
@@ -175,6 +193,13 @@ func (g *gatewayIdentity) httpClientFor(auth *AgentAuth, daemonURL string) (*htt
 		id, err := spiffeid.FromString(auth.ServerID)
 		if err != nil {
 			return nil, fmt.Errorf(".auth.server_id %q: want the SPIFFE ID the daemon presents: %w", auth.ServerID, err)
+		}
+		if _, err := g.bundle.GetX509BundleForTrustDomain(id.TrustDomain()); err != nil {
+			// Would fail every handshake: no anchors to verify the daemon by.
+			return nil, fmt.Errorf(".auth.server_id %q: the gateway holds no trust bundle for %s", auth.ServerID, id.TrustDomain())
+		}
+		if c := g.cached(auth, u.Host); c != nil {
+			return c, nil
 		}
 		cfg, err = client.NewSPIFFE(client.SPIFFEOptions{
 			SVIDSource:   g.svid,
@@ -188,6 +213,9 @@ func (g *gatewayIdentity) httpClientFor(auth *AgentAuth, daemonURL string) (*htt
 		if g == nil || g.kind != identityPKI {
 			return nil, errors.New(".auth.method \"pki\" needs the gateway's certificate (--identity pki)")
 		}
+		if c := g.cached(auth, u.Host); c != nil {
+			return c, nil
+		}
 		cfg, err = client.NewPKI(client.PKIOptions{
 			GetClientCertificate: g.clientCert,
 			RootCAs:              g.roots,
@@ -199,9 +227,37 @@ func (g *gatewayIdentity) httpClientFor(auth *AgentAuth, daemonURL string) (*htt
 	default:
 		return nil, fmt.Errorf(".auth.method %q is not a certificate method", auth.Method)
 	}
-	// No client-wide Timeout, as for the plain client: it would cut the
-	// long-lived SSE streams.
-	return &http.Client{Transport: client.Transport(cfg)}, nil
+	tr := client.Transport(cfg)
+	// purser's transport speaks HTTP/2, so every stream to this agent shares
+	// one connection; pings find a dead one before it stalls them all, where
+	// HTTP/1.1 kept each stream apart (caught in review).
+	tr.HTTP2 = &http.HTTP2Config{SendPingTimeout: 30 * time.Second, PingTimeout: 15 * time.Second}
+	hc := &http.Client{
+		Transport: tr,
+		// No client-wide Timeout, as for the plain client: it would cut the
+		// long-lived SSE streams. And no redirects: the contract has none,
+		// and following one could carry the asserted caller and the message
+		// to a plain-http URL (caught in review).
+		CheckRedirect: daemon.NoRedirects,
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.clients == nil {
+		g.clients = make(map[string]*http.Client)
+	}
+	g.clients[clientKey(auth, u.Host)] = hc
+	return hc, nil
+}
+
+func clientKey(auth *AgentAuth, host string) string {
+	return auth.Method + "|" + auth.ServerID + "|" + auth.ServerName + "|" + host
+}
+
+// cached is an agent's client built before with the same settings.
+func (g *gatewayIdentity) cached(auth *AgentAuth, host string) *http.Client {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.clients[clientKey(auth, host)]
 }
 
 // keyPairFile serves a certificate and key from files, re-reading them when
@@ -209,36 +265,55 @@ func (g *gatewayIdentity) httpClientFor(auth *AgentAuth, daemonURL string) (*htt
 // picked up at the next handshake without a restart.
 type keyPairFile struct {
 	certFile, keyFile string
+	logf              logging.Logf
+	now               func() time.Time // nil: time.Now
 
 	mu      sync.Mutex
 	cert    *tls.Certificate
 	modCert time.Time
 	modKey  time.Time
+	failing bool // a reload has failed since the last success: said once
 }
 
 func (k *keyPairFile) get(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
-	ci, err := os.Stat(k.certFile)
-	if err != nil {
-		return nil, fmt.Errorf("--tls-cert-file: %w", err)
-	}
-	ki, err := os.Stat(k.keyFile)
-	if err != nil {
-		return nil, fmt.Errorf("--tls-key-file: %w", err)
-	}
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	if k.cert != nil && ci.ModTime().Equal(k.modCert) && ki.ModTime().Equal(k.modKey) {
-		return k.cert, nil
+	ci, cerr := os.Stat(k.certFile)
+	ki, kerr := os.Stat(k.keyFile)
+	if cerr == nil && kerr == nil && k.cert != nil && ci.ModTime().Equal(k.modCert) && ki.ModTime().Equal(k.modKey) {
+		return k.usable()
 	}
-	pair, err := tls.LoadX509KeyPair(k.certFile, k.keyFile)
+	var pair tls.Certificate
+	err := errors.Join(cerr, kerr)
+	if err == nil {
+		pair, err = tls.LoadX509KeyPair(k.certFile, k.keyFile)
+	}
 	if err != nil {
-		if k.cert != nil {
-			// Mid-rotation, one file written and not the other: keep the
-			// pair that worked until both agree.
-			return k.cert, nil
+		if k.cert == nil {
+			return nil, fmt.Errorf("--tls-cert-file/--tls-key-file: %w", err)
 		}
-		return nil, fmt.Errorf("--tls-cert-file/--tls-key-file: %w", err)
+		// Mid-rotation, one file written and not the other: keep the pair
+		// that worked until both agree — but say so, once, since a rotation
+		// that never completes is otherwise silent (caught in review).
+		if !k.failing {
+			k.failing = true
+			k.logf.Warnf("identity: reload --tls-cert-file/--tls-key-file: %v; still presenting the previous certificate", err)
+		}
+		return k.usable()
 	}
-	k.cert, k.modCert, k.modKey = &pair, ci.ModTime(), ki.ModTime()
+	k.cert, k.modCert, k.modKey, k.failing = &pair, ci.ModTime(), ki.ModTime(), false
+	return k.usable()
+}
+
+// usable is the cached pair, unless its certificate has expired: presenting
+// one only defers the failure to the daemon (caught in review).
+func (k *keyPairFile) usable() (*tls.Certificate, error) {
+	now := time.Now
+	if k.now != nil {
+		now = k.now
+	}
+	if leaf := k.cert.Leaf; leaf != nil && now().After(leaf.NotAfter) {
+		return nil, fmt.Errorf("--tls-cert-file: the certificate expired at %s and has not been renewed", leaf.NotAfter.UTC().Format(time.RFC3339))
+	}
 	return k.cert, nil
 }
