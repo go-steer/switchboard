@@ -6,6 +6,28 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **switchboard can authenticate to an agent as itself** (#158,
+  `docs/agent-identity.md`). Instead of a bearer token per agent, the gateway
+  presents one workload identity through
+  [purser](https://github.com/go-steer/purser)'s client half, and an agent
+  entry names `auth` instead of `token_env`.
+  - `--identity spiffe-files` reads an SVID from files, as GKE managed
+    workload identity delivers it (`--spiffe-credentials-dir`,
+    `--spiffe-trust-domain`).
+  - `--identity spiffe-workload-api` reads one from a SPIFFE Workload API
+    socket (SPIRE).
+  - `--identity pki` uses a certificate from a standard CA.
+  - `auth.method` `spiffe` requires the daemon to present `server_id`; `pki`
+    verifies it against the CA, with an optional `server_name`.
+  - A certificate method needs an https URL, and sends no bearer token.
+  - Credentials rotate without a restart.
+  - Existing `token_env` entries are unchanged.
+  - It needs a daemon that accepts mTLS; core-agent's support is
+    go-steer/core-agent#1313.
+  - `pkg/daemon.Config` gains `MutualTLS`: the HTTP client authenticates, and
+    no `Authorization` header is sent.
+
 ## [v0.7.0] — 2026-10-11
 
 A release about running more than one agent behind one chat app. A

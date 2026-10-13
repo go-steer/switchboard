@@ -57,11 +57,19 @@ type Config struct {
 	BaseURL string
 
 	// BearerToken authenticates switchboard to the daemon. Loaded
-	// from an env var by main.go (never a bare flag).
+	// from an env var by main.go (never a bare flag). Empty only with
+	// MutualTLS.
 	BearerToken string
 
-	// HTTPClient lets tests swap in a client pointed at an
-	// httptest.Server. Nil in production.
+	// MutualTLS says HTTPClient authenticates switchboard itself, with a
+	// client certificate (docs/agent-identity.md), so no bearer token is
+	// sent. It needs an https BaseURL and an HTTPClient that presents the
+	// certificate.
+	MutualTLS bool
+
+	// HTTPClient is the client every request goes through: a test's,
+	// pointed at an httptest.Server, or one whose transport presents
+	// switchboard's certificate. Nil uses a plain client.
 	HTTPClient *http.Client
 }
 
@@ -83,6 +91,15 @@ func (c Config) Validate() error {
 	}
 	if strings.HasSuffix(c.BaseURL, "/") {
 		return fmt.Errorf("daemon: BaseURL must not end with '/' (got %q)", c.BaseURL)
+	}
+	if c.MutualTLS {
+		if c.HTTPClient == nil {
+			return errors.New("daemon: MutualTLS needs an HTTPClient that presents the client certificate")
+		}
+		if !strings.HasPrefix(c.BaseURL, "https://") {
+			return fmt.Errorf("daemon: MutualTLS needs an https BaseURL (got %q)", c.BaseURL)
+		}
+		return nil
 	}
 	if c.BearerToken == "" {
 		return errors.New("daemon: BearerToken is required")
@@ -1482,7 +1499,9 @@ func (c *Client) newRequest(ctx context.Context, method, path, assertedCaller st
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+c.cfg.BearerToken)
+	if c.cfg.BearerToken != "" { // empty only under MutualTLS
+		req.Header.Set("Authorization", "Bearer "+c.cfg.BearerToken)
+	}
 	if assertedCaller != "" {
 		req.Header.Set("X-Asserted-Caller", assertedCaller)
 	}

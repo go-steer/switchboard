@@ -59,16 +59,41 @@ var agentNameRE = regexp.MustCompile(`^[a-z][a-z0-9-]{0,39}$`)
 const maxIconURL = 1024
 
 // AgentConfig is one agent in the config file's agents list. The credential is
-// named, never given: TokenEnv is the variable holding it (see checkNoSecrets).
+// named, never given: TokenEnv is the variable holding it (see checkNoSecrets),
+// or Auth says switchboard's own certificate authenticates it.
 type AgentConfig struct {
 	Name        string            `json:"name"`
 	DisplayName string            `json:"display_name,omitempty"`
 	Description string            `json:"description,omitempty"`
 	IconURL     string            `json:"icon_url,omitempty"`
 	DaemonURL   string            `json:"daemon_url"`
-	TokenEnv    string            `json:"token_env"`
+	TokenEnv    string            `json:"token_env,omitempty"`
+	Auth        *AgentAuth        `json:"auth,omitempty"`
 	Kind        string            `json:"kind,omitempty"`
 	Labels      map[string]string `json:"labels,omitempty"`
+}
+
+// AgentAuth is how switchboard authenticates to an agent (#158,
+// docs/agent-identity.md). Absent, it is bearer with the entry's token_env.
+// Nothing here is secret: ServerID and ServerName say who the daemon must be,
+// which is what makes the authentication mutual.
+type AgentAuth struct {
+	Method     string `json:"method"`
+	ServerID   string `json:"server_id,omitempty"`   // spiffe: the daemon's SPIFFE ID
+	ServerName string `json:"server_name,omitempty"` // pki: the name its certificate carries, if not the URL's host
+}
+
+// The auth methods.
+const (
+	authBearer = "bearer"
+	authSPIFFE = "spiffe"
+	authPKI    = "pki"
+)
+
+// agentBuilder is what building an agent needs beyond its entry.
+type agentBuilder struct {
+	approvals bool             // build an approval client too
+	identity  *gatewayIdentity // nil: bearer only
 }
 
 // agentKinds are the daemon flavours an agent may declare. Informational today
@@ -292,14 +317,14 @@ var errNoAgentHere = errors.New("no agent is available here")
 // buildAgents turns the config file's agents list into a registry, reading each
 // agent's credential from the variable it names. wantApprovals builds the
 // approval client alongside each daemon client.
-func buildAgents(list []AgentConfig, def string, wantApprovals bool) (*agentSet, error) {
+func buildAgents(list []AgentConfig, def string, b agentBuilder) (*agentSet, error) {
 	agents := make([]*agent, 0, len(list))
 	for i, ac := range list {
 		where := fmt.Sprintf("agents[%d]", i)
 		if agentNameRE.MatchString(ac.Name) {
 			where = fmt.Sprintf("agents[%q]", ac.Name)
 		}
-		a, err := buildAgent(ac, wantApprovals)
+		a, err := buildAgent(ac, b)
 		if err != nil {
 			return nil, fmt.Errorf("%s%w", where, err)
 		}
@@ -314,7 +339,7 @@ func buildAgents(list []AgentConfig, def string, wantApprovals bool) (*agentSet,
 // buildAgent validates one agent entry and builds its clients, from the config
 // file or the admin API alike. Its errors start with the field (".name …",
 // ": no daemon token …") for the caller to prefix with where the entry is.
-func buildAgent(ac AgentConfig, wantApprovals bool) (*agent, error) {
+func buildAgent(ac AgentConfig, b agentBuilder) (*agent, error) {
 	if !agentNameRE.MatchString(ac.Name) {
 		return nil, fmt.Errorf(".name %q: want a short lowercase name (letters, digits, '-'), like %q", ac.Name, "platform")
 	}
@@ -331,20 +356,16 @@ func buildAgent(ac AgentConfig, wantApprovals bool) (*agent, error) {
 	if strings.TrimSpace(ac.DaemonURL) == "" {
 		return nil, fmt.Errorf(".daemon_url is required")
 	}
-	if strings.TrimSpace(ac.TokenEnv) == "" {
-		return nil, fmt.Errorf(".token_env is required: name the variable holding the daemon token")
+	cfg, err := daemonConfigFor(ac, b.identity)
+	if err != nil {
+		return nil, err
 	}
-	token := os.Getenv(ac.TokenEnv)
-	if token == "" {
-		return nil, fmt.Errorf(": no daemon token in $%s", ac.TokenEnv)
-	}
-	cfg := daemon.Config{BaseURL: ac.DaemonURL, BearerToken: token}
 	dc, err := daemon.New(cfg)
 	if err != nil {
 		return nil, fmt.Errorf(": %w", err)
 	}
 	a := &agent{name: ac.Name, display: ac.DisplayName, desc: strings.TrimSpace(ac.Description), icon: strings.TrimSpace(ac.IconURL), daemon: dc}
-	if wantApprovals {
+	if b.approvals {
 		if a.approvals, err = approval.New(cfg); err != nil {
 			return nil, fmt.Errorf(": %w", err)
 		}
@@ -352,16 +373,48 @@ func buildAgent(ac AgentConfig, wantApprovals bool) (*agent, error) {
 	return a, nil
 }
 
+// daemonConfigFor is how an agent's clients reach its daemon: a bearer token
+// from the variable the entry names, or switchboard's own certificate.
+func daemonConfigFor(ac AgentConfig, id *gatewayIdentity) (daemon.Config, error) {
+	method := authBearer
+	if ac.Auth != nil {
+		method = strings.TrimSpace(ac.Auth.Method)
+	}
+	switch method {
+	case authBearer:
+		if strings.TrimSpace(ac.TokenEnv) == "" {
+			return daemon.Config{}, fmt.Errorf(".token_env is required: name the variable holding the daemon token")
+		}
+		token := os.Getenv(ac.TokenEnv)
+		if token == "" {
+			return daemon.Config{}, fmt.Errorf(": no daemon token in $%s", ac.TokenEnv)
+		}
+		return daemon.Config{BaseURL: ac.DaemonURL, BearerToken: token}, nil
+	case authSPIFFE, authPKI:
+		if ac.TokenEnv != "" {
+			// Both would be a daemon that accepts either, which is a bearer
+			// token with extra steps; say which one is meant.
+			return daemon.Config{}, fmt.Errorf(".token_env and .auth.method %q both given: a certificate method sends no token", method)
+		}
+		hc, err := id.httpClientFor(ac.Auth, ac.DaemonURL)
+		if err != nil {
+			return daemon.Config{}, err
+		}
+		return daemon.Config{BaseURL: ac.DaemonURL, MutualTLS: true, HTTPClient: hc}, nil
+	}
+	return daemon.Config{}, fmt.Errorf(".auth.method %q: want bearer, spiffe or pki", method)
+}
+
 // agentsFrom builds the registry a bridged run routes through: the config
 // file's agents list when there is one, and otherwise the single agent
 // daemon_url and token_env have always described.
-func agentsFrom(cfg *Config, daemonURL, tokenEnv string, wantApprovals bool) (*agentSet, error) {
+func agentsFrom(cfg *Config, daemonURL, tokenEnv string, b agentBuilder) (*agentSet, error) {
 	def := ""
 	if cfg.DefaultAgent != nil {
 		def = strings.TrimSpace(*cfg.DefaultAgent)
 	}
 	if len(cfg.Agents) > 0 {
-		return buildAgents(cfg.Agents, def, wantApprovals)
+		return buildAgents(cfg.Agents, def, b)
 	}
 	if def != "" && def != defaultAgentName {
 		return nil, fmt.Errorf("default_agent %q names an agent, but the config file has no agents list", def)
@@ -379,7 +432,7 @@ func agentsFrom(cfg *Config, daemonURL, tokenEnv string, wantApprovals bool) (*a
 	// than inside the router so that a run with approvals off everywhere holds
 	// no client for a surface it does not offer.
 	var ac *approval.Client
-	if wantApprovals {
+	if b.approvals {
 		if ac, err = approval.New(dcfg); err != nil {
 			return nil, err
 		}

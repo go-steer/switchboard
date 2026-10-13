@@ -213,6 +213,21 @@ func runServe(args []string) (err error) {
 	logFormat := fs.String("log-format", string(logging.Text),
 		"log rendering: \"text\" (timestamped lines for a terminal) or \"json\" (one object "+
 			"per line for a collector)")
+	identity := fs.String("identity", string(identityNone),
+		"how the gateway authenticates to an agent whose auth.method is spiffe or pki: "+
+			"\"none\" (bearer tokens only), \"spiffe-files\" (an SVID as files, as GKE managed "+
+			"workload identity delivers it), \"spiffe-workload-api\" (a SPIFFE Workload API socket) "+
+			"or \"pki\" (a certificate from a standard CA)")
+	spiffeDir := fs.String("spiffe-credentials-dir", "",
+		"with --identity spiffe-files: the directory holding certificates.pem, private_key.pem and "+
+			"ca_certificates.pem; empty = GKE managed workload identity's mount")
+	spiffeTD := fs.String("spiffe-trust-domain", "",
+		"with --identity spiffe-files: the trust domain the bundle vouches for (on GKE, PROJECT_ID.svc.id.goog)")
+	spiffeSocket := fs.String("spiffe-endpoint-socket", "",
+		"with --identity spiffe-workload-api: the Workload API address; empty = $SPIFFE_ENDPOINT_SOCKET")
+	tlsCertFile := fs.String("tls-cert-file", "", "with --identity pki: the gateway's client certificate (PEM)")
+	tlsKeyFile := fs.String("tls-key-file", "", "with --identity pki: its private key (PEM)")
+	tlsCAFile := fs.String("tls-ca-file", "", "with --identity pki: the CA bundle daemon certificates must chain to (PEM)")
 	stateDir := fs.String("state-dir", "",
 		"persist the conversation → session routing table here, so a restart re-attaches "+
 			"every thread to the session it had instead of starting over; empty = memory only")
@@ -275,6 +290,13 @@ func runServe(args []string) (err error) {
 	res.str("log-format", "SWITCHBOARD_LOG_FORMAT", cfg.LogFormat, logFormat)
 	res.str("audit-log", "SWITCHBOARD_AUDIT_LOG", cfg.AuditLog, auditLogDest)
 	res.str("state-dir", "SWITCHBOARD_STATE_DIR", cfg.StateDir, stateDir)
+	res.str("identity", "SWITCHBOARD_IDENTITY", cfg.Identity, identity)
+	res.str("spiffe-credentials-dir", "SWITCHBOARD_SPIFFE_CREDENTIALS_DIR", cfg.SPIFFECredentialsDir, spiffeDir)
+	res.str("spiffe-trust-domain", "SWITCHBOARD_SPIFFE_TRUST_DOMAIN", cfg.SPIFFETrustDomain, spiffeTD)
+	res.str("spiffe-endpoint-socket", "", cfg.SPIFFEEndpointSocket, spiffeSocket)
+	res.str("tls-cert-file", "SWITCHBOARD_TLS_CERT_FILE", cfg.TLSCertFile, tlsCertFile)
+	res.str("tls-key-file", "SWITCHBOARD_TLS_KEY_FILE", cfg.TLSKeyFile, tlsKeyFile)
+	res.str("tls-ca-file", "SWITCHBOARD_TLS_CA_FILE", cfg.TLSCAFile, tlsCAFile)
 	res.str("session-idle-ttl", "SWITCHBOARD_SESSION_IDLE_TTL", cfg.SessionIdleTTL, idleTTLFlag)
 	// The channel-scopable four resolve into the same variables, and then again
 	// per channel below: what lands here is the posture for a channel the file
@@ -418,8 +440,26 @@ func runServe(args []string) (err error) {
 	// the adapter. So an outbound-only deployment is not asked for a bearer
 	// token it would never present.
 	var agents *agentSet
+	var builder agentBuilder
 	if inbound {
-		if agents, err = agentsFrom(cfg, *daemonURL, *tokenEnv, wantApprovals); err != nil {
+		gid, err := loadIdentity(context.Background(), identityConfig{
+			Kind:              *identity,
+			SPIFFEDir:         *spiffeDir,
+			SPIFFETrustDomain: *spiffeTD,
+			SPIFFESocket:      *spiffeSocket,
+			CertFile:          *tlsCertFile,
+			KeyFile:           *tlsKeyFile,
+			CAFile:            *tlsCAFile,
+		})
+		if err != nil {
+			return err
+		}
+		defer gid.close()
+		if gid.kind != identityNone {
+			logf.Infof("identity: %s; agents with auth.method spiffe or pki are reached with it", gid.kind)
+		}
+		builder = agentBuilder{approvals: wantApprovals, identity: gid}
+		if agents, err = agentsFrom(cfg, *daemonURL, *tokenEnv, builder); err != nil {
 			return err
 		}
 		if err := checkChannelAgents(agents, "defaults", defaults); err != nil {
@@ -737,7 +777,7 @@ func runServe(args []string) (err error) {
 			Defaults:      defaults,
 			ByChannel:     byChannel,
 			AgentChannels: agentChannels(cfg),
-			WantApprovals: wantApprovals,
+			Builder:       builder,
 			Store:         rstore,
 			Logf:          logf,
 		})

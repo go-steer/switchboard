@@ -223,11 +223,11 @@ func TestBuildAgentsRefusesBadEntries(t *testing.T) {
 		"duplicate":       {[]AgentConfig{ok, ok}, "", "registered twice"},
 		"unknown default": {[]AgentConfig{ok}, "b", "default agent \"b\""},
 	} {
-		if _, err := buildAgents(tc.list, tc.def, false); err == nil || !strings.Contains(err.Error(), tc.want) {
+		if _, err := buildAgents(tc.list, tc.def, agentBuilder{}); err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("%s: buildAgents = %v, want an error containing %q", name, err, tc.want)
 		}
 	}
-	set, err := buildAgents([]AgentConfig{ok, {Name: "b", DaemonURL: "http://b", TokenEnv: "TOK_A", Kind: "mast"}}, "", true)
+	set, err := buildAgents([]AgentConfig{ok, {Name: "b", DaemonURL: "http://b", TokenEnv: "TOK_A", Kind: "mast"}}, "", agentBuilder{approvals: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -238,7 +238,7 @@ func TestBuildAgentsRefusesBadEntries(t *testing.T) {
 
 func TestDefaultAgentNeedsAnAgentsList(t *testing.T) {
 	def := "platform"
-	if _, err := agentsFrom(&Config{DefaultAgent: &def}, "http://d", "TOK_X", false); err == nil ||
+	if _, err := agentsFrom(&Config{DefaultAgent: &def}, "http://d", "TOK_X", agentBuilder{}); err == nil ||
 		!strings.Contains(err.Error(), "no agents list") {
 		t.Errorf("agentsFrom = %v, want the missing-list refusal", err)
 	}
