@@ -510,10 +510,23 @@ alone means anyone with an account.
 | `mtls` | a client certificate; the listener serves over the gateway's own `--identity` | for automation |
 | `token` | a bearer token from `--admin-token-env` | loopback addresses only, for a laptop: a shared token can't say who made a change |
 
-`--admin-allow` names the admins: `email:alice@example.com`,
-`domain:example.com` or `id:spiffe://…/sa/automation`. It's required with
-`oidc` and `mtls`, and an address other than loopback is refused unless the
-method enforces a credential.
+`--admin-allow` names the admins: `email:alice@example.com` or
+`domain:example.com` for people signing in with OIDC, matched only against a
+verified email, never a token's `sub`; or `id:…` for a certificate: a SPIFFE
+ID, or the URI SAN of a `pki` certificate. It's required with `oidc` and
+`mtls`.
+
+- **OIDC off loopback needs TLS** (`--admin-tls-cert-file`,
+  `--admin-tls-key-file`): an ID token sent in the clear can be replayed until
+  it expires. Or bind `127.0.0.1` and reach it through a tunnel such as
+  `kubectl port-forward`.
+- **An agent added through the API may only name a token variable under
+  `--admin-token-env-prefix`** (default `SWITCHBOARD_AGENT_TOKEN_`). Otherwise
+  an admin could name one of the gateway's own secrets, a platform token say,
+  and point `daemon_url` at a server that collects it. Set it empty to allow
+  only certificate methods. `daemon_url` must be `http(s)://host[:port]` and
+  nothing more.
+- **Refused requests are logged** with who made them.
 
 ### Long-turn feedback
 

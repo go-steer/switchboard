@@ -14,7 +14,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     `--admin-oidc-audience`), mTLS over the gateway's own identity for
     automation, or a static token on loopback only.
   - **Admins** are named by `--admin-allow` (`email:`, `domain:`, `id:`).
-    Every request, reads included, needs one.
+    Every request, reads included, needs one. Email grants match only a
+    verified email.
+  - **OIDC off loopback needs TLS** (`--admin-tls-cert-file`,
+    `--admin-tls-key-file`).
+  - **A runtime agent's `token_env` must start with
+    `--admin-token-env-prefix`** (default `SWITCHBOARD_AGENT_TOKEN_`), so an
+    admin can't point the gateway's own secrets at a server of their choosing.
+    `daemon_url` must be a bare `http(s)://host[:port]`, for config agents
+    too.
   - **What the config declares is pinned** (`409`). A change that would
     break something is refused (`422`), and a channel's runtime settings
     can narrow it but not widen it past the config's defaults.

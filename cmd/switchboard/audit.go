@@ -119,6 +119,7 @@ type auditRecord struct {
 // before and after it.
 type auditAdminChange struct {
 	Change     string          `json:"change"`
+	Request    string          `json:"request,omitempty"` // method and path
 	AuthSource string          `json:"auth_source,omitempty"`
 	ProxiedBy  string          `json:"proxied_by,omitempty"`
 	Before     json.RawMessage `json:"before,omitempty"`

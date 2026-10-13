@@ -15,10 +15,13 @@
 package main
 
 import (
+	"context"
 	"crypto"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -63,7 +66,7 @@ func newAdminFixture(t *testing.T) *adminFixture {
 	t.Helper()
 	f := &adminFixture{registryFixture: newRegistryFixture(t, nil), iss: authtest.NewIssuer(t), audit: &syncBuffer{}}
 	s, err := newAdminServer(adminConfig{
-		Addr:       "0.0.0.0:0", // public: allowed, because OIDC enforces a credential
+		Addr:       "127.0.0.1:0", // off loopback, oidc needs TLS too
 		Auth:       adminAuthOIDC,
 		Issuer:     f.iss.URL(),
 		Audiences:  []string{authtest.DefaultAudience},
@@ -298,5 +301,126 @@ func TestTheMTLSModeAdmitsAnAllowedWorkload(t *testing.T) {
 	}
 	if got := get("spiffe://example.org/ns/ops/sa/other"); got != http.StatusForbidden {
 		t.Errorf("another workload: %d, want 403", got)
+	}
+}
+
+// An admin cannot have the gateway hand its own secrets to a server of their
+// choosing: a runtime agent's token variable must carry the prefix set aside
+// for them, and daemon_url is a daemon's address and nothing else (caught in
+// review: SLACK_BOT_TOKEN went to an attacker's URL).
+func TestTheAPICannotExfiltrateTheGatewaysSecrets(t *testing.T) {
+	f := newAdminFixture(t)
+	t.Setenv("SLACK_BOT_TOKEN", "xoxb-1-2-abcdef")
+	var reached int
+	evil := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { reached++ }))
+	defer evil.Close()
+	for name, body := range map[string]string{
+		"a platform token": `{"daemon_url":"` + evil.URL + `","token_env":"SLACK_BOT_TOKEN"}`,
+		"a query string":   `{"daemon_url":"` + evil.URL + `?x=1","token_env":"TOK_REG"}`,
+		"user info":        `{"daemon_url":"http://u:p@example.com","token_env":"TOK_REG"}`,
+		"another scheme":   `{"daemon_url":"file:///etc/passwd","token_env":"TOK_REG"}`,
+		"a path":           `{"daemon_url":"http://example.com/other","token_env":"TOK_REG"}`,
+	} {
+		if got, resp := f.do(t, admin, "PUT", "/v1/agents/evil", body); got != http.StatusUnprocessableEntity {
+			t.Errorf("%s: %d, want 422 (%s)", name, got, resp)
+		}
+	}
+	if reached != 0 {
+		t.Errorf("the attacker's server was reached %d time(s)", reached)
+	}
+}
+
+// An email: or domain: grant matches a verified email, never a sub shaped
+// like one (caught in review: a self-chosen sub was granted admin).
+func TestAnEmailGrantIsNotMetByASub(t *testing.T) {
+	f := newAdminFixture(t)
+	for _, sub := range []string{admin, "oncall@ops.example.com"} {
+		req, _ := http.NewRequest("GET", f.srv.URL+"/v1/agents", nil)
+		req.Header.Set("Authorization", "Bearer "+f.iss.Mint(t, authtest.TokenOptions{Subject: sub}))
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusForbidden {
+			t.Errorf("sub %q with no email: %d, want 403", sub, resp.StatusCode)
+		}
+	}
+}
+
+// OIDC off loopback needs TLS: a bearer ID token in the clear is replayable
+// (caught in review).
+func TestOIDCOffLoopbackNeedsTLS(t *testing.T) {
+	f := newRegistryFixture(t, nil)
+	ca := authtest.NewCA(t, "trust")
+	c := adminConfig{Addr: "0.0.0.0:9000", Auth: adminAuthOIDC, Issuer: "https://issuer.example", Audiences: []string{"x"}, Allow: []string{"email:a@b.c"}}
+	if _, err := newAdminServer(c, f.r, f.admin); err == nil || !strings.Contains(err.Error(), "--admin-tls-cert-file") {
+		t.Errorf("err = %v, want TLS required", err)
+	}
+	files := pkiFiles(t, ca, "admin.example.com")
+	c.TLSCert, c.TLSKey = files.CertFile, files.KeyFile
+	s, err := newAdminServer(c, f.r, f.admin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.tls == nil {
+		t.Error("no TLS config for the listener")
+	}
+}
+
+func TestPeopleGrantsNeedOIDC(t *testing.T) {
+	if _, err := adminRules([]string{"email:a@b.c"}, adminAuthMTLS); err == nil {
+		t.Error("an email: grant was accepted for mtls")
+	}
+	if _, err := adminRules([]string{"id:spiffe://example.org/x"}, adminAuthMTLS); err != nil {
+		t.Errorf("an id: grant: %v", err)
+	}
+}
+
+// PKI mtls mode starts, and admits a caller by its URI SAN (caught in review:
+// it never started).
+func TestThePKIModeAdmitsByURISAN(t *testing.T) {
+	ca := authtest.NewCA(t, "trust")
+	f := newRegistryFixture(t, nil)
+	both := []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth}
+	dir := t.TempDir()
+	c := identityConfig{Kind: "pki", CertFile: dir + "/tls.crt", KeyFile: dir + "/tls.key", CAFile: dir + "/ca.crt"}
+	writeKeyPair(t, ca.Issue(t, authtest.LeafOptions{CommonName: "gateway", IPSANs: []net.IP{net.ParseIP("127.0.0.1")}, ExtKeyUsage: both}), c.CertFile, c.KeyFile)
+	writePEM(t, c.CAFile, "CERTIFICATE", ca.Cert().Raw)
+	gid, err := loadIdentity(context.Background(), c, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const automation = "https://ops.example.com/automation"
+	s, err := newAdminServer(adminConfig{Addr: "0.0.0.0:0", Auth: adminAuthMTLS, Allow: []string{"id:" + automation}, Identity: gid, Platform: "slack"}, f.r, f.admin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	url := serveTLS(t, s.h, s.tls)
+	get := func(uri string) int {
+		t.Helper()
+		cert := ca.Issue(t, authtest.LeafOptions{CommonName: automation, URISANs: []string{uri}, ExtKeyUsage: both})
+		hc := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{
+			Certificates: []tls.Certificate{cert}, RootCAs: ca.Pool(), MinVersion: tls.VersionTLS12,
+		}}}
+		resp, err := hc.Get(url + "/v1/agents")
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	if got := get(automation); got != http.StatusOK {
+		t.Errorf("the allowed URI SAN: %d", got)
+	}
+	if got := get("https://ops.example.com/other"); got != http.StatusForbidden {
+		t.Errorf("another URI SAN with the allowed CN: %d, want 403", got)
+	}
+}
+
+func TestTrailingJSONIsRefused(t *testing.T) {
+	f := newAdminFixture(t)
+	if got, _ := f.do(t, admin, "PUT", "/v1/defaults", `{"default_agent":"b"}{"default_agent":"a"}`); got != http.StatusBadRequest {
+		t.Errorf("%d, want 400", got)
 	}
 }

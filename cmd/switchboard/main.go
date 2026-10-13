@@ -218,6 +218,11 @@ func runServe(args []string) (err error) {
 			"(a SPIFFE ID or token subject); required with oidc and mtls")
 	adminTokenEnv := fs.String("admin-token-env", "SWITCHBOARD_ADMIN_TOKEN",
 		"with --admin-auth token: env var holding the bearer token")
+	adminTokenPrefix := fs.String("admin-token-env-prefix", "SWITCHBOARD_AGENT_TOKEN_",
+		"the prefix an agent added through the admin API must name its token_env under, so it "+
+			"cannot name the gateway's own secrets; empty = such agents use a certificate method")
+	adminTLSCert := fs.String("admin-tls-cert-file", "", "with --admin-auth oidc: the admin listener's TLS certificate (PEM); required off loopback")
+	adminTLSKey := fs.String("admin-tls-key-file", "", "with --admin-auth oidc: its private key (PEM)")
 	ingressTokenEnv := fs.String("ingress-token-env", "SWITCHBOARD_INGRESS_TOKEN",
 		"env var holding the bearer token callers must present to the outbound ingress")
 	ingressAllow := fs.String("ingress-allow", "",
@@ -305,6 +310,9 @@ func runServe(args []string) (err error) {
 	res.str("admin-auth", "SWITCHBOARD_ADMIN_AUTH", cfg.AdminAuth, adminAuth)
 	res.str("admin-oidc-issuer", "SWITCHBOARD_ADMIN_OIDC_ISSUER", cfg.AdminIssuer, adminIssuer)
 	res.str("admin-token-env", "", cfg.AdminTokenEnv, adminTokenEnv)
+	res.str("admin-token-env-prefix", "", cfg.AdminTokenPrefix, adminTokenPrefix)
+	res.str("admin-tls-cert-file", "SWITCHBOARD_ADMIN_TLS_CERT_FILE", cfg.AdminTLSCert, adminTLSCert)
+	res.str("admin-tls-key-file", "SWITCHBOARD_ADMIN_TLS_KEY_FILE", cfg.AdminTLSKey, adminTLSKey)
 	res.str("log-format", "SWITCHBOARD_LOG_FORMAT", cfg.LogFormat, logFormat)
 	res.str("audit-log", "SWITCHBOARD_AUDIT_LOG", cfg.AuditLog, auditLogDest)
 	res.str("state-dir", "SWITCHBOARD_STATE_DIR", cfg.StateDir, stateDir)
@@ -799,6 +807,7 @@ func runServe(args []string) (err error) {
 			ByChannel:     byChannel,
 			AgentChannels: agentChannels(cfg),
 			Builder:       builder,
+			TokenPrefix:   *adminTokenPrefix,
 			Store:         rstore,
 			Logf:          logf,
 		})
@@ -828,6 +837,8 @@ func runServe(args []string) (err error) {
 			Audiences: adminAudiences,
 			Allow:     adminGrants,
 			Token:     os.Getenv(*adminTokenEnv),
+			TLSCert:   *adminTLSCert,
+			TLSKey:    *adminTLSKey,
 			Identity:  builder.identity,
 			Platform:  *platform,
 			Logf:      logf,

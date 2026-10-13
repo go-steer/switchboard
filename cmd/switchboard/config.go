@@ -124,6 +124,11 @@ type Config struct {
 	AdminIssuer    *string  `json:"admin_oidc_issuer,omitempty"`
 	AdminAudiences []string `json:"admin_oidc_audience,omitempty"`
 	AdminAllow     []string `json:"admin_allow,omitempty"`
+	// The prefix a runtime agent's token_env must start with: a name, not a
+	// secret, like the token variable names below.
+	AdminTokenPrefix *string `json:"admin_token_env_prefix,omitempty"`
+	AdminTLSCert     *string `json:"admin_tls_cert_file,omitempty"`
+	AdminTLSKey      *string `json:"admin_tls_key_file,omitempty"`
 
 	// Token *variable names*, never token values — see checkNoSecrets. These
 	// exist in the file for the same reason they exist as flags: naming the

@@ -60,10 +60,14 @@ type adminConfig struct {
 	Audiences []string
 	Allow     []string // --admin-allow grants: email:…, domain:…, id:…
 	Token     string   // token mode: the value, read from --admin-token-env
-	Identity  *gatewayIdentity
-	Platform  string // for channel ID checks
-	Logf      logging.Logf
-	Audit     *auditLog
+	// TLSCert and TLSKey serve the oidc mode over TLS: required on any
+	// address but loopback, where an ID token in the clear could be
+	// replayed for its lifetime (caught in review).
+	TLSCert, TLSKey string
+	Identity        *gatewayIdentity
+	Platform        string // for channel ID checks
+	Logf            logging.Logf
+	Audit           *auditLog
 	// OIDCClient fetches the issuer's keys; nil is purser's default. A test
 	// seam, for authtest's issuer.
 	OIDCClient *http.Client
@@ -111,7 +115,7 @@ func newAdminServer(c adminConfig, r *Router, reg *registryAdmin) (*adminServer,
 		}
 		s.h = s.tokenGate(mux)
 	case adminAuthOIDC, adminAuthMTLS:
-		rules, err := adminRules(c.Allow)
+		rules, err := adminRules(c.Allow, c.Auth)
 		if err != nil {
 			return nil, err
 		}
@@ -150,6 +154,22 @@ func (s *adminServer) authenticator() (authn.Authenticator, error) {
 		if c.Issuer == "" || len(c.Audiences) == 0 {
 			return nil, errors.New("--admin-auth oidc needs --admin-oidc-issuer and --admin-oidc-audience")
 		}
+		switch {
+		case c.TLSCert != "" || c.TLSKey != "":
+			if c.TLSCert == "" || c.TLSKey == "" {
+				return nil, errors.New("--admin-tls-cert-file and --admin-tls-key-file go together")
+			}
+			kp := &keyPairFile{certFile: c.TLSCert, keyFile: c.TLSKey, logf: c.Logf}
+			if _, err := kp.get(nil); err != nil {
+				return nil, fmt.Errorf("admin TLS: %w", err)
+			}
+			s.tls = &tls.Config{
+				MinVersion:     tls.VersionTLS12,
+				GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) { return kp.get(nil) },
+			}
+		case !httpmw.IsLoopback(c.Addr):
+			return nil, fmt.Errorf("--admin-auth oidc on %q needs --admin-tls-cert-file and --admin-tls-key-file: an ID token sent in the clear can be replayed until it expires; or bind a loopback address and reach it through a tunnel (kubectl port-forward)", c.Addr)
+		}
 		return oidc.New(oidc.Options{Issuer: c.Issuer, Audiences: c.Audiences, HTTPClient: c.OIDCClient})
 	}
 	id := c.Identity
@@ -167,6 +187,10 @@ func (s *adminServer) authenticator() (authn.Authenticator, error) {
 			// needs the server usage as well as the client one.
 			GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) { return id.clientCert(nil) },
 			ClientCAs:      id.roots,
+			// A caller is its URI SAN, which an id: grant names; the CN is
+			// free text anybody the CA serves can choose (caught in review:
+			// unset, the mode never started).
+			Subject: mtls.SubjectURISAN,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("--admin-auth mtls: %w", err)
@@ -178,7 +202,13 @@ func (s *adminServer) authenticator() (authn.Authenticator, error) {
 }
 
 // adminRules turns --admin-allow into purser rules granting the admin bit.
-func adminRules(allow []string) (*authz.Rules, error) {
+//
+// email: and domain: match only an identity that is a verified email: purser
+// makes the identity the email when the token carries a verified one and the
+// sub otherwise, so matching the identity alone let a provider whose users
+// choose their sub be granted by one that looks like an address (caught in
+// review). With mtls they are refused; a certificate is named by id:.
+func adminRules(allow []string, auth string) (*authz.Rules, error) {
 	if len(allow) == 0 {
 		return nil, errors.New("--admin-allow is required: name who may administer this gateway (email:…, domain:… or id:…)")
 	}
@@ -191,10 +221,17 @@ func adminRules(allow []string) (*authz.Rules, error) {
 		}
 		var m authz.Matcher
 		switch kind {
-		case "email", "id":
+		case "id":
 			m = authz.MatchIdentity(val)
-		case "domain":
-			m = authz.MatchEmailDomain(val)
+		case "email", "domain":
+			if auth != adminAuthOIDC {
+				return nil, fmt.Errorf("--admin-allow %q: email: and domain: name people, who sign in with oidc; with %s, name a certificate by id:", g, auth)
+			}
+			m = authz.MatchIdentity(val)
+			if kind == "domain" {
+				m = authz.MatchEmailDomain(val)
+			}
+			m = authz.MatchAll(verifiedEmail, m)
 		default:
 			return nil, fmt.Errorf("--admin-allow %q: want email:, domain: or id:", g)
 		}
@@ -203,10 +240,19 @@ func adminRules(allow []string) (*authz.Rules, error) {
 	return authz.NewRules(rules...)
 }
 
-// requireAdmin refuses an authenticated caller no rule made an admin.
+// verifiedEmail matches a caller whose identity is the token's email, which
+// purser makes it only when the address is verified.
+func verifiedEmail(c purser.Caller) bool {
+	e := c.Label(oidc.LabelEmail)
+	return e != "" && e == c.Identity
+}
+
+// requireAdmin refuses an authenticated caller no rule made an admin, and
+// says who: someone trying the API without the role is worth a line.
 func (s *adminServer) requireAdmin(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if c, ok := purser.CallerFromContext(r.Context()); !ok || !c.Admin {
+			s.cfg.Logf.Warnf("admin: refused %s %s from %q, who is not an administrator", r.Method, logSafe(r.URL.Path), logSafe(c.Identity))
 			writeAdminError(w, http.StatusForbidden, "not an administrator of this gateway")
 			return
 		}
@@ -220,6 +266,7 @@ func (s *adminServer) tokenGate(next http.Handler) http.Handler {
 		h := r.Header.Get("Authorization")
 		const scheme = "Bearer "
 		if !strings.HasPrefix(h, scheme) || subtle.ConstantTimeCompare([]byte(h[len(scheme):]), []byte(s.cfg.Token)) != 1 {
+			s.cfg.Logf.Warnf("admin: refused %s %s: missing or wrong token", r.Method, logSafe(r.URL.Path))
 			writeAdminError(w, http.StatusUnauthorized, "missing or wrong bearer token")
 			return
 		}
@@ -433,7 +480,7 @@ func (s *adminServer) reply(w http.ResponseWriter, err error, ok int, body func(
 
 // audited records a change attempt, applied or refused, with who made it.
 func (s *adminServer) audited(r *http.Request, what string, before, after any, err error) {
-	rec := auditRecord{Kind: auditAdmin, Outcome: auditApplied, Admin: &auditAdminChange{Change: what}}
+	rec := auditRecord{Kind: auditAdmin, Outcome: auditApplied, Admin: &auditAdminChange{Change: what, Request: r.Method + " " + r.URL.Path}}
 	if c, ok := purser.CallerFromContext(r.Context()); ok {
 		rec.Caller = c.Identity
 	} else if s.cfg.Auth == adminAuthToken {
@@ -462,6 +509,10 @@ func decodeAdmin(w http.ResponseWriter, r *http.Request, v any) bool {
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {
 		writeAdminError(w, http.StatusBadRequest, "request body: "+err.Error())
+		return false
+	}
+	if dec.More() {
+		writeAdminError(w, http.StatusBadRequest, "request body: one JSON object, nothing after it")
 		return false
 	}
 	return true
