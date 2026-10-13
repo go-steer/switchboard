@@ -329,3 +329,99 @@ func TestTurnsRouteWhileTheRegistryChanges(t *testing.T) {
 	close(stop)
 	wg.Wait()
 }
+
+// A hand-edited file listing an agent twice must not crash startup; the first
+// entry stands (caught in review: a nil dereference).
+func TestADuplicatedRuntimeAgentDoesNotCrashStartup(t *testing.T) {
+	f := newRegistryFixture(t, nil)
+	c := f.agentC()
+	f.admin.restore(registryState{Version: registryVersion, Agents: []AgentConfig{c, c}})
+	if _, ok := f.r.agents().byName["c"]; !ok {
+		t.Error("c was not registered")
+	}
+}
+
+// A runtime entry layers like a config block: a field it leaves empty is
+// inherited, defaults.default_agent included (caught in review).
+func TestARuntimeChannelInheritsWhatItDoesNotSet(t *testing.T) {
+	f := newRegistryFixture(t, nil)
+	f.admin.defaults = channelSettings{defaultAgent: "b"}
+	f.r.defaults.defaultAgent = "b"
+	f.admin.pinnedDefault = true
+	if err := f.admin.setChannel("C9", channelAgents{Agents: []string{"b"}}); err != nil {
+		t.Fatalf("an allow list holding the inherited default was refused: %v", err)
+	}
+	if got := strings.Join(choiceNames(f.r.AgentChoices("C9")), ","); got != "b*" {
+		t.Errorf("C9 choices = %s, want b, the inherited default", got)
+	}
+}
+
+// The API narrows a channel; it can't widen one past the config's defaults
+// allow list, and an empty entry, which would have, is refused (caught in
+// review).
+func TestARuntimeChannelCannotWidenPastTheDefaults(t *testing.T) {
+	f := newRegistryFixture(t, nil)
+	if err := f.admin.putAgent(f.agentC()); err != nil {
+		t.Fatal(err)
+	}
+	f.admin.defaults = channelSettings{agents: []string{"a"}}
+	f.r.defaults.agents = []string{"a"}
+	if err := f.admin.setChannel("C1", channelAgents{}); !errors.Is(err, errRejected) {
+		t.Errorf("an empty entry: err = %v, want rejected", err)
+	}
+	if err := f.admin.setChannel("C1", channelAgents{DefaultAgent: "a"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(choiceNames(f.r.AgentChoices("C1")), ","); got != "a*" {
+		t.Errorf("C1 choices = %s, want the defaults' allow list kept", got)
+	}
+}
+
+// An agent broken by the environment at startup must not lift the
+// restriction a runtime channel put on: the channel keeps its allow list,
+// minus what is not there (caught in review: it fell back to every agent).
+func TestABrokenAgentDoesNotUnrestrictAChannel(t *testing.T) {
+	f := newRegistryFixture(t, nil)
+	f.admin.restore(registryState{
+		Version:  registryVersion,
+		Agents:   []AgentConfig{{Name: "c", DaemonURL: f.c.url, TokenEnv: "TOK_UNSET_C"}},
+		Channels: map[string]channelAgents{"C7": {DefaultAgent: "b", Agents: []string{"b", "c"}}},
+	})
+	if got := strings.Join(choiceNames(f.r.AgentChoices("C7")), ","); got != "b*" {
+		t.Errorf("C7 choices = %s, want only b, still the default", got)
+	}
+}
+
+// A change that breaks an already broken channel a second way is still a
+// change that breaks it (caught in review: compared by first error only).
+func TestASecondBreakageIsStillRefused(t *testing.T) {
+	f := newRegistryFixture(t, nil)
+	t.Setenv("TOK_D", "tok")
+	if err := f.admin.putAgent(f.agentC()); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.admin.putAgent(AgentConfig{Name: "d", DaemonURL: f.c.url, TokenEnv: "TOK_D"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.admin.setChannel("C5", channelAgents{DefaultAgent: "d", Agents: []string{"d", "c"}}); err != nil {
+		t.Fatal(err)
+	}
+	os.Unsetenv("TOK_D") // d breaks; C5 is now broken once
+	if err := f.admin.removeAgent("c"); !errors.Is(err, errRejected) {
+		t.Errorf("removing c, which C5 also names: err = %v, want rejected", err)
+	}
+}
+
+func TestAHandWrittenRegistryNeedsNoVersion(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, registryFileName), []byte(`{"agents":[{"name":"c","daemon_url":"http://c","token_env":"T"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := openRegistryFile(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st, err := store.load(); err != nil || len(st.Agents) != 1 {
+		t.Errorf("load = %+v, %v", st, err)
+	}
+}

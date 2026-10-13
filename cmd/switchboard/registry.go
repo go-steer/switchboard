@@ -41,9 +41,11 @@ import (
 // runtime; the API manages only what it added. A deployment's declared agents
 // are therefore always there, whatever has been done through the API.
 
-// channelAgents is what the admin API says about one channel's agents. It
-// replaces, for that channel, the default and allow list the config would have
-// given it — the whole answer, as a config block is.
+// channelAgents is what the admin API says about one channel's agents. Each
+// field it sets replaces, for that channel, what the config would have given
+// it; a field it leaves empty is inherited, as a config block inherits from
+// defaults (caught in review). So the API can narrow a channel or name its
+// default, but cannot widen one past an allow list the config set in defaults.
 type channelAgents struct {
 	DefaultAgent string   `json:"default_agent,omitempty"`
 	Agents       []string `json:"agents,omitempty"`
@@ -72,8 +74,12 @@ func (r *Router) routing(channel string) (*agentSet, channelSettings) {
 // overlay applies the API's agent settings for a channel, if it has any.
 func (reg *registry) overlay(channel string, s channelSettings) channelSettings {
 	if ca, ok := reg.channels[channel]; ok {
-		s.defaultAgent = ca.DefaultAgent
-		s.agents = ca.Agents
+		if ca.DefaultAgent != "" {
+			s.defaultAgent = ca.DefaultAgent
+		}
+		if len(ca.Agents) > 0 {
+			s.agents = ca.Agents
+		}
 	}
 	return s
 }
@@ -141,6 +147,9 @@ func (f *registryFile) load() (registryState, error) {
 	var st registryState
 	if err := json.Unmarshal(raw, &st); err != nil {
 		return registryState{}, fmt.Errorf("%s: %w", f.path, err)
+	}
+	if st.Version == 0 {
+		st.Version = registryVersion // written by hand, without one
 	}
 	if st.Version != registryVersion {
 		return registryState{}, fmt.Errorf("%s: version %d, this build reads %d", f.path, st.Version, registryVersion)
@@ -248,6 +257,12 @@ func (a *registryAdmin) restore(st registryState) {
 	if n := len(st.Agents); n > 0 {
 		a.logf.Infof("registry: %d runtime agent(s) restored from %s", n, a.where())
 	}
+	switch {
+	case st.DefaultAgent != "" && a.pinnedDefault:
+		a.logf.Warnf("registry: %s names default agent %q, but the config file sets the default, so it is ignored", a.where(), st.DefaultAgent)
+	case reg.agents.def != a.configDefault:
+		a.logf.Infof("registry: the default agent is %q (set at runtime)", reg.agents.def)
+	}
 }
 
 func (a *registryAdmin) where() string {
@@ -268,12 +283,19 @@ func (a *registryAdmin) compile(st registryState) (*registry, []error) {
 	}
 	var problems []error
 	agents := slices.Clone(a.pinned)
-	isPinned := func(n string) bool {
-		return slices.ContainsFunc(a.pinned, func(p *agent) bool { return p.name == n })
+	taken := make(map[string]bool, len(agents)+len(st.Agents))
+	for _, p := range a.pinned {
+		taken[p.name] = true
 	}
 	for _, ac := range st.Agents {
-		if isPinned(ac.Name) {
+		if a.isPinned(ac.Name) {
 			problems = append(problems, fmt.Errorf("runtime agent %q: %w (the config file declares it)", ac.Name, errPinned))
+			continue
+		}
+		if taken[ac.Name] {
+			// Only a hand-edited file can say this; the first one stands
+			// (caught in review: it crashed startup).
+			problems = append(problems, fmt.Errorf("runtime agent %q is listed twice; the first entry is used", ac.Name))
 			continue
 		}
 		built, err := buildAgent(ac, a.wantApprovals)
@@ -281,44 +303,80 @@ func (a *registryAdmin) compile(st registryState) (*registry, []error) {
 			problems = append(problems, fmt.Errorf("runtime agent %q%w", ac.Name, err))
 			continue
 		}
+		taken[ac.Name] = true
 		agents = append(agents, built)
 	}
-	def := a.configDefault
-	if st.DefaultAgent != "" && !a.pinnedDefault {
-		def = st.DefaultAgent
-	}
-	set, err := newAgentSet(def, agents...)
+	set, err := newAgentSet(a.configDefault, agents...)
 	if err != nil {
-		problems = append(problems, fmt.Errorf("runtime default_agent %q: %w", st.DefaultAgent, err))
-		set, _ = newAgentSet(a.configDefault, agents...)
+		// Unreachable: names are unique and the config default is pinned.
+		return &registry{agents: base}, append(problems, err)
 	}
 	set.legacy = a.configDefault
-
 	reg := &registry{agents: set}
-	// The default has to work in every channel that relies on it; one that
-	// does not falls back to the config's.
-	if def != a.configDefault {
-		if err := a.checkChannels(reg); err != nil {
-			problems = append(problems, fmt.Errorf("runtime default_agent %q: %w", def, err))
-			set.def = a.configDefault
-		}
-	}
+
+	// Channels first, and always kept. One that does not check out is kept
+	// with its broken names in place — an allow-list name that is not
+	// registered matches nothing — rather than dropped, which would hand the
+	// channel back to settings that may offer every agent: a restriction must
+	// not lapse because the environment broke an agent (caught in review). A
+	// default that names no registered agent is left to inherit.
 	for _, id := range sortedKeys(st.Channels) {
 		if a.pinnedChannels[id] {
 			problems = append(problems, fmt.Errorf("runtime settings for channel %q: %w", id, errPinned))
 			continue
 		}
-		trial := &registry{agents: set, channels: map[string]channelAgents{id: st.Channels[id]}}
-		if err := checkChannelAgents(set, fmt.Sprintf("channels[%q]", id), trial.overlay(id, a.configSettings(id))); err != nil {
-			problems = append(problems, fmt.Errorf("runtime settings for %w", err))
-			continue
+		ca := st.Channels[id]
+		trial := &registry{agents: set, channels: map[string]channelAgents{id: ca}}
+		errs := channelProblems(set, fmt.Sprintf("channels[%q]", id), trial.overlay(id, a.configSettings(id)))
+		for _, e := range errs {
+			problems = append(problems, fmt.Errorf("runtime settings for %w", e))
+		}
+		if _, ok := set.byName[ca.DefaultAgent]; ca.DefaultAgent != "" && !ok {
+			ca.DefaultAgent = ""
 		}
 		if reg.channels == nil {
 			reg.channels = make(map[string]channelAgents)
 		}
-		reg.channels[id] = st.Channels[id]
+		reg.channels[id] = ca
+	}
+
+	// Then the default, which has to work in every channel that relies on it;
+	// one that does not falls back to the config's.
+	if st.DefaultAgent != "" && !a.pinnedDefault && st.DefaultAgent != a.configDefault {
+		if _, ok := set.byName[st.DefaultAgent]; !ok {
+			problems = append(problems, fmt.Errorf("runtime default_agent %q is not a registered agent", st.DefaultAgent))
+		} else {
+			set.def = st.DefaultAgent
+			if err := a.checkChannels(reg); err != nil {
+				problems = append(problems, fmt.Errorf("runtime default_agent %q: %w", st.DefaultAgent, err))
+				set.def = a.configDefault
+			}
+		}
 	}
 	return reg, problems
+}
+
+// channelProblems is every way a channel's agent settings fail against set —
+// each unknown name, an unknown default, a default the allow list excludes —
+// where checkChannelAgents stops at the first. All of them, so that a change
+// adding a second breakage to an already broken channel is a new problem, not
+// the same one again (caught in review).
+func channelProblems(set *agentSet, scope string, cs channelSettings) []error {
+	var errs []error
+	for _, n := range cs.agents {
+		if _, ok := set.byName[n]; !ok {
+			errs = append(errs, fmt.Errorf("%s.agents names %q, which is not a registered agent", scope, n))
+		}
+	}
+	if cs.defaultAgent != "" {
+		if _, ok := set.byName[cs.defaultAgent]; !ok {
+			errs = append(errs, fmt.Errorf("%s.default_agent %q is not a registered agent", scope, cs.defaultAgent))
+		}
+	}
+	if _, err := set.channelAgent(cs); err != nil {
+		errs = append(errs, fmt.Errorf("%s: %w", scope, err))
+	}
+	return errs
 }
 
 // checkChannels checks every channel's effective agent settings — the
@@ -450,6 +508,9 @@ func (a *registryAdmin) setChannel(id string, ca channelAgents) error {
 	defer a.mu.Unlock()
 	if a.pinnedChannels[id] {
 		return fmt.Errorf("channel %q's agents are %w", id, errPinned)
+	}
+	if ca.DefaultAgent == "" && len(ca.Agents) == 0 {
+		return fmt.Errorf("%w: name a default_agent, agents, or both; to drop a channel's settings, clear it", errRejected)
 	}
 	st := a.snapshotState()
 	st.Channels[id] = ca
