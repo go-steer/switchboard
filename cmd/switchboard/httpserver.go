@@ -16,6 +16,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"net"
@@ -40,6 +41,13 @@ const shutdownGrace = platformTimeout + 5*time.Second
 // starts, which is what lets serve turn a bind failure into a non-zero exit
 // rather than running on without a surface a deployment depends on.
 func serveHTTP(ctx context.Context, name, addr string, h http.Handler, logf logging.Logf) error {
+	return serveHTTPTLS(ctx, name, addr, h, nil, logf)
+}
+
+// serveHTTPTLS is serveHTTP over TLS when tc is set: the admin API's mtls
+// mode, whose listener presents the gateway's certificate and asks for the
+// caller's.
+func serveHTTPTLS(ctx context.Context, name, addr string, h http.Handler, tc *tls.Config, logf logging.Logf) error {
 	server := &http.Server{
 		Handler: h,
 		// Left unset, net/http writes its runtime errors straight to stderr
@@ -61,6 +69,9 @@ func serveHTTP(ctx context.Context, name, addr string, h http.Handler, logf logg
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return fmt.Errorf("%s: listen %s: %w", name, addr, err)
+	}
+	if tc != nil {
+		ln = tls.NewListener(ln, tc)
 	}
 	errCh := make(chan error, 1)
 	go func() { errCh <- server.Serve(ln) }()

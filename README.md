@@ -467,7 +467,66 @@ looks as before.
 {"name": "general", "display_name": "General agent", "icon_url": "https://example.com/general.png", …}
 ```
 
-Adding agents through an API comes in a later step of #140.
+### The admin API
+
+`--admin-addr` serves an API for changing agents and agent settings at
+runtime, with no restart (#157, `docs/agent-identity.md`). Keep it off any
+public route.
+
+| method | path | does |
+|---|---|---|
+| `GET` | `/v1/agents` | every agent: the config's (`pinned`) and the API's, whether each is `active`, and any problems |
+| `GET`, `PUT`, `DELETE` | `/v1/agents/{name}` | one agent; `PUT` takes an agent entry as in the config file |
+| `GET`, `PUT` | `/v1/defaults` | the global default agent: `{"default_agent": "general"}`, `""` to return to the config's |
+| `GET`, `PUT`, `DELETE` | `/v1/channels/{channel}` | a channel's `default_agent` and `agents` allow list; the ID as the platform gives it (`C0123ABCD`, `spaces/AAAA`) |
+
+```sh
+curl -X PUT http://127.0.0.1:9090/v1/agents/research -H "Authorization: Bearer $TOKEN" \
+  -d '{"display_name": "Research agent", "daemon_url": "https://research:7777",
+       "auth": {"method": "spiffe", "server_id": "spiffe://my-project.svc.id.goog/ns/agents/sa/research"}}'
+```
+
+- **What the config declares is pinned:** its agents, a `default_agent` it
+  names, and the agent settings of a channel whose block names them. Changing
+  them returns `409`; the config file is where they change.
+- **A change that would break something is refused with `422`.** That
+  includes removing an agent a channel or the default still names, a default
+  a channel's allow list excludes, or an unknown agent.
+- **A channel's runtime settings layer like a config block's.** A field left
+  out is inherited, so the API can narrow a channel but not widen it past a
+  `defaults.agents` list.
+- **Changes are saved** in `registry.json` under `--state-dir`, and restored
+  at startup. Without `--state-dir` they last until the process exits.
+- **Every change is audited** in `--audit-log` as an `admin` record: who
+  made it, the entry before and after, and why it was refused if it was.
+
+**Who may call it.** Every request needs an admin, reads included: a read
+shows every daemon URL, and with an OIDC issuer like Google "authenticated"
+alone means anyone with an account.
+
+| `--admin-auth` | the caller presents | |
+|---|---|---|
+| `oidc` (default) | an ID token from `--admin-oidc-issuer` for one of `--admin-oidc-audience` | for people |
+| `mtls` | a client certificate; the listener serves over the gateway's own `--identity` | for automation |
+| `token` | a bearer token from `--admin-token-env` | loopback addresses only, for a laptop: a shared token can't say who made a change |
+
+`--admin-allow` names the admins: `email:alice@example.com` or
+`domain:example.com` for people signing in with OIDC, matched only against a
+verified email, never a token's `sub`; or `id:…` for a certificate: a SPIFFE
+ID, or the URI SAN of a `pki` certificate. It's required with `oidc` and
+`mtls`.
+
+- **OIDC off loopback needs TLS** (`--admin-tls-cert-file`,
+  `--admin-tls-key-file`): an ID token sent in the clear can be replayed until
+  it expires. Or bind `127.0.0.1` and reach it through a tunnel such as
+  `kubectl port-forward`.
+- **An agent added through the API may only name a token variable under
+  `--admin-token-env-prefix`** (default `SWITCHBOARD_AGENT_TOKEN_`). Otherwise
+  an admin could name one of the gateway's own secrets, a platform token say,
+  and point `daemon_url` at a server that collects it. Set it empty to allow
+  only certificate methods. `daemon_url` must be `http(s)://host[:port]` and
+  nothing more.
+- **Refused requests are logged** with who made them.
 
 ### Long-turn feedback
 

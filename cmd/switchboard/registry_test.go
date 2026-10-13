@@ -40,10 +40,11 @@ func newRegistryFixture(t *testing.T, store *registryFile) *registryFixture {
 	t.Helper()
 	t.Setenv("TOK_REG", "tok")
 	f := &registryFixture{a: newRecordingDaemon(t, "sa"), b: newRecordingDaemon(t, "sb"), c: newRecordingDaemon(t, "sc"), store: store}
-	base, err := buildAgents([]AgentConfig{
+	declared := []AgentConfig{
 		{Name: "a", DaemonURL: f.a.url, TokenEnv: "TOK_REG"},
 		{Name: "b", DaemonURL: f.b.url, TokenEnv: "TOK_REG"},
-	}, "a", agentBuilder{})
+	}
+	base, err := buildAgents(declared, "a", agentBuilder{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,7 +52,7 @@ func newRegistryFixture(t *testing.T, store *registryFile) *registryFixture {
 	f.r = NewRouter(nil, &fakeSender{replies: make(chan chat.Reply, 16)}, ProgressOff, nil, nil)
 	f.r.setAgents(base)
 	f.r.setChannels(byChannel)
-	cfg := registryConfig{Base: base, ByChannel: byChannel, AgentChannels: map[string]bool{"C3": true}}
+	cfg := registryConfig{Base: base, PinnedConfigs: declared, ByChannel: byChannel, AgentChannels: map[string]bool{"C3": true}, TokenPrefix: "TOK_"}
 	if store != nil {
 		cfg.Store = store
 	}

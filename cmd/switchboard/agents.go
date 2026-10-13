@@ -356,6 +356,11 @@ func buildAgent(ac AgentConfig, b agentBuilder) (*agent, error) {
 	if strings.TrimSpace(ac.DaemonURL) == "" {
 		return nil, fmt.Errorf(".daemon_url is required")
 	}
+	if u, err := url.Parse(ac.DaemonURL); err != nil || (u.Scheme != "http" && u.Scheme != "https") ||
+		u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
+		// Just a daemon's address: the contract's paths are appended to it.
+		return nil, fmt.Errorf(".daemon_url %q: want http(s)://host[:port], nothing more", ac.DaemonURL)
+	}
 	cfg, err := daemonConfigFor(ac, b.identity)
 	if err != nil {
 		return nil, err

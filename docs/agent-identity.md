@@ -141,8 +141,10 @@ It is the API in `docs/multi-agent.md`, with these changes.
   credential-enforcing gate is in the chain. A static bearer token is accepted
   only on loopback, for development.
 - **Authorization by `authz.Rules`:** a rule grants the admin bit, for example
-  a group's email domain or a named service identity. Reads need any
-  authenticated caller; writes need admin.
+  a group's email domain or a named service identity. Every request needs
+  admin, reads included (changed in #157): with an issuer like Google, an
+  authenticated caller is anyone with an account, and a read shows every
+  daemon URL.
 - **Agents by URL and identity.** `PUT /v1/agents/{name}` takes the entry
   above. It is validated on write: the URL parses, the method is known, a
   `bearer` entry's token env is set, and an mTLS entry has its `server_id` or

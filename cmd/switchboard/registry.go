@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/go-steer/switchboard/internal/logging"
@@ -178,7 +179,16 @@ type registryAdmin struct {
 	logf  logging.Logf
 
 	builder agentBuilder
+	// tokenPrefix is what a runtime agent's token_env must start with; empty
+	// refuses runtime bearer agents. Without it, an admin could name any of
+	// the gateway's own secret variables — the platform tokens — and point
+	// daemon_url at a server that collects it (caught in review).
+	tokenPrefix string
+	// problems are those of the current state, kept for the listings rather
+	// than compiled — which builds every runtime agent — on every read.
+	problems []error
 	// What the config file declared: pinned.
+	pinnedConfigs  []AgentConfig
 	pinned         []*agent
 	pinnedDefault  bool   // the file names default_agent
 	configDefault  string // the default the file gives, or the first agent
@@ -207,7 +217,8 @@ func agentChannels(cfg *Config) map[string]bool {
 
 // registryConfig is what newRegistryAdmin needs from startup.
 type registryConfig struct {
-	Base          *agentSet // the registry the config file built
+	Base          *agentSet     // the registry the config file built
+	PinnedConfigs []AgentConfig // the config file's agents list, for the API to show
 	PinnedDefault bool
 	Defaults      channelSettings
 	ByChannel     map[string]channelSettings
@@ -215,6 +226,7 @@ type registryConfig struct {
 	// agent or an allow list.
 	AgentChannels map[string]bool
 	Builder       agentBuilder
+	TokenPrefix   string // see registryAdmin.tokenPrefix
 	Store         registryStore
 	Logf          logging.Logf
 }
@@ -225,11 +237,13 @@ func newRegistryAdmin(r *Router, c registryConfig) *registryAdmin {
 		store:          c.Store,
 		logf:           c.Logf,
 		builder:        c.Builder,
+		tokenPrefix:    c.TokenPrefix,
 		pinnedDefault:  c.PinnedDefault,
 		configDefault:  c.Base.def,
 		defaults:       c.Defaults,
 		byChannel:      c.ByChannel,
 		pinnedChannels: c.AgentChannels,
+		pinnedConfigs:  c.PinnedConfigs,
 		state:          registryState{Version: registryVersion},
 	}
 	if !c.Base.implicit {
@@ -253,6 +267,7 @@ func (a *registryAdmin) restore(st registryState) {
 	for _, p := range problems {
 		a.logf.Warnf("registry: %v; left out until it is fixed", p)
 	}
+	a.problems = problems
 	a.r.reg.Store(reg)
 	if n := len(st.Agents); n > 0 {
 		a.logf.Infof("registry: %d runtime agent(s) restored from %s", n, a.where())
@@ -296,6 +311,10 @@ func (a *registryAdmin) compile(st registryState) (*registry, []error) {
 			// Only a hand-edited file can say this; the first one stands
 			// (caught in review: it crashed startup).
 			problems = append(problems, fmt.Errorf("runtime agent %q is listed twice; the first entry is used", ac.Name))
+			continue
+		}
+		if err := a.checkTokenEnv(ac); err != nil {
+			problems = append(problems, fmt.Errorf("runtime agent %q: %w", ac.Name, err))
 			continue
 		}
 		built, err := buildAgent(ac, a.builder)
@@ -436,7 +455,23 @@ func (a *registryAdmin) apply(st registryState) error {
 		}
 	}
 	a.state = st
+	a.problems = after
 	a.r.reg.Store(reg)
+	return nil
+}
+
+// checkTokenEnv holds a runtime agent's token variable to the prefix set
+// aside for them.
+func (a *registryAdmin) checkTokenEnv(ac AgentConfig) error {
+	if ac.TokenEnv == "" {
+		return nil // a certificate method; buildAgent checks the rest
+	}
+	if a.tokenPrefix == "" {
+		return errors.New("runtime agents may not name a token variable (--admin-token-env-prefix is empty); use a certificate method")
+	}
+	if !strings.HasPrefix(ac.TokenEnv, a.tokenPrefix) {
+		return fmt.Errorf("token_env %q: a runtime agent's token variable must start with %q (--admin-token-env-prefix)", ac.TokenEnv, a.tokenPrefix)
+	}
 	return nil
 }
 
@@ -530,6 +565,26 @@ func (a *registryAdmin) clearChannel(id string) error {
 	}
 	delete(st.Channels, id)
 	return a.apply(st)
+}
+
+// view is what the API shows: its own state, the config's agents, and the
+// problems keeping entries out of the registry now.
+func (a *registryAdmin) view() (registryState, []AgentConfig, []error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.snapshotState(), slices.Clone(a.pinnedConfigs), slices.Clone(a.problems)
+}
+
+// agentEntry is an agent's entry, the config's or the API's.
+func (a *registryAdmin) agentEntry(name string) (AgentConfig, bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, l := range [][]AgentConfig{a.pinnedConfigs, a.state.Agents} {
+		if i := slices.IndexFunc(l, func(x AgentConfig) bool { return x.Name == name }); i >= 0 {
+			return l[i], true
+		}
+	}
+	return AgentConfig{}, false
 }
 
 // current is what the API has said, including entries left out for now.

@@ -204,6 +204,25 @@ func runServe(args []string) (err error) {
 		"Prometheus /metrics + /healthz listener address (host:port); empty = disabled")
 	ingressAddr := fs.String("ingress-addr", "",
 		"outbound-ingress listener address (host:port) for POST/PATCH /v1/messages; empty = disabled")
+	adminAddr := fs.String("admin-addr", "",
+		"admin API listener address (host:port) for /v1/agents, /v1/defaults and /v1/channels; "+
+			"empty = disabled. Keep it off any public route")
+	adminAuth := fs.String("admin-auth", adminAuthOIDC,
+		"how admin API callers authenticate: \"oidc\" (an ID token from --admin-oidc-issuer), "+
+			"\"mtls\" (a client certificate, over the gateway's own --identity) or \"token\" "+
+			"(a static bearer token from --admin-token-env, loopback addresses only)")
+	adminIssuer := fs.String("admin-oidc-issuer", "", "with --admin-auth oidc: the issuer URL, e.g. https://accounts.google.com")
+	adminAudience := fs.String("admin-oidc-audience", "", "with --admin-auth oidc: comma-separated audiences tokens must carry (the OAuth client ID)")
+	adminAllow := fs.String("admin-allow", "",
+		"comma-separated grants of the admin role: email:ADDRESS, domain:DOMAIN or id:IDENTITY "+
+			"(a SPIFFE ID or token subject); required with oidc and mtls")
+	adminTokenEnv := fs.String("admin-token-env", "SWITCHBOARD_ADMIN_TOKEN",
+		"with --admin-auth token: env var holding the bearer token")
+	adminTokenPrefix := fs.String("admin-token-env-prefix", "SWITCHBOARD_AGENT_TOKEN_",
+		"the prefix an agent added through the admin API must name its token_env under, so it "+
+			"cannot name the gateway's own secrets; empty = such agents use a certificate method")
+	adminTLSCert := fs.String("admin-tls-cert-file", "", "with --admin-auth oidc: the admin listener's TLS certificate (PEM); required off loopback")
+	adminTLSKey := fs.String("admin-tls-key-file", "", "with --admin-auth oidc: its private key (PEM)")
 	ingressTokenEnv := fs.String("ingress-token-env", "SWITCHBOARD_INGRESS_TOKEN",
 		"env var holding the bearer token callers must present to the outbound ingress")
 	ingressAllow := fs.String("ingress-allow", "",
@@ -287,6 +306,13 @@ func runServe(args []string) (err error) {
 	res.str("metrics-addr", "SWITCHBOARD_METRICS_ADDR", cfg.MetricsAddr, metricsAddr)
 	res.str("ingress-addr", "SWITCHBOARD_INGRESS_ADDR", cfg.IngressAddr, ingressAddr)
 	res.str("ingress-token-env", "", cfg.IngressTokenEnv, ingressTokenEnv)
+	res.str("admin-addr", "SWITCHBOARD_ADMIN_ADDR", cfg.AdminAddr, adminAddr)
+	res.str("admin-auth", "SWITCHBOARD_ADMIN_AUTH", cfg.AdminAuth, adminAuth)
+	res.str("admin-oidc-issuer", "SWITCHBOARD_ADMIN_OIDC_ISSUER", cfg.AdminIssuer, adminIssuer)
+	res.str("admin-token-env", "", cfg.AdminTokenEnv, adminTokenEnv)
+	res.str("admin-token-env-prefix", "", cfg.AdminTokenPrefix, adminTokenPrefix)
+	res.str("admin-tls-cert-file", "SWITCHBOARD_ADMIN_TLS_CERT_FILE", cfg.AdminTLSCert, adminTLSCert)
+	res.str("admin-tls-key-file", "SWITCHBOARD_ADMIN_TLS_KEY_FILE", cfg.AdminTLSKey, adminTLSKey)
 	res.str("log-format", "SWITCHBOARD_LOG_FORMAT", cfg.LogFormat, logFormat)
 	res.str("audit-log", "SWITCHBOARD_AUDIT_LOG", cfg.AuditLog, auditLogDest)
 	res.str("state-dir", "SWITCHBOARD_STATE_DIR", cfg.StateDir, stateDir)
@@ -308,6 +334,8 @@ func runServe(args []string) (err error) {
 		return err
 	}
 	allowList := res.list("ingress-allow", "SWITCHBOARD_INGRESS_ALLOW", *ingressAllow, cfg.IngressAllow)
+	adminAudiences := res.list("admin-oidc-audience", "SWITCHBOARD_ADMIN_OIDC_AUDIENCE", *adminAudience, cfg.AdminAudiences)
+	adminGrants := res.list("admin-allow", "SWITCHBOARD_ADMIN_ALLOW", *adminAllow, cfg.AdminAllow)
 
 	format, ok := logging.ParseFormat(*logFormat)
 	if !ok {
@@ -773,11 +801,13 @@ func runServe(args []string) (err error) {
 		}
 		regAdmin := newRegistryAdmin(router, registryConfig{
 			Base:          agents,
+			PinnedConfigs: cfg.Agents,
 			PinnedDefault: cfg.DefaultAgent != nil || cfg.Defaults.DefaultAgent != nil,
 			Defaults:      defaults,
 			ByChannel:     byChannel,
 			AgentChannels: agentChannels(cfg),
 			Builder:       builder,
+			TokenPrefix:   *adminTokenPrefix,
 			Store:         rstore,
 			Logf:          logf,
 		})
@@ -791,6 +821,33 @@ func runServe(args []string) (err error) {
 			regAdmin.restore(st)
 		}
 		router.setRegistryAdmin(regAdmin)
+	}
+
+	// The admin API (#157), built before anything is served so a bad setting
+	// — no admins named, a token on a public address — stops startup.
+	var admin *adminServer
+	if *adminAddr != "" {
+		if !inbound {
+			return errors.New("--admin-addr manages agents, and an outbound-only run has none")
+		}
+		a, err := newAdminServer(adminConfig{
+			Addr:      *adminAddr,
+			Auth:      *adminAuth,
+			Issuer:    *adminIssuer,
+			Audiences: adminAudiences,
+			Allow:     adminGrants,
+			Token:     os.Getenv(*adminTokenEnv),
+			TLSCert:   *adminTLSCert,
+			TLSKey:    *adminTLSKey,
+			Identity:  builder.identity,
+			Platform:  *platform,
+			Logf:      logf,
+			Audit:     router.audit,
+		}, router, router.regAdmin)
+		if err != nil {
+			return fmt.Errorf("admin API: %w", err)
+		}
+		admin = a
 	}
 
 	// The routing table, restored before anything is dispatched so the first
@@ -855,7 +912,7 @@ func runServe(args []string) (err error) {
 	// a surface something depends on — a deployment's probes, or a caller's
 	// digests. srvErrs carries those failures so serve reports one as a
 	// non-zero exit.
-	srvErrs := make(chan error, 2)
+	srvErrs := make(chan error, 3)
 	listeners := 0
 	serveOptional := func(name, addr string, fn func() error) {
 		if addr == "" {
@@ -873,6 +930,9 @@ func runServe(args []string) (err error) {
 	}
 	serveOptional("metrics", *metricsAddr, func() error { return serveMetrics(ctx, *metricsAddr, m, logf) })
 	serveOptional("ingress", *ingressAddr, func() error { return serveIngress(ctx, *ingressAddr, ing) })
+	if admin != nil {
+		serveOptional("admin", *adminAddr, func() error { return admin.serve(ctx) })
+	}
 
 	// Through logf, not straight to stderr: these are the first lines of the
 	// run, and a JSON stream that opens with three unparseable ones is worse
@@ -890,6 +950,12 @@ func runServe(args []string) (err error) {
 	}
 	if ing != nil {
 		logf.Infof("outbound ingress on %s%s", *ingressAddr, ingressPath)
+	}
+	if admin != nil {
+		logf.Infof("admin API on %s (%s), changes saved to %s", *adminAddr, *adminAuth, router.regAdmin.where())
+		if *stateDir == "" {
+			logf.Warnf("admin API: without --state-dir, agents and settings changed through it last until the process exits")
+		}
 	}
 
 	// With no event source there is nothing to run, so wait on the same ctx

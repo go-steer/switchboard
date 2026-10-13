@@ -7,6 +7,27 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **An admin API for agents** (#157, `--admin-addr`). It adds, replaces and
+  removes agents, moves the global default, and sets a channel's default
+  agent and allow list, all at runtime with no restart.
+  - **Authentication** is by purser: OIDC for people (`--admin-oidc-issuer`,
+    `--admin-oidc-audience`), mTLS over the gateway's own identity for
+    automation, or a static token on loopback only.
+  - **Admins** are named by `--admin-allow` (`email:`, `domain:`, `id:`).
+    Every request, reads included, needs one. Email grants match only a
+    verified email.
+  - **OIDC off loopback needs TLS** (`--admin-tls-cert-file`,
+    `--admin-tls-key-file`).
+  - **A runtime agent's `token_env` must start with
+    `--admin-token-env-prefix`** (default `SWITCHBOARD_AGENT_TOKEN_`), so an
+    admin can't point the gateway's own secrets at a server of their choosing.
+    `daemon_url` must be a bare `http(s)://host[:port]`, for config agents
+    too.
+  - **What the config declares is pinned** (`409`). A change that would
+    break something is refused (`422`), and a channel's runtime settings
+    can narrow it but not widen it past the config's defaults.
+  - **Changes are saved** in `registry.json` under `--state-dir`, and every
+    change is an `admin` audit record naming who made it.
 - **switchboard can authenticate to an agent as itself** (#158,
   `docs/agent-identity.md`). Instead of a bearer token per agent, the gateway
   presents one workload identity through
