@@ -170,6 +170,15 @@ type Reply struct {
 	// its platform shows in notifications.
 	Decision *Decision
 
+	// Activity, when set, is the tool activity this reply reports, one step
+	// per tool (or run of identical tools), for an adapter that can draw it
+	// natively — Slack as task cards. Nil on everything but a progress message
+	// or tool notice that has a tool to name.
+	//
+	// Text still says the whole thing, as it does beside a Decision: an
+	// adapter that draws nothing from here posts Text and loses nothing.
+	Activity *Activity
+
 	// Key identifies this reply across processes, so that posting it twice —
 	// once before a crash, once after — can be recognized as one post. Empty
 	// for a reply that has no stable identity, which posts as it always has.
@@ -189,6 +198,43 @@ type Reply struct {
 	// posts anyway, and the worst case is a duplicate message.
 	Verify bool
 }
+
+// Activity is a reply's tool activity, structured: a line above the steps and
+// the steps themselves, oldest first. The router decides what is shown — which
+// tools, whether their arguments — and the adapter decides only how; nothing
+// here is something Text does not already say.
+type Activity struct {
+	// Head is the line above the steps, in the same markup as Reply.Text:
+	// the turn's clock, or a count of the tools in a notice. Empty for none.
+	Head string
+	// Steps are the tools, oldest first.
+	Steps []Step
+}
+
+// Step is one tool, or one run of identical calls to it.
+type Step struct {
+	// Title names the tool and, for a run, how many: "bash ×3", or
+	// "bash (exit 2)" once it has failed. Plain text, not markup.
+	Title string
+	// Status is where the step has got to.
+	Status StepStatus
+	// Code is what the tool was called with, shown verbatim, or empty when
+	// the router shows no arguments. Agent-supplied: render it as literal
+	// text, never as markup.
+	Code string
+	// Note is a short trailing line, e.g. how long the call took. Plain text.
+	Note string
+}
+
+// StepStatus is a step's state. Three, because those are the states a tool call
+// has: a step that has not started is not one the router knows about yet.
+type StepStatus string
+
+const (
+	StepRunning StepStatus = "running"
+	StepDone    StepStatus = "done"
+	StepFailed  StepStatus = "failed"
+)
 
 // Usage is the token and cost accounting for the turn a Reply carries. It is
 // structured rather than pre-rendered because the platforms have genuinely
@@ -367,6 +413,15 @@ type Command struct {
 // (the progress placeholder) edits it into a final line instead.
 type DeleteLeavesTrace interface {
 	DeleteLeavesTrace() bool
+}
+
+// DrawsActivity is an optional Adapter capability: the adapter renders
+// Reply.Activity rather than only Text. A router holding a change that only
+// Activity shows — a tool's result landing in status mode, which leaves the
+// progress line's text as it was — sends the edit only to an adapter that will
+// draw it; to any other it would be an API call that changes nothing.
+type DrawsActivity interface {
+	DrawsActivity() bool
 }
 
 // AgentChoice is one agent a picker offers (#140).

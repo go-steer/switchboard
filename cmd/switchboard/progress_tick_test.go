@@ -17,6 +17,7 @@ package main
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -75,23 +76,32 @@ func TestTickText(t *testing.T) {
 func TestTickRenderScopesDetailToMode(t *testing.T) {
 	e := &sessionEntry{}
 	e.beginTurn(chat.MessageRef{ID: "ts1"}, time.Now().Add(-90*time.Second))
-	if _, _, ok := e.noteActivity([]string{"bash"}); !ok {
+	if !e.noteActivity([]daemon.ToolCall{{Name: "bash", Arg: "kubectl get pods"}}) {
 		t.Fatal("noteActivity on a live turn reported no message to edit")
 	}
 
-	_, status, ok := e.tickRender(ProgressStatus)
+	_, status, statusAct, ok := e.tickRender(ProgressStatus)
 	if !ok {
 		t.Fatal("tickRender(status) on a live turn = !ok")
 	}
 	if !strings.Contains(status, "1m30s") || !strings.Contains(status, "running `bash` (step 1)") {
 		t.Errorf("status tick = %q, want the clock and the tool", status)
 	}
-	_, indicator, ok := e.tickRender(ProgressIndicator)
+	_, indicator, indicatorAct, ok := e.tickRender(ProgressIndicator)
 	if !ok {
 		t.Fatal("tickRender(indicator) on a live turn = !ok")
 	}
 	if want := "⏳ Working… 1m30s"; indicator != want {
 		t.Errorf("indicator tick = %q, want %q", indicator, want)
+	}
+	// The steps follow the same gate, and status mode's never carry the
+	// argument: the trail stores names only.
+	want := &chat.Activity{Head: "⏳ Working… 1m30s · step 1", Steps: []chat.Step{{Title: "bash", Status: chat.StepRunning}}}
+	if !reflect.DeepEqual(statusAct, want) {
+		t.Errorf("status activity = %+v, want %+v", statusAct, want)
+	}
+	if indicatorAct != nil {
+		t.Errorf("indicator activity = %+v, want none", indicatorAct)
 	}
 }
 
@@ -104,10 +114,10 @@ func TestTickRenderAfterTurnEnds(t *testing.T) {
 	if ref := e.takeProgress(); ref.ID != "ts1" {
 		t.Fatalf("takeProgress = %q, want ts1", ref.ID)
 	}
-	if _, _, ok := e.tickRender(ProgressStatus); ok {
+	if _, _, _, ok := e.tickRender(ProgressStatus); ok {
 		t.Error("tickRender after the turn ended = ok, want the tick dropped")
 	}
-	if _, _, ok := e.noteActivity([]string{"bash"}); ok {
+	if e.noteActivity([]daemon.ToolCall{{Name: "bash"}}) {
 		t.Error("noteActivity after the turn ended = ok, want a fallback notice instead")
 	}
 	// Retiring twice — clearProgress on a turn whose ticker already stopped —

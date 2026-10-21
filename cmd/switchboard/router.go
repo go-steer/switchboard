@@ -194,14 +194,20 @@ func groupCalls(calls []daemon.ToolCall, res []*daemon.ToolResult, took []time.D
 	return groups
 }
 
-// minShownTook is the shortest call duration worth printing. Below it the
+// minShownTook is the shortest call duration printed as a number. Below it the
 // number is noise to a reader — the call was instant, as far as anyone
-// watching is concerned — and it is mostly the gateway's own latency anyway.
+// watching is concerned — and it is mostly the gateway's own latency anyway, so
+// it reads "<0.1s". It used to read nothing, which in a column of task cards
+// made the one quick call look like the one whose time had gone missing.
 const minShownTook = 100 * time.Millisecond
 
-// formatTook renders a call's duration: tenths of a second under ten seconds,
-// where they still mean something, and the turn clock's own form above.
+// formatTook renders a call's duration: "<0.1s" under minShownTook, tenths of a
+// second under ten seconds, where they still mean something, and the turn
+// clock's own form above.
 func formatTook(d time.Duration) string {
+	if d < minShownTook {
+		return "<0.1s"
+	}
 	// Rounded first, so 9.97s reads "10s" rather than a "10.0s" that the
 	// next tenth of a second would turn into "10s" anyway.
 	d = d.Round(100 * time.Millisecond)
@@ -279,7 +285,7 @@ func toolLine(g toolGroup, detail, verb bool) string {
 	if detail && g.call.Arg != "" {
 		line += "\n```\n" + fencedCode(g.call.Arg) + "\n```"
 	}
-	if g.res != nil && g.n == 1 && g.took >= minShownTook {
+	if g.res != nil && g.n == 1 && g.took > 0 {
 		line += "\n⏱ " + formatTook(g.took)
 	}
 	return line
@@ -372,6 +378,62 @@ func timedActivityText(calls []daemon.ToolCall, res []*daemon.ToolResult, took [
 		blocks = append(blocks, toolLine(g, true, false))
 	}
 	return strings.Join(blocks, "\n\n")
+}
+
+// noticeActivity is a stream notice's activity, for an adapter that draws it
+// as steps (chat.Activity): the same groups activityText renders. A notice of
+// one group has no head, since the step says it all; a longer one leads with
+// activityHeader's count.
+//
+// nil for a terse notice — status mode's, posted when it has no message of its
+// own to edit. Nothing registers one (noteToolCalls), so no result ever ticks
+// it off, and a step drawn from it would read "in progress" for good: a status
+// badge that is wrong forever is worse than the static "▸ Running" line, which
+// never claimed to be live.
+func noticeActivity(calls []daemon.ToolCall, res []*daemon.ToolResult, took []time.Duration, detail bool) *chat.Activity {
+	if !detail {
+		return nil
+	}
+	groups := groupCalls(calls, res, took)
+	if len(groups) == 0 {
+		return nil
+	}
+	a := &chat.Activity{Steps: groupSteps(groups, true)}
+	if len(groups) > 1 {
+		a.Head = activityHeader(groups)
+	}
+	return a
+}
+
+// groupSteps renders groups as steps, carrying what toolLine would: the name
+// (made safe by boldName, which keeps a hostile one from reading as a mention
+// or a link where the adapter's title is parsed), the count, why it failed,
+// and — detail only — the argument and how long it took.
+func groupSteps(groups []toolGroup, detail bool) []chat.Step {
+	steps := make([]chat.Step, len(groups))
+	for i, g := range groups {
+		s := chat.Step{Title: boldName(g.call.Name), Status: chat.StepRunning}
+		if g.n > 1 {
+			s.Title += " ×" + strconv.Itoa(g.n)
+		}
+		if g.res != nil {
+			s.Status = chat.StepDone
+			if g.res.Failed {
+				s.Status = chat.StepFailed
+				if g.res.Detail != "" {
+					s.Title += " (" + g.res.Detail + ")"
+				}
+			}
+		}
+		if detail {
+			s.Code = g.call.Arg
+			if g.res != nil && g.n == 1 && g.took > 0 {
+				s.Note = "⏱ " + formatTook(g.took)
+			}
+		}
+		steps[i] = s
+	}
+	return steps
 }
 
 // activityHeader summarises a multi-call notice in its first line, so a reader
@@ -822,10 +884,13 @@ type sessionEntry struct {
 	// for it. turnStart is when the turn was handed to the daemon — what the
 	// elapsed clock counts from, not the moment the placeholder landed; tools
 	// and step are the last tool activity seen, replayed by each tick so the
-	// clock does not erase it; tickStop closes the ticker goroutine down.
+	// clock does not erase it; trail is every call the turn has made, for
+	// the steps an adapter that draws Activity shows (status mode); tickStop
+	// closes the ticker goroutine down.
 	turnStart time.Time
 	tools     []string
 	step      int
+	trail     statusTrail
 	tickStop  chan struct{}
 
 	// bmu guards backlog, the messages the daemon has told us are sitting on
@@ -1391,24 +1456,25 @@ func (e *sessionEntry) claimSettle(id string, want settleState) (text string, kn
 // with the rest of the turn's ticker state, and stops the ticker: the message
 // it renders into is about to be deleted.
 func (e *sessionEntry) takeProgress() chat.MessageRef {
-	ref, _ := e.takeProgressStart()
+	ref, _, _, _ := e.takeProgressTurn()
 	return ref
 }
 
-// takeProgressStart is takeProgress, also returning when the turn started,
-// for the final line a placeholder is retired with.
-func (e *sessionEntry) takeProgressStart() (chat.MessageRef, time.Time) {
+// takeProgressTurn is takeProgress, also handing over when the turn started,
+// for the final line a placeholder is retired with, and the turn's tool trail
+// and step count, for a status message kept as the turn's record.
+func (e *sessionEntry) takeProgressTurn() (chat.MessageRef, time.Time, statusTrail, int) {
 	e.pmu.Lock()
-	ref, stop, start := e.progressMsg, e.tickStop, e.turnStart
+	ref, stop, start, trail, step := e.progressMsg, e.tickStop, e.turnStart, e.trail, e.step
 	e.progressMsg, e.tickStop = chat.MessageRef{}, nil
-	e.turnStart, e.tools, e.step = time.Time{}, nil, 0
+	e.turnStart, e.tools, e.step, e.trail = time.Time{}, nil, 0, statusTrail{}
 	e.pmu.Unlock()
 	// Outside the lock, and safe against a concurrent caller: whoever nils
 	// tickStop under the lock is the only one holding a channel to close.
 	if stop != nil {
 		close(stop)
 	}
-	return ref, start
+	return ref, start, trail, step
 }
 
 // stopTicker halts the turn's ticker while leaving the progress message in
@@ -1449,7 +1515,7 @@ func (e *sessionEntry) resumeTurnClock(start time.Time) (stop chan struct{}, ok 
 	}
 	stop = make(chan struct{})
 	e.tickStop = stop
-	e.turnStart, e.tools, e.step = start, nil, 0
+	e.turnStart, e.tools, e.step, e.trail = start, nil, 0, statusTrail{}
 	return stop, true
 }
 
@@ -1462,7 +1528,7 @@ func (e *sessionEntry) beginTurn(ref chat.MessageRef, start time.Time) (stale ch
 	stale, prev := e.progressMsg, e.tickStop
 	stop = make(chan struct{})
 	e.progressMsg, e.tickStop = ref, stop
-	e.turnStart, e.tools, e.step = start, nil, 0
+	e.turnStart, e.tools, e.step, e.trail = start, nil, 0, statusTrail{}
 	e.pmu.Unlock()
 	if prev != nil {
 		close(prev)
@@ -1490,20 +1556,155 @@ func (e *sessionEntry) replaceProgress(old, fresh chat.MessageRef) bool {
 	return true
 }
 
-// noteActivity records the tools the agent just started — so every later tick
-// keeps showing them instead of dropping back to a bare clock — and returns
-// the message to edit with the line to put in it. ok is false when there is no
-// progress message to render into (stream mode, or a status turn whose
-// placeholder failed to post), and the caller falls back to a standalone
-// notice.
-func (e *sessionEntry) noteActivity(tools []string) (ref chat.MessageRef, text string, ok bool) {
+// noteActivity records the calls the agent just started — so every later tick
+// keeps showing them instead of dropping back to a bare clock. It reports
+// whether there is a progress message to show them in; false (stream mode, or
+// a status turn whose placeholder failed to post) and the caller falls back to
+// a standalone notice. The caller redraws (redrawProgress): recording and
+// rendering are apart so that every render reads the state as it is when its
+// edit goes out, never a snapshot an edit already sent has overtaken.
+func (e *sessionEntry) noteActivity(calls []daemon.ToolCall) bool {
 	e.pmu.Lock()
 	defer e.pmu.Unlock()
 	if e.progressMsg.ID == "" || e.turnStart.IsZero() {
-		return chat.MessageRef{}, "", false
+		return false
 	}
-	e.tools, e.step = tools, e.step+1
-	return e.progressMsg, tickText(time.Since(e.turnStart), e.tools, e.step), true
+	e.tools, e.step = toolNames(calls), e.step+1
+	e.trail.add(calls)
+	return true
+}
+
+// noteStatusResults files a frame of results against the turn's trail,
+// reporting whether there is anything to redraw: false with no progress
+// message, or no result that answered a call the trail holds.
+func (e *sessionEntry) noteStatusResults(results []daemon.ToolResult) bool {
+	e.pmu.Lock()
+	defer e.pmu.Unlock()
+	return e.progressMsg.ID != "" && !e.turnStart.IsZero() && e.trail.file(results)
+}
+
+// statusTrail is a status-mode turn's tool calls, oldest first, with each
+// one's result once it lands (res is parallel to calls, nil where none has).
+// It is what the progress message's steps are drawn from; the line itself
+// still names only the latest frame's tools, as it always has.
+//
+// Names only, like the line: stripped of their argument summaries on the way
+// in, because status mode does not show what the agent runs things with (see
+// activityText), and a summary never stored is one no edit can leak.
+type statusTrail struct {
+	calls []daemon.ToolCall
+	res   []*daemon.ToolResult
+}
+
+// statusTrailMemory bounds the calls a trail keeps. A turn can make hundreds;
+// only the last statusStepsShown groups are drawn, and a result almost always
+// answers one of the latest calls, so the oldest go first. Forgetting one costs
+// a result with nothing to tick off — dropped, as in stream mode.
+const statusTrailMemory = 64
+
+// statusStepsShown is how many steps the progress message draws: the latest
+// few, so a long turn's message stays a glance rather than a scroll.
+const statusStepsShown = 8
+
+// add appends a frame's calls.
+func (t *statusTrail) add(calls []daemon.ToolCall) {
+	t.calls = append(t.calls, stripArgs(calls)...)
+	t.res = append(t.res, make([]*daemon.ToolResult, len(calls))...)
+	if n := len(t.calls) - statusTrailMemory; n > 0 {
+		t.calls = append([]daemon.ToolCall(nil), t.calls[n:]...)
+		t.res = append([]*daemon.ToolResult(nil), t.res[n:]...)
+	}
+}
+
+// file records a frame of results, reporting whether any answered a call. The
+// matching is resolveTool's, over one list instead of several notices: by call
+// id where there is one (newest first, the safe reading of a repeated id), and
+// otherwise the oldest unanswered call of the same name — with every id in the
+// frame filed before any name is guessed at, as applyToolResults does.
+func (t *statusTrail) file(results []daemon.ToolResult) bool {
+	changed := false
+	set := func(i int, r daemon.ToolResult) {
+		t.res[i] = &r
+		changed = true
+	}
+	for _, r := range results {
+		if r.ID == "" {
+			continue
+		}
+		for i := len(t.calls) - 1; i >= 0; i-- {
+			if t.calls[i].ID == r.ID && t.res[i] == nil {
+				set(i, r)
+				break
+			}
+		}
+	}
+	for _, r := range results {
+		if r.ID != "" {
+			continue
+		}
+		for i, c := range t.calls {
+			if c.Name == r.Name && t.res[i] == nil {
+				set(i, r)
+				break
+			}
+		}
+	}
+	return changed
+}
+
+// statusStepsKept is how many steps a kept status message shows: more than a
+// running one, since it is the turn's record now and nothing is redrawing it,
+// but still the latest, so a hundred-call turn stays one readable message.
+const statusStepsKept = 20
+
+// final renders the trail as the turn's record: the latest statusStepsKept
+// steps under head and the turn's step count. A call whose result never
+// arrived is not left drawn as running for good — it reads as finished with
+// the turn, and as failed when the turn was stopped. nil for a trail with no
+// calls, which keeps nothing.
+func (t *statusTrail) final(head string, step int, done bool) *chat.Activity {
+	groups := groupCalls(t.calls, t.res, nil)
+	if len(groups) == 0 {
+		return nil
+	}
+	if n := len(groups) - statusStepsKept; n > 0 {
+		groups = groups[n:]
+	}
+	steps := groupSteps(groups, false)
+	for i := range steps {
+		if steps[i].Status != chat.StepRunning {
+			continue
+		}
+		steps[i].Status = chat.StepDone
+		if !done {
+			steps[i].Status = chat.StepFailed
+		}
+	}
+	switch {
+	case step == 1:
+		head += " · 1 step"
+	case step > 1:
+		head += fmt.Sprintf(" · %d steps", step)
+	}
+	return &chat.Activity{Head: head, Steps: steps}
+}
+
+// activity renders the trail's latest steps under a head carrying the clock and
+// the step count, which the steps themselves do not say. nil for a trail with
+// no calls, so the message stays the plain clock until the first tool.
+func (t *statusTrail) activity(elapsed time.Duration, step int) *chat.Activity {
+	groups := groupCalls(t.calls, t.res, nil)
+	if len(groups) == 0 {
+		return nil
+	}
+	if n := len(groups) - statusStepsShown; n > 0 {
+		groups = groups[n:]
+	}
+	head := workingText + " " + formatElapsed(elapsed)
+	if step > 0 {
+		head += fmt.Sprintf(" · step %d", step)
+	}
+	return &chat.Activity{Head: head, Steps: groupSteps(groups, false)}
 }
 
 // activityNote is one posted tool-activity notice: the message it went into,
@@ -1632,6 +1833,7 @@ type toolEdit struct {
 	note *activityNote
 	ref  chat.MessageRef
 	text string
+	act  *chat.Activity
 }
 
 // applyToolResults files a whole frame of results and returns one edit per
@@ -1674,6 +1876,7 @@ func (e *sessionEntry) applyToolResults(results []daemon.ToolResult) []toolEdit 
 	for i := range edits {
 		n := edits[i].note
 		edits[i].text = timedActivityText(n.calls, n.res, n.took, n.detail)
+		edits[i].act = noticeActivity(n.calls, n.res, n.took, n.detail)
 	}
 	return edits
 }
@@ -1682,17 +1885,17 @@ func (e *sessionEntry) applyToolResults(results []daemon.ToolResult) []toolEdit 
 // ok is false once the turn has ended, which is what stops a tick that fired
 // just as the reply landed from resurrecting a deleted placeholder. Indicator
 // mode gets the clock alone — naming tools is what status mode is for.
-func (e *sessionEntry) tickRender(mode ProgressMode) (ref chat.MessageRef, text string, ok bool) {
+func (e *sessionEntry) tickRender(mode ProgressMode) (ref chat.MessageRef, text string, act *chat.Activity, ok bool) {
 	e.pmu.Lock()
 	defer e.pmu.Unlock()
 	if e.progressMsg.ID == "" || e.turnStart.IsZero() {
-		return chat.MessageRef{}, "", false
+		return chat.MessageRef{}, "", nil, false
 	}
-	tools, step := e.tools, e.step
+	elapsed := time.Since(e.turnStart)
 	if mode != ProgressStatus {
-		tools, step = nil, 0
+		return e.progressMsg, tickText(elapsed, nil, 0), nil, true
 	}
-	return e.progressMsg, tickText(time.Since(e.turnStart), tools, step), true
+	return e.progressMsg, tickText(elapsed, e.tools, e.step), e.trail.activity(elapsed, e.step), true
 }
 
 // NewRouter builds a Router. progress selects long-turn feedback (ProgressOff
@@ -2304,11 +2507,11 @@ func (r *Router) tick(ctx context.Context, e *sessionEntry, conv string, start t
 			return
 		case <-timer.C:
 		}
-		ref, text, ok := e.tickRender(r.progressFor(e.channel))
+		ok, err := r.redrawProgress(ctx, e, conv, r.progressFor(e.channel))
 		if !ok {
 			return // the turn ended between the tick firing and this read
 		}
-		if err := r.editProgress(ctx, e, conv, ref, text); err != nil {
+		if err != nil {
 			r.logf.Warnf("progress %s: tick: %v", conv, err)
 			interval = min(interval*2, progressTickMaxBackoff)
 		} else {
@@ -2434,36 +2637,113 @@ func (r *Router) retireProgress(ctx context.Context, e *sessionEntry, conv strin
 	// finds the message no longer current and leaves it alone.
 	e.emu.Lock()
 	defer e.emu.Unlock()
-	ref, start := e.takeProgressStart()
+	ref, start, trail, step := e.takeProgressTurn()
 	if ref.ID == "" {
+		return
+	}
+	if r.keepProgress(ctx, e, conv, ref, start, trail, step, done) {
 		return
 	}
 	r.retireMessage(ctx, conv, ref, start, done)
 }
 
-// editProgress edits the progress message to text, if ref is still the
-// entry's current one, ordered against every other editor (emu).
-func (r *Router) editProgress(ctx context.Context, e *sessionEntry, conv string, ref chat.MessageRef, text string) error {
+// keepProgress finalises a status-mode message that drew steps into the turn's
+// record, instead of retiring it: the final line over every step the turn took,
+// none of them left running. A plain clock says nothing once the answer is in;
+// a list of what the agent ran does, so it stays, above the answer. Only where
+// the adapter draws steps — anywhere else the message is the clock alone — and
+// only for a turn that ran a tool, which is also what confines it to status
+// mode: no other mode fills the trail. false when it kept nothing, and the
+// caller retires the message as before; a failed edit is one of those, so a
+// message that could not be finalised is not left frozen mid-turn.
+//
+// The text says what the steps do, as Reply.Activity promises: a client that
+// cannot draw the cards, or a Slack that refuses them, still shows the record
+// rather than a bare "Done" line nobody asked to keep.
+//
+// Known gaps, each falling back to the old retire: the record is not kept for a
+// turn answered with a message queued behind it (the next turn takes the
+// message over and its clock replaces the steps), nor for a turn that ended
+// without an answer and is cleared as stale when the next one starts.
+//
+// The caller holds emu.
+func (r *Router) keepProgress(ctx context.Context, e *sessionEntry, conv string, ref chat.MessageRef, start time.Time, trail statusTrail, step int, done bool) bool {
+	if !r.drawsActivity() {
+		return false
+	}
+	act := trail.final(finalLine(start, done), step, done)
+	if act == nil {
+		return false
+	}
+	if err := r.out.Update(ctx, ref, chat.Reply{Conversation: conv, Text: stepsText(act), Kind: chat.KindActivity, Activity: act}); err != nil {
+		r.logf.Warnf("progress %s: keep: %v", conv, err)
+		return false
+	}
+	return true
+}
+
+// stepsText is an Activity as text: its head, then a line per step with the
+// mark the notices use for its state. Titles are boldName'd names with a count
+// or an exit status, so they carry no markup of their own.
+func stepsText(a *chat.Activity) string {
+	lines := []string{a.Head}
+	for _, s := range a.Steps {
+		mark := markRunning
+		switch s.Status {
+		case chat.StepDone:
+			mark = markOK
+		case chat.StepFailed:
+			mark = markFailed
+		}
+		lines = append(lines, mark+" "+s.Title)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// finalLine is what a retired placeholder says where its clock was: "✔ Done ·
+// 12s", or "✖ Stopped · 12s" for a turn that did not finish. start is when the
+// turn began; zero when unknown, and the line carries no time.
+func finalLine(start time.Time, done bool) string {
+	text := markFailed + " Stopped"
+	if done {
+		text = markOK + " Done"
+	}
+	if !start.IsZero() {
+		text += " · " + formatElapsed(time.Since(start))
+	}
+	return text
+}
+
+// redrawProgress renders the progress message from the turn's state as it is
+// now and edits it, ordered against every other editor (emu). ok is false when
+// there is no message to edit — the turn ended, or never had one.
+//
+// The render is inside the lock, not handed in from outside it. A tick that
+// rendered first and edited second could otherwise land after a result's edit
+// that rendered later, and put a step the result had ticked off back to
+// running until the next edit came along. Rendered under emu, the edits go out
+// in order and each shows everything recorded before it.
+func (r *Router) redrawProgress(ctx context.Context, e *sessionEntry, conv string, mode ProgressMode) (ok bool, err error) {
 	e.emu.Lock()
 	defer e.emu.Unlock()
-	if e.currentProgress().ID != ref.ID {
-		return nil // retired or replaced while this edit waited
+	ref, text, act, ok := e.tickRender(mode)
+	if !ok {
+		return false, nil
 	}
-	return r.out.Update(ctx, ref, chat.Reply{Conversation: conv, Text: text, Kind: chat.KindProgress})
+	return true, r.out.Update(ctx, ref, chat.Reply{Conversation: conv, Text: text, Kind: chat.KindProgress, Activity: act})
+}
+
+// drawsActivity reports whether the adapter renders Reply.Activity.
+func (r *Router) drawsActivity() bool {
+	d, ok := r.out.(chat.DrawsActivity)
+	return ok && d.DrawsActivity()
 }
 
 // retireMessage deletes a placeholder, or finalises it where deleting leaves a
 // trace. start is when its turn began; zero when unknown.
 func (r *Router) retireMessage(ctx context.Context, conv string, ref chat.MessageRef, start time.Time, done bool) {
 	if t, ok := r.out.(chat.DeleteLeavesTrace); ok && t.DeleteLeavesTrace() {
-		text := markFailed + " Stopped"
-		if done {
-			text = markOK + " Done"
-		}
-		if !start.IsZero() {
-			text += " · " + formatElapsed(time.Since(start))
-		}
-		if err := r.out.Update(ctx, ref, chat.Reply{Conversation: conv, Text: text, Kind: chat.KindActivity}); err != nil {
+		if err := r.out.Update(ctx, ref, chat.Reply{Conversation: conv, Text: finalLine(start, done), Kind: chat.KindActivity}); err != nil {
 			r.logf.Warnf("progress %s: finalise: %v", conv, err)
 		}
 		return
@@ -2656,11 +2936,11 @@ func (r *Router) reanchorProgress(ctx context.Context, e *sessionEntry, conv str
 		// a trace every move would leave one in the thread. It stays put.
 		return
 	}
-	old, text, ok := e.tickRender(mode)
+	old, text, act, ok := e.tickRender(mode)
 	if !ok {
 		return // no placeholder outstanding: nothing to move
 	}
-	fresh, err := r.out.Send(ctx, chat.Reply{Conversation: conv, Text: text, Kind: chat.KindProgress})
+	fresh, err := r.out.Send(ctx, chat.Reply{Conversation: conv, Text: text, Kind: chat.KindProgress, Activity: act})
 	r.metrics.recordReply(err)
 	if err != nil {
 		r.logf.Warnf("progress %s: re-anchor: %v", conv, err)
@@ -2691,8 +2971,8 @@ func (r *Router) reanchorProgress(ctx context.Context, e *sessionEntry, conv str
 // where the distinction earns its icon.
 func (r *Router) postActivity(ctx context.Context, e *sessionEntry, conv string, mode ProgressMode, calls []daemon.ToolCall) {
 	if mode == ProgressStatus {
-		if ref, text, ok := e.noteActivity(toolNames(calls)); ok {
-			if err := r.editProgress(ctx, e, conv, ref, text); err != nil {
+		if e.noteActivity(calls) {
+			if _, err := r.redrawProgress(ctx, e, conv, mode); err != nil {
 				r.logf.Warnf("relay %s: status activity: %v", conv, err)
 			}
 			return
@@ -2704,7 +2984,12 @@ func (r *Router) postActivity(ctx context.Context, e *sessionEntry, conv string,
 	// start underneath.
 	turn := e.turnSeq.Load()
 	seen := time.Now() // before the Send, which is the gateway's time and not the call's
-	ref, err := r.out.Send(ctx, chat.Reply{Conversation: conv, Text: activityText(calls, nil, detail), Kind: chat.KindActivity})
+	ref, err := r.out.Send(ctx, chat.Reply{
+		Conversation: conv,
+		Text:         activityText(calls, nil, detail),
+		Kind:         chat.KindActivity,
+		Activity:     noticeActivity(calls, nil, nil, detail),
+	})
 	r.metrics.recordReply(err)
 	if err != nil {
 		r.logf.Warnf("relay %s: activity: %v", conv, err)
@@ -2817,7 +3102,7 @@ func (r *Router) footLastAnswer(ctx context.Context, e *sessionEntry, conv strin
 // state of every mode but stream, and of a stream that connected mid-turn.
 func (r *Router) postToolResults(ctx context.Context, e *sessionEntry, conv string, results []daemon.ToolResult) {
 	for _, ed := range e.applyToolResults(results) {
-		if err := r.out.Update(ctx, ed.ref, chat.Reply{Conversation: conv, Text: ed.text, Kind: chat.KindActivity}); err != nil {
+		if err := r.out.Update(ctx, ed.ref, chat.Reply{Conversation: conv, Text: ed.text, Kind: chat.KindActivity, Activity: ed.act}); err != nil {
 			// Logged and left filed. The results stay recorded against the
 			// notice, so the next result to land on it re-renders the whole
 			// thing and carries this verdict in — an edit that failed heals on
@@ -2825,6 +3110,19 @@ func (r *Router) postToolResults(ctx context.Context, e *sessionEntry, conv stri
 			// that later render would draw this call as still running.
 			r.logf.Warnf("relay %s: tool result: %v", conv, err)
 		}
+	}
+}
+
+// statusToolResults files a frame of results against a status-mode turn's
+// trail and redraws the progress message's steps. A result the trail is not
+// waiting for changes nothing and edits nothing; a failed edit is logged and
+// healed by the next one, which renders the whole trail again.
+func (r *Router) statusToolResults(ctx context.Context, e *sessionEntry, conv string, results []daemon.ToolResult) {
+	if !e.noteStatusResults(results) {
+		return
+	}
+	if _, err := r.redrawProgress(ctx, e, conv, ProgressStatus); err != nil {
+		r.logf.Warnf("relay %s: status tool result: %v", conv, err)
 	}
 }
 
@@ -3480,14 +3778,20 @@ func (r *Router) relay(ctx context.Context, conv string, e *sessionEntry, owner 
 				}
 				// Tool results ride the same event, under the "user" role the
 				// daemon gives anything the model did not author (#36). Stream
-				// mode only: it is the one mode that registers a notice for a
-				// result to tick off, so anywhere else this would be a parse
-				// and a watermark advance for a message never sent.
-				if mode == ProgressStream {
+				// mode ticks them off the notice that announced the call.
+				// Status mode files them against the turn's trail, which only
+				// the steps show — so only for an adapter that draws them;
+				// for any other this would be a parse, a watermark advance and
+				// an edit that changes nothing.
+				if mode == ProgressStream || r.drawsActivity() {
 					if results := daemon.ToolResults(ev.Data); len(results) > 0 {
 						e.noticed.Store(reply.Seq)
 						r.markDirty()
-						r.postToolResults(ctx, e, conv, results)
+						if mode == ProgressStream {
+							r.postToolResults(ctx, e, conv, results)
+						} else {
+							r.statusToolResults(ctx, e, conv, results)
+						}
 					}
 				}
 			}

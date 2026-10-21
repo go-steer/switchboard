@@ -667,6 +667,24 @@ clock isn't moved below narration on Chat. Moving it is a post and a delete,
 so it stays where it is. On Slack, where a delete leaves nothing, the
 placeholder is deleted as before.
 
+**On Slack, tool activity is drawn as task cards.** Slack's `task_card` block
+draws a tool as a card with a status: in progress, complete or error. In
+`status`, once the turn calls a tool, the one message becomes the clock and
+step count over a card for each of the turn's latest eight tools, named but
+with no arguments. Each card ticks off as its result lands, so a failed call
+shows as failed while the turn carries on. When the answer lands, the message
+is kept rather than deleted, finalised as **✔ Done · 40s · 5 steps** (or
+**✖ Stopped**) over the turn's latest twenty cards, so the thread keeps a
+record of what the agent ran, just above the answer. A turn that called no
+tool has only a clock, and that is deleted as before. In `stream`, each notice is a card
+per call, with the argument and the time it took in the card's details and the
+"Ran 2 tools" count above a frame of several. The text is unchanged and still
+goes with the cards, for notifications and for a client that cannot draw
+them. If Slack refuses the cards, the message goes as that text, and the
+gateway draws tool activity as text until it restarts. Cards need no
+extra scope or manifest setting (measured from a plain bot). Google Chat
+draws no cards.
+
 The clock is what makes a long turn readable. A turn that runs for four minutes
 without calling a tool has nothing else to say for itself, and a static
 "⏳ Working…" looks exactly like a turn that died. The clock counts from when
@@ -757,17 +775,18 @@ Chat keeps them apart.
 
 A finished call says how long it ran, measured at the gateway from when its
 call arrived to when its result did, so it includes the stream's latency both
-ways (and any reconnect in between). A call under a tenth of a second shows no
-time, and neither does a collapsed `×3` call, whose calls each took their own
-time.
+ways (and any reconnect in between). A call under a tenth of a second shows `<0.1s`,
+so every finished call carries a time. A collapsed `×3` call shows none, since
+its calls each took their own time.
 
 Calls that a reader could not tell apart — same tool, same argument, same
 verdict — collapse to **bash** ×3 rather than repeating the block
 (`` `bash` ×3 `` in `status`'s terse line).
 
-**The notices are permanent, by decision.** `indicator` and `status` clean up
-after themselves; `stream` accumulates, and the trail it leaves is the reason to
-choose it over the other two. Retiring the notices when the answer lands would
+**The notices are permanent, by decision.** `indicator` cleans up after
+itself, and so does `status` except for the one card message it keeps on Slack;
+`stream` accumulates, and the trail it leaves is the reason to choose it over
+the other two. Retiring the notices when the answer lands would
 make `stream` a noisier `indicator`. A thread that wants no residue should use
 `indicator` or `off`.
 

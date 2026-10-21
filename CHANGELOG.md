@@ -43,6 +43,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     - **Admin API:** `GET /v1/agents/{name}/tasks` lists an agent's tasks,
       and `DELETE /v1/agents/{name}/tasks/{task}` deletes one of them.
 
+### Changed
+
+- **Slack draws tool activity as task cards.** `status` mode's message becomes
+  the clock over a card for each of the turn's latest tools (names only),
+  ticked off complete or error as results land. When the answer arrives, the
+  message is kept as "✔ Done · 40s · 5 steps" over the turn's cards instead of
+  being deleted, as a record of what the agent ran. `stream` mode's notices become
+  a card per call, with the argument and duration in its details. The text
+  still goes with the cards and is what posts if Slack refuses them. Google
+  Chat draws no cards. A new `chat.Reply.Activity` carries the steps, so an
+  adapter draws them without the router knowing how.
+- A `stream` notice's call that finished in under a tenth of a second now
+  shows `⏱ <0.1s` instead of no time, so every finished call carries one.
+
 ## [v0.8.0] — 2026-10-21
 
 A release about managing agents without restarting the gateway, and about

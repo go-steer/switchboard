@@ -94,6 +94,10 @@ type Adapter struct {
 	// for want of chat:write.customize; see identity.go.
 	noCustomize atomic.Bool
 
+	// noCards is set once Slack refuses task cards, after which tool activity
+	// goes as text; see activity.go.
+	noCards atomic.Bool
+
 	// botUserID is this bot's own user ID, resolved at Run start and
 	// used to ignore our own posts (loop guard).
 	botUserID string
@@ -394,6 +398,24 @@ func (a *Adapter) Send(ctx context.Context, r chat.Reply) (chat.MessageRef, erro
 		a.logf.Warnf("slack: decision blocks rejected for %s (%v); retrying as text", r.Conversation, err)
 	}
 
+	// Tool activity is drawn as task cards whatever RichBlocks says, for the
+	// reason a question is: the cards are what the reply is, not a styling of
+	// its prose. Rejected, it goes as the same text the cards were drawn from.
+	if blocks := a.cardBlocks(r); blocks != nil {
+		opts := append(threadOpt(thread),
+			slack.MsgOptionBlocks(toSlackBlocks(blocks)...),
+			slack.MsgOptionText(clamp(rendered, maxSectionText), false),
+		)
+		ts, err := a.postAs(ctx, channel, r.Agent, opts...)
+		if err == nil {
+			return chat.MessageRef{Conversation: landedKey(channel, thread, ts), ID: ts}, nil
+		}
+		if !isBlockRejection(err) {
+			return chat.MessageRef{}, fmt.Errorf("slack: post activity to %s: %w", r.Conversation, platformErr(err))
+		}
+		a.refuseCards(r.Conversation, err)
+	}
+
 	// Some of a chunked reply is already in the thread: finish it as chunks.
 	// Trying blocks first would post the whole reply again on top of the
 	// parts that are there, if the blocks render now succeeds where it was
@@ -481,6 +503,24 @@ func (a *Adapter) Update(ctx context.Context, ref chat.MessageRef, r chat.Reply)
 		return fmt.Errorf("slack: malformed conversation key %q", ref.Conversation)
 	}
 	rendered := toMrkdwn(r.Text)
+
+	// As in Send: activity as task cards whatever RichBlocks says. An edit
+	// that carries no Activity — the clock before the first tool, a retired
+	// placeholder's final line — takes the paths below, and the text path's
+	// explicit empty block set is what takes the cards down.
+	if blocks := a.cardBlocks(r); blocks != nil {
+		_, _, _, err := a.api.UpdateMessageContext(ctx, channel, ref.ID,
+			slack.MsgOptionBlocks(toSlackBlocks(blocks)...),
+			slack.MsgOptionText(clamp(rendered, maxSectionText), false),
+		)
+		if err == nil {
+			return nil
+		}
+		if !isBlockRejection(err) {
+			return fmt.Errorf("slack: update activity in %s: %w", ref.Conversation, platformErr(err))
+		}
+		a.refuseCards(ref.Conversation, err)
+	}
 
 	if a.richBlocks {
 		blocks := sanitizeBlocks(withUsageFooter(renderBlocks(r.Text, toMrkdwn), r.Usage))
