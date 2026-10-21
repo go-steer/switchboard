@@ -516,8 +516,16 @@ template, and each conversation gets a task of its own.
     its last turn.
   - Output the agent produces between turns, which nothing in the session
     contract sends today, reaches the thread late, with the next message.
-- **Not yet:** one task per person or one shared task (`scope`, #172), and
-  deleting old tasks (#173).
+- **`ax.scope`** says which conversations share a task:
+  - `thread` (the default): a task per conversation.
+  - `owner`: a task per person, their personal agent. Every thread they start
+    with it is a session in that one task, which holds their history and
+    credentials. Its threads answer their owner alone, because the agent in
+    the task is single-user and anyone else would act with the owner's
+    access. Others posting there are told to start their own thread.
+  - `shared`: one task for everyone. Every caller shares one sandbox, its
+    credentials and its history, and startup warns.
+- **Not yet:** deleting old tasks (#173).
 - **An ax agent added through the admin API** must name a template under
   `--admin-ax-template-dir`, because the gateway reads that file. The check
   is on the path, so a symlink inside the directory is followed: only

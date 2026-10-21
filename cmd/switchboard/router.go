@@ -1873,6 +1873,15 @@ func (r *Router) Handle(ctx context.Context, msg chat.Message) (err error) {
 	defer func() { r.auditTurn(msg, entry, err) }()
 
 	entry, err = r.session(ctx, msg.Conversation, msg.Channel, msg.Caller)
+	if err == nil && r.personalToSomeoneElse(entry, msg.Caller) {
+		// A personal agent's thread answers its owner only: mast in a task
+		// is single-user and holds its owner's credentials and history, so
+		// anyone else driving it would act with the owner's access (#172).
+		if sendErr := r.surfaceNotice(ctx, msg.Conversation, "This thread talks to its starter's personal agent, which answers them alone. Start a thread of your own to talk to yours."); sendErr != nil {
+			r.logf.Errorf("handle %s: surface personal agent: %v", msg.Conversation, sendErr)
+		}
+		return nil
+	}
 	if err != nil {
 		if errors.Is(err, errNoAgentHere) {
 			if sendErr := r.surfaceNotice(ctx, msg.Conversation, "No agent is available in this channel: its allowed agents exclude its default. An admin needs to fix the channel's agent settings."); sendErr != nil {
@@ -2892,7 +2901,16 @@ func (r *Router) sessionAs(ctx context.Context, conv, channel, caller, agent str
 	if a, ok := set.lookup(e.agent); ok && a.ax != nil {
 		// An ax agent: the conversation's task, started (or woken, or found)
 		// before the session it will hold.
-		e.task = a.ax.taskName(a.name, r.gatewayID, conv)
+		if a.ax.scope == axScopeOwner && caller == "" {
+			// Nobody to own it: an owner-scope task is named by its owner.
+			e.err = fmt.Errorf("%s is a personal agent, and this message names no caller", a.label())
+			r.mu.Lock()
+			delete(r.sessions, conv)
+			r.mu.Unlock()
+			close(e.ready)
+			return e, e.err
+		}
+		e.task = a.ax.taskName(a.name, r.gatewayID, conv, caller)
 		if _, e.err = r.startAXTask(ctx, conv, a, e); e.err != nil {
 			r.mu.Lock()
 			delete(r.sessions, conv)

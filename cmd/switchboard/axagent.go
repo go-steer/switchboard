@@ -55,8 +55,10 @@ type AXConfig struct {
 	// TaskTemplateFile is a full ax Task manifest every task is created
 	// from. A file, because it carries the agent's token in its env.
 	TaskTemplateFile string `json:"task_template_file"`
-	// Scope is which conversations share a task: "thread" (the default), a
-	// task per conversation. owner and shared follow (#172).
+	// Scope is which conversations share a task (#172): "thread" (the
+	// default), a task per conversation; "owner", a task per person — their
+	// personal agent, every thread they start with it a session in it; or
+	// "shared", one task for everyone.
 	Scope string `json:"scope,omitempty"`
 	// ReadyTimeout bounds a task's start; empty is two minutes.
 	ReadyTimeout string `json:"ready_timeout,omitempty"`
@@ -76,7 +78,12 @@ const minStreamLinger = 10 * time.Second
 // after its last traffic.
 const defaultStreamLinger = time.Minute
 
-const axScopeThread = "thread"
+// The scopes.
+const (
+	axScopeThread = "thread"
+	axScopeOwner  = "owner"
+	axScopeShared = "shared"
+)
 
 // axAgent is what an ax agent holds instead of a daemon client: the ax-server
 // client, and each task's clients, made on first use.
@@ -116,8 +123,15 @@ func (x *axAgent) forTask(task string) (*taskClients, error) {
 }
 
 // taskName is the task a conversation of this agent lives in: deterministic,
-// so a restart or another gateway pod arrives at the same one.
-func (x *axAgent) taskName(agentName, gateway, conv string) string {
+// so a restart or another gateway pod arrives at the same one. caller is who
+// starts the conversation, which names an owner-scope task.
+func (x *axAgent) taskName(agentName, gateway, conv, caller string) string {
+	switch x.scope {
+	case axScopeOwner:
+		return ax.TaskName("sb-"+agentName+"-u", gateway, caller)
+	case axScopeShared:
+		return ax.TaskName("sb-"+agentName+"-shared", gateway)
+	}
 	return ax.TaskName("sb-"+agentName, gateway, conv)
 }
 
@@ -173,8 +187,10 @@ func buildAXAgent(ac AgentConfig, b agentBuilder) (*axAgent, error) {
 	if scope == "" {
 		scope = axScopeThread
 	}
-	if scope != axScopeThread {
-		return nil, fmt.Errorf(".ax.scope %q: only %q is supported so far", c.Scope, axScopeThread)
+	switch scope {
+	case axScopeThread, axScopeOwner, axScopeShared:
+	default:
+		return nil, fmt.Errorf(".ax.scope %q: want %q, %q or %q", c.Scope, axScopeThread, axScopeOwner, axScopeShared)
 	}
 	var ready time.Duration
 	if c.ReadyTimeout != "" {
@@ -312,6 +328,13 @@ func (r *Router) startAXTask(ctx context.Context, conv string, a *agent, e *sess
 	}
 	r.logf.Infof("session %s: task %s ready for agent %s in %s", conv, e.task, a.name, time.Since(start).Round(time.Millisecond))
 	return created, nil
+}
+
+// personalToSomeoneElse reports whether e is an owner-scope conversation and
+// caller is not its owner.
+func (r *Router) personalToSomeoneElse(e *sessionEntry, caller string) bool {
+	a, ok := r.agents().lookup(e.agent)
+	return ok && a.ax != nil && a.ax.scope == axScopeOwner && e.owner != "" && caller != e.owner
 }
 
 // axStartNoticeAfter is how long a task start runs before the thread is told.

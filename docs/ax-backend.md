@@ -187,6 +187,11 @@ the contract sends today. The doc records it so the trade is deliberate.
 
 ### Identity
 
+_As built (#172):_ an owner-scope conversation answers its owner only. A
+message from anyone else in that thread gets a notice and is not sent: mast in
+a task is single-user, and the personal agent holds its owner's credentials
+and history.
+
 - **mast in a task is single-user.** The task boundary is the isolation.
   - `thread` scope: one conversation's sandbox, credentials and history.
   - `owner` scope: one person's.

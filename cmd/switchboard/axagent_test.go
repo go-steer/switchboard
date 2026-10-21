@@ -331,7 +331,7 @@ func TestAXAgentEntriesAreValidated(t *testing.T) {
 		"a daemon_url too":    func(c *AgentConfig) { c.DaemonURL = "http://x:1" },
 		"an auth block":       func(c *AgentConfig) { c.Auth = &AgentAuth{Method: authPKI} },
 		"no token_env":        func(c *AgentConfig) { c.TokenEnv = "" },
-		"owner scope (#172)":  func(c *AgentConfig) { ax := *c.AX; ax.Scope = "owner"; c.AX = &ax },
+		"an unknown scope":    func(c *AgentConfig) { ax := *c.AX; ax.Scope = "team"; c.AX = &ax },
 		"a bad timeout":       func(c *AgentConfig) { ax := *c.AX; ax.ReadyTimeout = "soon"; c.AX = &ax },
 		"a long timeout":      func(c *AgentConfig) { ax := *c.AX; ax.ReadyTimeout = "11m"; c.AX = &ax },
 		"no template":         func(c *AgentConfig) { ax := *c.AX; ax.TaskTemplateFile = "/nope.yaml"; c.AX = &ax },

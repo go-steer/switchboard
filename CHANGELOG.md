@@ -26,7 +26,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     - **After:** it reattaches on the next message, waking the task, and
       resumes the stream where it left off.
     - The idle reaper now also honours what the daemon reports.
-  - Owner and shared scopes and task cleanup follow (#172, #173).
+  - **Personal and shared agents** (#172).
+    - **`ax.scope: "owner"`** gives each person a task of their own, and every
+      thread they start with the agent is a session in it. Its threads answer
+      their owner only.
+    - **`"shared"`** is one task for everyone; startup warns.
+  - Task cleanup follows (#173).
 
 ## [v0.8.0] — 2026-10-21
 
