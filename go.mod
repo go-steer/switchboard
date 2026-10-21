@@ -1,6 +1,6 @@
 module github.com/go-steer/switchboard
 
-go 1.26.9
+go 1.26.10
 
 require (
 	cloud.google.com/go/pubsub v1.51.0
