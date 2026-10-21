@@ -9,6 +9,9 @@ require (
 	github.com/slack-go/slack v0.27.0
 	github.com/spiffe/go-spiffe/v2 v2.7.0
 	google.golang.org/api v0.292.0
+	google.golang.org/grpc v1.83.2
+	google.golang.org/protobuf v1.36.11
+	sigs.k8s.io/yaml v1.6.0
 )
 
 require (
@@ -42,6 +45,7 @@ require (
 	go.opentelemetry.io/otel v1.44.0 // indirect
 	go.opentelemetry.io/otel/metric v1.44.0 // indirect
 	go.opentelemetry.io/otel/trace v1.44.0 // indirect
+	go.yaml.in/yaml/v2 v2.4.4 // indirect
 	golang.org/x/crypto v0.57.0 // indirect
 	golang.org/x/net v0.60.0 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
@@ -52,6 +56,4 @@ require (
 	google.golang.org/genproto v0.0.0-20260319201613-d00831a3d3e7 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260630182238-925bb5da69e7 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260803160001-6ac0973c030d // indirect
-	google.golang.org/grpc v1.83.2 // indirect
-	google.golang.org/protobuf v1.36.11 // indirect
 )
