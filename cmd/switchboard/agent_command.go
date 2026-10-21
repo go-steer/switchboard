@@ -123,6 +123,13 @@ func (r *Router) startAgentThread(ctx context.Context, cmd chat.Command, a *agen
 		return fmt.Errorf("the starter landed in no thread (%q)", ref.Conversation)
 	}
 	conv, starter := ref.Conversation, ref
+	if a.ax != nil && a.ax.scope == axScopeOwner && cmd.Caller != "" {
+		// Claimed the moment the thread exists, so a reply racing the
+		// session cannot make someone else its owner (caught in review).
+		r.mu.Lock()
+		r.claimOwnerLocked(conv, cmd.Caller)
+		r.mu.Unlock()
+	}
 	e, err := r.sessionAs(ctx, conv, cmd.Channel, cmd.Caller, a.name)
 	if err != nil {
 		// Nothing behind it: take the starter down rather than leave a

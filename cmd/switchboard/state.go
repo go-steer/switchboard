@@ -87,6 +87,10 @@ type routerState struct {
 	Sessions  map[string]sessionRecord `json:"sessions,omitempty"`
 	Bindings  []bindingRecord          `json:"bindings,omitempty"`
 	Overrides map[string]string        `json:"overrides,omitempty"`
+	// Owners is who each personal agent's thread belongs to (#172): kept
+	// apart from Sessions, and far longer, because a session is rebuilt and
+	// forgotten and the thread's owner must not be.
+	Owners map[string]threadOwner `json:"owners,omitempty"`
 }
 
 // sessionRecord is what it takes to re-attach one conversation.
@@ -333,6 +337,12 @@ func (r *Router) snapshot() routerState {
 		}
 		st.Bindings = append(st.Bindings, bindingRecord{Conversation: conv, Session: sessionRef(b.sess), Since: b.since, Agent: b.agent})
 	}
+	if len(r.owners) > 0 {
+		st.Owners = make(map[string]threadOwner, len(r.owners))
+		for conv, o := range r.owners {
+			st.Owners[conv] = o
+		}
+	}
 	r.mu.Unlock()
 
 	r.omu.Lock()
@@ -467,6 +477,15 @@ func (r *Router) restore(ctx context.Context, st routerState, now time.Time) (re
 		}
 	}
 	dormant = len(r.dormant) - len(recent)
+	for conv, o := range st.Owners {
+		if o.Owner == "" || now.Sub(o.Since) > ownerMaxAge {
+			continue
+		}
+		if r.owners == nil {
+			r.owners = make(map[string]threadOwner)
+		}
+		r.owners[conv] = o
+	}
 	r.mu.Unlock()
 
 	r.omu.Lock()
