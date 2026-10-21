@@ -149,11 +149,24 @@ today.
 ### Streams scoped to the turn
 
 _As built (#171):_ switchboard's existing release-and-revive path does this.
-An ax conversation is released, closing both streams, `ax.stream_linger`
-(default 1m) after its last traffic, once no turn is running and no answer is
-pending. The next message revives it, which wakes the task and resumes the
-stream from its cursor. The linger must undercut the template's
-`suspendAfter`. A sweep every 10s does it, with or without `--state-dir`.
+- **When:** an ax conversation is released, closing both streams,
+  `ax.stream_linger` (default 1m, at least 10s) after its last traffic.
+- **Only if nothing is going on:**
+  - no turn is running;
+  - no answer is pending;
+  - the daemon's last status-update wasn't working or parked;
+  - no turn is being set up;
+  - no approval question is unanswered.
+
+  switchboard's own idea of a turn can read idle while the daemon still works
+  (after a reconnect, narration is taken as the answer), so the daemon's word
+  counts too.
+- **Revival:** the next message revives the conversation, which wakes the task
+  and resumes the stream from its cursor.
+- **Suspension timing:** ax's idle clock starts when the stream closes, so a
+  task suspends about linger plus `suspendAfter` after its last turn.
+- **Not every template:** a template without `spec.idle` isn't swept.
+- **The sweep** runs every 10s, with or without `--state-dir`.
 
 switchboard holds each conversation's event stream open between turns, and its
 approval stream too, until `--session-idle-ttl` (12h by default). An open

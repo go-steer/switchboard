@@ -108,11 +108,31 @@ func (r *Router) releaseIdleAX(now time.Time) int {
 	set := r.agents()
 	return r.release(now, func(e *sessionEntry) bool {
 		a, ok := set.lookup(e.agent)
-		if !ok || a.ax == nil || e.task == "" {
+		// A template without spec.idle never suspends its tasks, so letting
+		// go of the streams would only cost a revive (caught in review).
+		if !ok || a.ax == nil || !a.ax.idle || e.task == "" {
 			return false
 		}
 		return e.touched.Load() <= now.Add(-a.ax.linger).UnixNano()
 	})
+}
+
+// busy reports what keeps a conversation's streams open beyond switchboard's
+// own idea of a turn: the daemon saying it is working or parked, a turn being
+// set up, or a question on screen that nobody has answered — the prompt
+// stream is what would carry the next one (caught in review).
+func (e *sessionEntry) busy() bool {
+	if e.agentBusy.Load() || e.pins.Load() > 0 {
+		return true
+	}
+	e.qmu.Lock()
+	defer e.qmu.Unlock()
+	for _, a := range e.asked {
+		if a.settled == unsettled && a.posted {
+			return true
+		}
+	}
+	return false
 }
 
 // release moves to dormant every live conversation idle reports as idle and
@@ -131,7 +151,7 @@ func (r *Router) release(now time.Time, idle func(*sessionEntry) bool) int {
 		// thread has no human turn to keep it live, and releasing its relay
 		// would silently stop its output reaching the thread until somebody
 		// spoke there. Bindings are already capped (maxBindings).
-		if e.adopted || e.err != nil || e.turnInFlight() || e.awaitingAnswer() || !idle(e) {
+		if e.adopted || e.err != nil || e.turnInFlight() || e.awaitingAnswer() || e.busy() || !idle(e) {
 			continue
 		}
 		r.dormant[conv] = e.record()

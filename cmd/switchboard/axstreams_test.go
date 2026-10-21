@@ -43,11 +43,35 @@ type streamRouter struct {
 	seq     int64
 	streams map[string]chan string // actor -> frames for its open stream
 	sinces  []string               // the since of every stream opened
+	history map[string][]seqFrame  // actor -> agent frames, replayed after since
+}
+
+// seqFrame is an agent frame and its seq, for replay.
+type seqFrame struct {
+	seq   int64
+	frame string
+}
+
+const (
+	frameStreaming = "event: status-update\ndata: {\"turn_state\":\"streaming\"}\n\n"
+	frameIdle      = "event: status-update\ndata: {\"turn_state\":\"idle\"}\n\n"
+)
+
+// answer queues an agent answer to actor's stream, as the daemon would, and
+// keeps it for a reconnect to replay.
+func (r *streamRouter) answer(actor, text string) {
+	r.mu.Lock()
+	r.seq++
+	seq := r.seq
+	f := fmt.Sprintf("event: agent\ndata: {\"seq\":%d,\"event\":{\"Content\":{\"parts\":[{\"text\":%q}],\"role\":\"model\"},\"Partial\":false}}\n\n", seq, text)
+	r.history[actor] = append(r.history[actor], seqFrame{seq, f})
+	r.mu.Unlock()
+	r.queue(actor) <- f
 }
 
 func newStreamRouter(t *testing.T) *streamRouter {
 	t.Helper()
-	r := &streamRouter{streams: map[string]chan string{}}
+	r := &streamRouter{streams: map[string]chan string{}, history: map[string][]seqFrame{}}
 	r.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		actor := req.Header.Get(ax.ActorHeader)
 		switch {
@@ -61,24 +85,35 @@ func newStreamRouter(t *testing.T) *streamRouter {
 			if r.silent.Load() {
 				return
 			}
+			// mast's pattern: streaming, the answer, the boundary, then the
+			// post-turn state.
+			r.queue(actor) <- frameStreaming
 			r.mu.Lock()
-			r.seq++
-			seq := r.seq
+			n := r.seq + 1
 			r.mu.Unlock()
-			if ch := r.queue(actor); ch != nil {
-				ch <- fmt.Sprintf("event: agent\ndata: {\"seq\":%d,\"event\":{\"Content\":{\"parts\":[{\"text\":\"answer %d\"}],\"role\":\"model\"},\"Partial\":false}}\n\n", seq, seq)
-				ch <- "event: turn-complete\ndata: {\"prompt_id\":\"p\",\"model\":\"m\",\"latency_ms\":5}\n\n"
-			}
+			r.answer(actor, fmt.Sprintf("answer %d", n))
+			r.queue(actor) <- "event: turn-complete\ndata: {\"prompt_id\":\"p\",\"model\":\"m\",\"latency_ms\":5}\n\n"
+			r.queue(actor) <- frameIdle
 		case strings.HasSuffix(req.URL.Path, "/events"):
 			ch := r.queue(actor)
+			since := req.URL.Query().Get("since")
 			r.mu.Lock()
-			r.sinces = append(r.sinces, req.URL.Query().Get("since"))
+			r.sinces = append(r.sinces, since)
+			var replay []string
+			for _, f := range r.history[actor] {
+				if f.seq > atoi(since) {
+					replay = append(replay, f.frame)
+				}
+			}
 			r.mu.Unlock()
 			r.open.Add(1)
 			defer r.open.Add(-1)
 			w.Header().Set("Content-Type", "text/event-stream")
 			w.WriteHeader(http.StatusOK)
 			fmt.Fprintf(w, "event: capabilities\ndata: %s\n\n", capsWithBoundary)
+			for _, f := range replay {
+				fmt.Fprint(w, f)
+			}
 			w.(http.Flusher).Flush()
 			for {
 				select {
@@ -98,6 +133,12 @@ func newStreamRouter(t *testing.T) *streamRouter {
 	}))
 	t.Cleanup(r.srv.Close)
 	return r
+}
+
+func atoi(s string) int64 {
+	var n int64
+	fmt.Sscan(s, &n)
+	return n
 }
 
 // cutStream, queued to a stream, ends it as the atenet router does at its
@@ -141,20 +182,35 @@ func newStreamFixture(t *testing.T) (*axFixture, *streamRouter) {
 	return f, sr
 }
 
-// answered waits for the thread to receive text.
-func answered(t *testing.T, out *fakeSender, text string) {
-	t.Helper()
-	deadline := time.After(5 * time.Second)
-	for {
-		select {
-		case r := <-out.replies:
-			if r.Text == text {
-				return
-			}
-		case <-deadline:
-			t.Fatalf("no %q in the thread", text)
+// thread collects what a fakeSender posts, so a test can wait for one text
+// and still count every other.
+type thread struct {
+	mu   sync.Mutex
+	seen map[string]int
+}
+
+func watch(out *fakeSender) *thread {
+	th := &thread{seen: map[string]int{}}
+	go func() {
+		for r := range out.replies {
+			th.mu.Lock()
+			th.seen[r.Text]++
+			th.mu.Unlock()
 		}
-	}
+	}()
+	return th
+}
+
+func (th *thread) count(text string) int {
+	th.mu.Lock()
+	defer th.mu.Unlock()
+	return th.seen[text]
+}
+
+// answered waits for the thread to receive text.
+func (th *thread) answered(t *testing.T, text string) {
+	t.Helper()
+	waitFor(t, func() bool { return th.count(text) > 0 }, "the thread to receive "+text)
 }
 
 // Once its turn is over and its linger has passed, an ax conversation lets
@@ -162,11 +218,12 @@ func answered(t *testing.T, out *fakeSender, text string) {
 // stream up where it left off, and nothing is delivered twice.
 func TestAnIdleAXConversationLetsGoOfItsTask(t *testing.T) {
 	f, sr := newStreamFixture(t)
+	th := watch(f.out)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	f.say(t, ctx, "C1:1", "hello")
-	answered(t, f.out, "answer 1")
+	th.answered(t, "answer 1")
 	waitFor(t, func() bool {
 		f.r.mu.Lock()
 		e := f.r.sessions["C1:1"]
@@ -188,18 +245,14 @@ func TestAnIdleAXConversationLetsGoOfItsTask(t *testing.T) {
 	}
 
 	f.say(t, ctx, "C1:1", "again")
-	answered(t, f.out, "answer 2")
+	th.answered(t, "answer 2")
 	sr.mu.Lock()
 	defer sr.mu.Unlock()
 	if len(sr.sinces) != 2 || sr.sinces[1] != "1" {
 		t.Errorf("streams opened with since %v, want the second from the first answer", sr.sinces)
 	}
-	select {
-	case r := <-f.out.replies:
-		if r.Text == "answer 1" {
-			t.Error("the first answer was delivered again")
-		}
-	default:
+	if n := th.count("answer 1"); n != 1 {
+		t.Errorf("the first answer was delivered %d times", n)
 	}
 }
 
@@ -230,14 +283,23 @@ func TestTheAXSweepLeavesDaemonAgentsAlone(t *testing.T) {
 // awake, and is refused.
 func TestAStreamLingerMustUndercutIdle(t *testing.T) {
 	f := newAXFixture(t)
-	for _, linger := range []string{"10m", "1h", "soon", "-1s"} {
+	for _, linger := range []string{"5s", "soon", "-1s"} {
 		c := f.cfg
 		axc := *c.AX
 		axc.StreamLinger = linger
 		c.AX = &axc
 		if _, err := buildAgent(c, agentBuilder{ax: &axClients{}}); err == nil {
-			t.Errorf("stream_linger %s: accepted against suspendAfter 10m", linger)
+			t.Errorf("stream_linger %s: accepted", linger)
 		}
+	}
+	// Past suspendAfter only delays suspension (ax's clock starts when the
+	// stream closes): warned about at startup, not refused (caught in review).
+	c0 := f.cfg
+	ax0 := *c0.AX
+	ax0.StreamLinger = "1h"
+	c0.AX = &ax0
+	if _, err := buildAgent(c0, agentBuilder{ax: &axClients{}}); err != nil {
+		t.Errorf("stream_linger 1h: %v", err)
 	}
 	c := f.cfg
 	axc := *c.AX
@@ -254,6 +316,7 @@ func TestAStreamLingerMustUndercutIdle(t *testing.T) {
 // arrives, once.
 func TestALongTurnSurvivesTheRoutersCut(t *testing.T) {
 	f, sr := newStreamFixture(t)
+	th := watch(f.out)
 	sr.silent.Store(true)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -261,24 +324,116 @@ func TestALongTurnSurvivesTheRoutersCut(t *testing.T) {
 	waitFor(t, func() bool { return sr.open.Load() == 1 }, "the stream")
 	actor := "agents/" + ax.TaskName("sb-triage", "slack", "C1:1")
 
+	sr.answer(actor, "early part") // delivered before the cut
+	th.answered(t, "early part")
 	sr.queue(actor) <- cutStream
 	waitFor(t, func() bool {
 		sr.mu.Lock()
 		defer sr.mu.Unlock()
 		return len(sr.sinces) == 2
 	}, "the relay to reconnect after the cut")
-	sr.queue(actor) <- "event: agent\ndata: {\"seq\":7,\"event\":{\"Content\":{\"parts\":[{\"text\":\"late answer\"}],\"role\":\"model\"},\"Partial\":false}}\n\n"
+	sr.answer(actor, "late answer")
 	sr.queue(actor) <- "event: turn-complete\ndata: {\"prompt_id\":\"p\",\"model\":\"m\",\"latency_ms\":5}\n\n"
-	answered(t, f.out, "late answer")
+	th.answered(t, "late answer")
 	time.Sleep(100 * time.Millisecond)
-	for drained := false; !drained; {
-		select {
-		case r := <-f.out.replies:
-			if r.Text == "late answer" {
-				t.Fatal("the answer was delivered twice")
-			}
-		default:
-			drained = true
-		}
+	sr.mu.Lock()
+	sinces := append([]string(nil), sr.sinces...)
+	sr.mu.Unlock()
+	if sinces[1] != "1" {
+		t.Errorf("reconnected with since %q, want 1 (the part before the cut)", sinces[1])
+	}
+	if th.count("early part") != 1 || th.count("late answer") != 1 {
+		t.Errorf("deliveries: early %d, late %d; want each once", th.count("early part"), th.count("late answer"))
+	}
+}
+
+// What the daemon says outranks switchboard's own idea of the turn: after a
+// reconnect, a long turn's narration is taken as its answer and the turn is
+// marked over, while the daemon is still working. Released then, the answer
+// would wait for the next message and a prompt would never be posted (caught
+// in review).
+func TestAConversationTheDaemonCallsBusyKeepsItsStreams(t *testing.T) {
+	f, sr := newStreamFixture(t)
+	sr.silent.Store(true)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f.say(t, ctx, "C1:1", "a long one")
+	actor := "agents/" + ax.TaskName("sb-triage", "slack", "C1:1")
+	sr.queue(actor) <- frameStreaming
+	e := entryOf(f.r, "C1:1")
+	waitFor(t, func() bool { return e.agentBusy.Load() }, "the daemon to say it is working")
+	e.endTurn() // switchboard believes the turn over
+
+	if n := f.r.releaseIdleAX(time.Now().Add(time.Hour)); n != 0 {
+		t.Fatalf("released %d while the daemon was working", n)
+	}
+	sr.queue(actor) <- frameIdle
+	waitFor(t, func() bool { return !e.agentBusy.Load() }, "the daemon to say it is idle")
+	if n := f.r.releaseIdleAX(time.Now().Add(time.Hour)); n != 1 {
+		t.Errorf("released %d once idle, want 1", n)
+	}
+}
+
+// A question on screen keeps its conversation's streams: the prompt stream is
+// what would carry the next one, and the press revives nothing sooner.
+func TestAnOpenQuestionKeepsItsStreams(t *testing.T) {
+	f, _ := newStreamFixture(t)
+	th := watch(f.out)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f.say(t, ctx, "C1:1", "hello")
+	th.answered(t, "answer 1")
+	e := entryOf(f.r, "C1:1")
+	waitFor(t, func() bool { return !e.turnInFlight() && !e.awaitingAnswer() }, "the turn to end")
+	e.qmu.Lock()
+	e.asked = map[string]*askRecord{"p1": {text: "run it?", posted: true}}
+	e.qmu.Unlock()
+	if n := f.r.releaseIdleAX(time.Now().Add(time.Hour)); n != 0 {
+		t.Errorf("released %d with a question unanswered", n)
+	}
+}
+
+// A turn being set up — found, its placeholder posting, not yet in flight —
+// is not released from under it (caught in review).
+func TestATurnBeingSetUpPinsItsConversation(t *testing.T) {
+	f, _ := newStreamFixture(t)
+	th := watch(f.out)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f.say(t, ctx, "C1:1", "hello")
+	th.answered(t, "answer 1")
+	e := entryOf(f.r, "C1:1")
+	waitFor(t, func() bool { return !e.turnInFlight() && !e.awaitingAnswer() }, "the turn to end")
+	e.pins.Add(1)
+	if n := f.r.releaseIdleAX(time.Now().Add(time.Hour)); n != 0 {
+		t.Errorf("released %d while a turn was being set up", n)
+	}
+	e.pins.Add(-1)
+	if n := f.r.releaseIdleAX(time.Now().Add(time.Hour)); n != 1 {
+		t.Errorf("released %d once unpinned, want 1", n)
+	}
+}
+
+// entryOf is a conversation's live entry, read under the lock.
+func entryOf(r *Router, conv string) *sessionEntry {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.sessions[conv]
+}
+
+// A template without spec.idle never suspends its tasks, so its conversations
+// keep their streams: letting go would only cost a revive (caught in review).
+func TestATemplateWithoutIdleIsNotSwept(t *testing.T) {
+	f, _ := newStreamFixture(t)
+	th := watch(f.out)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f.say(t, ctx, "C1:1", "hello")
+	th.answered(t, "answer 1")
+	e := entryOf(f.r, "C1:1")
+	waitFor(t, func() bool { return !e.turnInFlight() && !e.awaitingAnswer() && !e.agentBusy.Load() }, "the turn to end")
+	f.r.agents().byName["triage"].ax.idle = false
+	if n := f.r.releaseIdleAX(time.Now().Add(time.Hour)); n != 0 {
+		t.Errorf("released %d for a template that never suspends", n)
 	}
 }

@@ -61,11 +61,16 @@ type AXConfig struct {
 	// ReadyTimeout bounds a task's start; empty is two minutes.
 	ReadyTimeout string `json:"ready_timeout,omitempty"`
 	// StreamLinger is how long after its last traffic a conversation keeps
-	// its streams to the task open; empty is one minute. It must be shorter
-	// than the template's spec.idle.suspendAfter: an open stream is traffic
-	// to ax, so a longer linger would keep every task awake (#171).
+	// its streams to the task open; empty is one minute, and at least ten
+	// seconds. An open stream is traffic to ax, whose idle clock starts when
+	// the stream closes, so a task suspends about linger + suspendAfter after
+	// its last turn (#171).
 	StreamLinger string `json:"stream_linger,omitempty"`
 }
+
+// minStreamLinger bounds stream_linger from below: shorter, a conversation
+// would let go between a message and its reply.
+const minStreamLinger = 10 * time.Second
 
 // defaultStreamLinger is how long an ax conversation keeps its streams open
 // after its last traffic.
@@ -81,6 +86,7 @@ type axAgent struct {
 	scope     string
 	approvals bool
 	idle      bool          // the template lets tasks suspend
+	idleAfter time.Duration // the template's suspendAfter
 	linger    time.Duration // streams close this long after the last traffic
 }
 
@@ -210,15 +216,15 @@ func buildAXAgent(ac AgentConfig, b agentBuilder) (*axAgent, error) {
 	linger := defaultStreamLinger
 	if c.StreamLinger != "" {
 		d, err := time.ParseDuration(c.StreamLinger)
-		if err != nil || d <= 0 {
-			return nil, fmt.Errorf(".ax.stream_linger %q: want a positive duration like 1m", c.StreamLinger)
+		if err != nil || d < minStreamLinger {
+			return nil, fmt.Errorf(".ax.stream_linger %q: want a duration of at least %s, like 1m", c.StreamLinger, minStreamLinger)
 		}
 		linger = d
 	}
-	if cl.idle && linger >= cl.idleAfter {
-		return nil, fmt.Errorf(".ax.stream_linger %s is not shorter than the template's spec.idle.suspendAfter %s: an open stream keeps a task awake, so its tasks would never suspend", linger, cl.idleAfter)
-	}
-	return &axAgent{client: cl.client, token: token, scope: scope, approvals: b.approvals, idle: cl.idle, linger: linger}, nil
+	// A linger past suspendAfter only delays suspension (ax's idle clock
+	// starts when the stream closes), so it is a startup warning, not an
+	// error (caught in review: the check refused valid templates).
+	return &axAgent{client: cl.client, token: token, scope: scope, approvals: b.approvals, idle: cl.idle, idleAfter: cl.idleAfter, linger: linger}, nil
 }
 
 // axCache is the builder's client cache, created on first use.

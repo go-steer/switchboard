@@ -499,8 +499,14 @@ func runServe(args []string) (err error) {
 			return err
 		}
 		for _, n := range agents.order {
-			if a := agents.byName[n]; a.ax != nil && !a.ax.idle {
+			a := agents.byName[n]
+			switch {
+			case a.ax == nil:
+			case !a.ax.idle:
 				logf.Warnf("agent %s: its task template sets no spec.idle, so its tasks never suspend and hold their resources until deleted", n)
+			case a.ax.linger >= a.ax.idleAfter:
+				logf.Warnf("agent %s: ax.stream_linger %s is not shorter than the template's suspendAfter %s, so a quiet task suspends only about %s after its last turn",
+					n, a.ax.linger, a.ax.idleAfter, a.ax.linger+a.ax.idleAfter)
 			}
 		}
 		if err := checkChannelAgents(agents, "defaults", defaults); err != nil {

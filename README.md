@@ -506,11 +506,16 @@ template, and each conversation gets a task of its own.
   both in plaintext, inside the cluster. Protect them with a NetworkPolicy.
 - **Idle tasks suspend.** An open stream counts as traffic to ax, so a
   conversation lets go of its streams to the task `ax.stream_linger`
-  (default `1m`) after its last traffic, once no turn is running. It reattaches
-  on its next message, which wakes the task, and picks the stream up where it
-  left off. `stream_linger` must be shorter than the template's
-  `spec.idle.suspendAfter`. Output the agent produces between turns, which
-  nothing in the session contract sends today, would not reach the thread.
+  (default `1m`, at least `10s`) after its last traffic. It does so only once
+  no turn is running, the agent itself says it's idle, and no approval
+  question is waiting.
+  - It reattaches on its next message, which wakes the task, and picks the
+    stream up where it left off.
+  - ax's idle clock starts when the stream closes, so a quiet task suspends
+    about `stream_linger` plus the template's `spec.idle.suspendAfter` after
+    its last turn.
+  - Output the agent produces between turns, which nothing in the session
+    contract sends today, reaches the thread late, with the next message.
 - **Not yet:** one task per person or one shared task (`scope`, #172), and
   deleting old tasks (#173).
 - **An ax agent added through the admin API** must name a template under
