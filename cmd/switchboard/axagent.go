@@ -60,7 +60,16 @@ type AXConfig struct {
 	Scope string `json:"scope,omitempty"`
 	// ReadyTimeout bounds a task's start; empty is two minutes.
 	ReadyTimeout string `json:"ready_timeout,omitempty"`
+	// StreamLinger is how long after its last traffic a conversation keeps
+	// its streams to the task open; empty is one minute. It must be shorter
+	// than the template's spec.idle.suspendAfter: an open stream is traffic
+	// to ax, so a longer linger would keep every task awake (#171).
+	StreamLinger string `json:"stream_linger,omitempty"`
 }
+
+// defaultStreamLinger is how long an ax conversation keeps its streams open
+// after its last traffic.
+const defaultStreamLinger = time.Minute
 
 const axScopeThread = "thread"
 
@@ -71,7 +80,8 @@ type axAgent struct {
 	token     string
 	scope     string
 	approvals bool
-	idle      bool // the template lets tasks suspend
+	idle      bool          // the template lets tasks suspend
+	linger    time.Duration // streams close this long after the last traffic
 }
 
 // taskClients are one task's contract clients.
@@ -115,8 +125,9 @@ type axClients struct {
 
 // axClient is a cached client and what its template said about idling.
 type axClient struct {
-	client *ax.Client
-	idle   bool
+	client    *ax.Client
+	idle      bool
+	idleAfter time.Duration
 }
 
 func (c *axClients) get(key string, mk func() (axClient, error)) (axClient, error) {
@@ -191,12 +202,23 @@ func buildAXAgent(ac AgentConfig, b agentBuilder) (*axAgent, error) {
 			// No redirects through the router either (daemon.NoRedirects).
 			HTTPClient: &http.Client{CheckRedirect: daemon.NoRedirects},
 		})
-		return axClient{client: client, idle: t.Idle}, err
+		return axClient{client: client, idle: t.Idle, idleAfter: t.IdleAfter}, err
 	})
 	if err != nil {
 		return nil, fmt.Errorf(".ax: %w", err)
 	}
-	return &axAgent{client: cl.client, token: token, scope: scope, approvals: b.approvals, idle: cl.idle}, nil
+	linger := defaultStreamLinger
+	if c.StreamLinger != "" {
+		d, err := time.ParseDuration(c.StreamLinger)
+		if err != nil || d <= 0 {
+			return nil, fmt.Errorf(".ax.stream_linger %q: want a positive duration like 1m", c.StreamLinger)
+		}
+		linger = d
+	}
+	if cl.idle && linger >= cl.idleAfter {
+		return nil, fmt.Errorf(".ax.stream_linger %s is not shorter than the template's spec.idle.suspendAfter %s: an open stream keeps a task awake, so its tasks would never suspend", linger, cl.idleAfter)
+	}
+	return &axAgent{client: cl.client, token: token, scope: scope, approvals: b.approvals, idle: cl.idle, linger: linger}, nil
 }
 
 // axCache is the builder's client cache, created on first use.

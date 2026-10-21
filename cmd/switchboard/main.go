@@ -931,6 +931,12 @@ func runServe(args []string) (err error) {
 	// a surface something depends on — a deployment's probes, or a caller's
 	// digests. srvErrs carries those failures so serve reports one as a
 	// non-zero exit.
+	// ax conversations release their streams once idle (#171), with or
+	// without --state-dir: released, they wait in memory for their next
+	// message.
+	if inbound {
+		go router.runAXRelease(ctx)
+	}
 	srvErrs := make(chan error, 3)
 	listeners := 0
 	serveOptional := func(name, addr string, fn func() error) {

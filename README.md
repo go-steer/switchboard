@@ -504,9 +504,15 @@ template, and each conversation gets a task of its own.
   gets a task under the new name, and the old one stays until deleted.
 - **ax-server and the router take no credentials,** so switchboard reaches
   both in plaintext, inside the cluster. Protect them with a NetworkPolicy.
-- **Not yet:** one task per person or one shared task (`scope`, #172),
-  streams scoped to the turn so idle tasks can suspend (#171), and deleting
-  old tasks (#173).
+- **Idle tasks suspend.** An open stream counts as traffic to ax, so a
+  conversation lets go of its streams to the task `ax.stream_linger`
+  (default `1m`) after its last traffic, once no turn is running. It reattaches
+  on its next message, which wakes the task, and picks the stream up where it
+  left off. `stream_linger` must be shorter than the template's
+  `spec.idle.suspendAfter`. Output the agent produces between turns, which
+  nothing in the session contract sends today, would not reach the thread.
+- **Not yet:** one task per person or one shared task (`scope`, #172), and
+  deleting old tasks (#173).
 - **An ax agent added through the admin API** must name a template under
   `--admin-ax-template-dir`, because the gateway reads that file. The check
   is on the path, so a symlink inside the directory is followed: only

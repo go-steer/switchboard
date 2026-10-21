@@ -17,8 +17,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     a restart returns to it on the next message.
   - New settings: `ax` per agent, `--gateway-id`, and
     `--admin-ax-template-dir` for ax agents added through the admin API.
-  - Owner and shared scopes, turn-scoped streams and task cleanup follow
-    (#171–#173).
+  - **Idle tasks suspend** (#171). A conversation lets go of its streams to the
+    task `ax.stream_linger` (default 1m) after its last traffic, once no turn
+    is running. An open stream would otherwise keep the task awake for good.
+    It reattaches on the next message, waking the task, and resumes the
+    stream where it left off.
+  - Owner and shared scopes and task cleanup follow (#172, #173).
 
 ## [v0.8.0] — 2026-10-21
 
