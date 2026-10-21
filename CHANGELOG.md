@@ -51,6 +51,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     no `Authorization` header is sent.
 
 ### Security
+- **Go 1.26.10** for GO-2026-6809 (`crypto/x509` now distrusts compromised
+  intermediate certificates), which govulncheck reports as reachable from
+  switchboard under 1.26.9. The `go` directive, which the release image
+  builds with, and the Dockerfile's default `GO_VERSION` both move to 1.26.10.
 - **The daemon and approval clients follow no redirects.** A 3xx from a
   daemon was followed. net/http keeps the `Authorization` header on a
   same-host hop, including https to http, so the bearer token, the asserted
