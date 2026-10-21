@@ -93,14 +93,97 @@ var axSweepEvery = 10 * time.Second
 func (r *Router) runAXRelease(ctx context.Context) {
 	t := time.NewTicker(axSweepEvery)
 	defer t.Stop()
+	var lastDelete time.Time
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case now := <-t.C:
 			r.releaseIdleAX(now)
+			if now.Sub(lastDelete) >= axDeleteEvery {
+				lastDelete = now
+				r.deleteQuietTasks(ctx, now)
+			}
 		}
 	}
+}
+
+// axDeleteEvery is how often quiet conversations' tasks are considered for
+// deletion; deleting is an ax-server call, and nothing about it is urgent.
+var axDeleteEvery = time.Minute
+
+// deleteQuietTasks deletes the thread-scope tasks of dormant conversations
+// quiet past their agent's delete_after (#173), and marks their records so
+// the next message there starts over and is told why. Only thread scope: a
+// personal or shared task holds more than one conversation.
+func (r *Router) deleteQuietTasks(ctx context.Context, now time.Time) int {
+	type doomed struct {
+		conv, task string
+		a          *agent
+	}
+	set := r.agents()
+	var due []doomed
+	r.mu.Lock()
+	for conv, rec := range r.dormant {
+		if rec.Task == "" || rec.TaskDeleted {
+			continue
+		}
+		a, ok := set.lookup(rec.Agent)
+		if !ok || a.ax == nil || a.ax.scope != axScopeThread || a.ax.deleteAfter <= 0 || now.Sub(rec.Touched) <= a.ax.deleteAfter {
+			continue
+		}
+		due = append(due, doomed{conv, rec.Task, a})
+	}
+	r.mu.Unlock()
+	deleted := 0
+	for _, d := range due {
+		dctx, cancel := context.WithTimeout(ctx, platformTimeout)
+		err := d.a.ax.client.Delete(dctx, d.task)
+		cancel()
+		if err != nil {
+			r.logf.Warnf("ax: delete quiet task %s of %s: %v", d.task, d.conv, err)
+			continue
+		}
+		r.markTaskDeleted(d.task)
+		r.logf.Infof("ax: deleted task %s of %s, quiet for over %s", d.task, d.conv, d.a.ax.deleteAfter)
+		deleted++
+	}
+	return deleted
+}
+
+// markTaskDeleted marks every record of task deleted, live entries included:
+// a live one is released first, its streams stopped, so its next message
+// finds the mark rather than a task that is not there.
+func (r *Router) markTaskDeleted(task string) {
+	var stopped []*sessionEntry
+	r.mu.Lock()
+	for conv, e := range r.sessions {
+		select {
+		case <-e.ready:
+		default:
+			continue
+		}
+		if e.task == task {
+			r.dormant[conv] = e.record()
+			delete(r.sessions, conv)
+			stopped = append(stopped, e)
+		}
+	}
+	for conv, rec := range r.dormant {
+		if rec.Task == task && !rec.TaskDeleted {
+			rec.TaskDeleted = true
+			r.dormant[conv] = rec
+		}
+	}
+	r.mu.Unlock()
+	for _, e := range stopped {
+		if e.stop != nil {
+			e.stop()
+		}
+		e.stopTicker()
+		r.metrics.sessionClosed()
+	}
+	r.markDirty()
 }
 
 // releaseIdleAX releases the ax conversations idle for their agent's linger.

@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/go-steer/purser"
 	"github.com/go-steer/purser/authn"
@@ -95,6 +96,8 @@ func newAdminServer(c adminConfig, r *Router, reg *registryAdmin) (*adminServer,
 	mux.HandleFunc("GET /v1/agents/{name}", s.getAgent)
 	mux.HandleFunc("PUT /v1/agents/{name}", s.putAgent)
 	mux.HandleFunc("DELETE /v1/agents/{name}", s.deleteAgent)
+	mux.HandleFunc("GET /v1/agents/{name}/tasks", s.listTasks)
+	mux.HandleFunc("DELETE /v1/agents/{name}/tasks/{task}", s.deleteTask)
 	mux.HandleFunc("GET /v1/defaults", s.getDefaults)
 	mux.HandleFunc("PUT /v1/defaults", s.putDefaults)
 	// {channel...}: a Chat space is "spaces/AAA", slash included.
@@ -356,6 +359,81 @@ func (s *adminServer) deleteAgent(w http.ResponseWriter, r *http.Request) {
 	err := s.reg.removeAgent(name)
 	s.audited(r, "delete agent "+name, before, nil, err)
 	s.reply(w, err, http.StatusNoContent, nil)
+}
+
+// taskView is an ax agent's task as the admin API lists it: what ax-server
+// says, and what switchboard's records add.
+type taskView struct {
+	Task  string `json:"task"`
+	Phase string `json:"phase,omitempty"`
+	// Conversations recorded in it: one for a thread task, any number for a
+	// personal or shared one; none for a task no record names any more.
+	Conversations []string  `json:"conversations,omitempty"`
+	Owner         string    `json:"owner,omitempty"`
+	LastTraffic   time.Time `json:"last_traffic,omitzero"`
+}
+
+// axAgentFor is the named agent if it is an ax agent, else an error reply.
+func (s *adminServer) axAgentFor(w http.ResponseWriter, name string) *agent {
+	a, ok := s.router.agents().byName[name]
+	switch {
+	case !ok:
+		writeAdminError(w, http.StatusNotFound, fmt.Sprintf("no agent %q", name))
+		return nil
+	case a.ax == nil:
+		writeAdminError(w, http.StatusNotFound, fmt.Sprintf("agent %q runs no tasks: it is not of kind ax", name))
+		return nil
+	}
+	return a
+}
+
+func (s *adminServer) listTasks(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	a := s.axAgentFor(w, name)
+	if a == nil {
+		return
+	}
+	tasks, err := a.ax.client.List(r.Context(), func(t string) bool { return a.ax.ownsTask(name, t) })
+	if err != nil {
+		s.cfg.Logf.Warnf("admin: %v", err)
+		writeAdminError(w, http.StatusBadGateway, "ax-server would not list the tasks")
+		return
+	}
+	notes := s.router.taskNotes()
+	out := make([]taskView, 0, len(tasks))
+	for _, t := range tasks {
+		v := taskView{Task: t.Name, Phase: t.Phase}
+		if n, ok := notes[t.Name]; ok {
+			v.Conversations, v.Owner, v.LastTraffic = n.convs, n.owner, n.last
+		}
+		out = append(out, v)
+	}
+	writeAdminJSON(w, http.StatusOK, map[string]any{"tasks": out})
+}
+
+func (s *adminServer) deleteTask(w http.ResponseWriter, r *http.Request) {
+	name, task := r.PathValue("name"), r.PathValue("task")
+	a := s.axAgentFor(w, name)
+	if a == nil {
+		return
+	}
+	if !a.ax.ownsTask(name, task) {
+		// Only this agent's own tasks: the atespace holds others' too
+		// (lookout's, say), which switchboard has no business deleting.
+		writeAdminError(w, http.StatusNotFound, fmt.Sprintf("no task %q belongs to agent %q", task, name))
+		return
+	}
+	err := a.ax.client.Delete(r.Context(), task)
+	if err == nil {
+		s.router.markTaskDeleted(task)
+	}
+	s.audited(r, "delete task "+task+" of agent "+name, task, nil, err)
+	if err != nil {
+		s.cfg.Logf.Warnf("admin: %v", err)
+		writeAdminError(w, http.StatusBadGateway, "ax-server would not delete the task")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 type defaultsView struct {

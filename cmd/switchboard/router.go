@@ -2977,6 +2977,16 @@ func (r *Router) reviveLocked(ctx context.Context, conv, channel string, rec ses
 	}
 	a, ok := r.agents().lookup(e.agent)
 	isAX := ok && a.ax != nil
+	if rec.TaskDeleted {
+		// Its task was cleaned up: start over in a fresh one, and say why.
+		delete(r.dormant, conv)
+		label := e.agent
+		if ok {
+			label = a.label()
+		}
+		go r.surfaceNotice(ctx, conv, label+"'s task for this conversation was cleaned up after it went quiet, so this conversation starts over.")
+		return nil
+	}
 	if isAX && e.task == "" {
 		// Recorded while the agent was not an ax agent: no task holds it.
 		delete(r.dormant, conv)

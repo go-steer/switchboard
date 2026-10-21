@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -68,7 +69,20 @@ type AXConfig struct {
 	// the stream closes, so a task suspends about linger + suspendAfter after
 	// its last turn (#171).
 	StreamLinger string `json:"stream_linger,omitempty"`
+	// DeleteAfter deletes a thread-scope task once its conversation has
+	// been quiet this long (#173); empty is 14 days, "0" keeps tasks. At
+	// most dormantMaxAge: past it the conversation's record is forgotten,
+	// and with it which task to delete.
+	DeleteAfter string `json:"delete_after,omitempty"`
+	// ReplaceDrifted replaces a thread-scope task created from an earlier
+	// version of the template — a rotated token, say, which would fail every
+	// request — with a fresh one; nil is true. Its conversation starts over.
+	ReplaceDrifted *bool `json:"replace_drifted,omitempty"`
 }
+
+// defaultDeleteAfter is how long a thread-scope task outlives its
+// conversation's last traffic.
+const defaultDeleteAfter = 14 * 24 * time.Hour
 
 // minStreamLinger bounds stream_linger from below: shorter, a conversation
 // would let go between a message and its reply.
@@ -95,6 +109,22 @@ type axAgent struct {
 	idle      bool          // the template lets tasks suspend
 	idleAfter time.Duration // the template's suspendAfter
 	linger    time.Duration // streams close this long after the last traffic
+
+	deleteAfter    time.Duration // thread tasks quiet this long are deleted; 0 keeps
+	replaceDrifted bool          // replace a thread task made from an older template
+}
+
+// ownsTask reports whether name is one of this agent's tasks, in any scope:
+// what the admin API may list and delete for it. By pattern, since ax keeps
+// no labels; an agent named like another's scope suffix ("triage-u") can
+// match too, which the admin can see from the listing's conversation column.
+func (x *axAgent) ownsTask(agentName, name string) bool {
+	for _, p := range []string{"sb-" + agentName, "sb-" + agentName + "-u", "sb-" + agentName + "-shared"} {
+		if ax.NameMatcher(p)(name) {
+			return true
+		}
+	}
+	return false
 }
 
 // taskClients are one task's contract clients.
@@ -240,10 +270,20 @@ func buildAXAgent(ac AgentConfig, b agentBuilder) (*axAgent, error) {
 		}
 		linger = d
 	}
+	deleteAfter := defaultDeleteAfter
+	if c.DeleteAfter != "" {
+		d, err := time.ParseDuration(c.DeleteAfter)
+		if err != nil || d < 0 || d > dormantMaxAge {
+			return nil, fmt.Errorf(".ax.delete_after %q: want 0 (keep tasks) or a duration up to %s, like 336h", c.DeleteAfter, dormantMaxAge)
+		}
+		deleteAfter = d
+	}
+	replace := c.ReplaceDrifted == nil || *c.ReplaceDrifted
 	// A linger past suspendAfter only delays suspension (ax's idle clock
 	// starts when the stream closes), so it is a startup warning, not an
 	// error (caught in review: the check refused valid templates).
-	return &axAgent{client: cl.client, token: token, scope: scope, approvals: b.approvals, idle: cl.idle, idleAfter: cl.idleAfter, linger: linger}, nil
+	return &axAgent{client: cl.client, token: token, scope: scope, approvals: b.approvals, idle: cl.idle, idleAfter: cl.idleAfter, linger: linger,
+		deleteAfter: deleteAfter, replaceDrifted: replace}, nil
 }
 
 // axCache is the builder's client cache, created on first use.
@@ -311,6 +351,15 @@ func (r *Router) startAXTask(ctx context.Context, conv string, a *agent, e *sess
 	}()
 	start := time.Now()
 	got, err := a.ax.client.Ensure(ctx, e.task)
+	if err == nil && got.Drifted && a.ax.scope == axScopeThread && a.ax.replaceDrifted {
+		// Made from an earlier template — an old token fails every request —
+		// and a thread's task holds one conversation: replace it. The
+		// conversation starts over in the new one (#173).
+		r.logf.Warnf("session %s: replacing task %s, made from an earlier version of agent %s's template", conv, e.task, a.name)
+		if err = a.ax.client.Delete(ctx, e.task); err == nil {
+			got, err = a.ax.client.Ensure(ctx, e.task)
+		}
+	}
 	close(done)
 	created = got.Created
 	noticed.Wait()
@@ -323,7 +372,7 @@ func (r *Router) startAXTask(ctx context.Context, conv string, a *agent, e *sess
 		r.logf.Warnf("session %s: start task %s for agent %s: %v", conv, e.task, a.name, err)
 		return created, fmt.Errorf("%s could not be started: %w", a.label(), err)
 	}
-	if got.Drifted {
+	if got.Drifted && !got.Created {
 		// Tasks are immutable: one created before the template changed keeps
 		// the old spec — an old token, say, which fails every request. Said,
 		// so an operator can delete the task; replacing it is #173's.
@@ -410,6 +459,51 @@ var ownerNoticeEvery = 10 * time.Minute
 const noticeNotOwnerPress = "This thread talks to its starter's personal agent: its questions are theirs to answer."
 
 const noticeNotOwner = "This thread talks to its starter's personal agent, which answers them alone. Start a thread of your own to talk to yours."
+
+// taskNote is what switchboard's records say about one task.
+type taskNote struct {
+	convs []string
+	owner string
+	last  time.Time
+}
+
+// taskNotes gathers, per task, the conversations recorded in it, its owner
+// and its last traffic, from live entries and dormant records alike.
+func (r *Router) taskNotes() map[string]taskNote {
+	notes := map[string]taskNote{}
+	add := func(task, conv string, touched time.Time) {
+		if task == "" {
+			return
+		}
+		n := notes[task]
+		n.convs = append(n.convs, conv)
+		if o, ok := r.owners[conv]; ok {
+			n.owner = o.Owner
+		}
+		if touched.After(n.last) {
+			n.last = touched
+		}
+		notes[task] = n
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for conv, e := range r.sessions {
+		select {
+		case <-e.ready:
+			add(e.task, conv, time.Unix(0, e.touched.Load()).UTC())
+		default:
+		}
+	}
+	for conv, rec := range r.dormant {
+		if !rec.TaskDeleted {
+			add(rec.Task, conv, rec.Touched)
+		}
+	}
+	for _, n := range notes {
+		sort.Strings(n.convs)
+	}
+	return notes
+}
 
 // axStartNoticeAfter is how long a task start runs before the thread is told.
 var axStartNoticeAfter = 2 * time.Second

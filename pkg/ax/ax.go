@@ -367,6 +367,53 @@ func (c *Client) Delete(ctx context.Context, task string) error {
 	return nil
 }
 
+// Task is a task as List reports it.
+type Task struct {
+	Name  string
+	Phase string
+}
+
+// listPage is how many tasks List asks ax for at a time.
+const listPage = 100
+
+// List reports the tasks in the client's atespace whose names match, page by
+// page; a nil match is every task.
+func (c *Client) List(ctx context.Context, match func(name string) bool) ([]Task, error) {
+	var out []Task
+	for offset := int64(0); ; offset += listPage {
+		resp, err := c.api.ListTasks(ctx, &axapi.ListTasksRequest{Atespace: c.cfg.Atespace, Limit: listPage, Offset: offset})
+		if err != nil {
+			return out, fmt.Errorf("ax: list tasks in %s: %w", c.cfg.Atespace, err)
+		}
+		for _, t := range resp.GetTasks() {
+			if n := t.GetMetadata().GetName(); match == nil || match(n) {
+				out = append(out, Task{Name: n, Phase: t.GetStatus().GetPhase()})
+			}
+		}
+		if len(resp.GetTasks()) < listPage {
+			return out, nil
+		}
+	}
+}
+
+// NameMatcher reports whether a name is one TaskName could give for prefix:
+// the prefix as TaskName writes it, a dash, and the 16-character hash.
+func NameMatcher(prefix string) func(string) bool {
+	p := TaskName(prefix)
+	p = p[:len(p)-16] // the prefix and its dash, as TaskName clamps them
+	return func(name string) bool {
+		if !strings.HasPrefix(name, p) || len(name) != len(p)+16 {
+			return false
+		}
+		for _, r := range name[len(p):] {
+			if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+				return false
+			}
+		}
+		return true
+	}
+}
+
 // Router is the router's base URL: the daemon URL of every task.
 func (c *Client) Router() string { return c.cfg.Router }
 

@@ -104,6 +104,10 @@ type sessionRecord struct {
 	Agent string `json:"agent,omitempty"`
 	// Task is the ax task holding Session, for an agent of kind "ax" (#170).
 	Task string `json:"task,omitempty"`
+	// TaskDeleted: Task was deleted (#173) — quiet past the agent's
+	// delete_after, or by an admin — so the next message starts over, and
+	// the thread is told why.
+	TaskDeleted bool `json:"task_deleted,omitempty"`
 	// Owner is the identity the relay subscribes as: the creator, or empty for
 	// an adopted session (sessionEntry.owner).
 	Owner   string `json:"owner,omitempty"`
@@ -472,7 +476,7 @@ func (r *Router) restore(ctx context.Context, st routerState, now time.Time) (re
 		// attaching at boot would wake every task the gateway knows — unless
 		// a turn was in flight, whose answer and placeholder would otherwise
 		// wait for somebody to speak again (caught in review).
-		if now.Sub(rec.Touched) <= r.reviveWindow() && (rec.Task == "" || rec.Placeholder != "") {
+		if now.Sub(rec.Touched) <= r.reviveWindow() && (rec.Task == "" || rec.Placeholder != "") && !rec.TaskDeleted {
 			recent = append(recent, conv)
 		}
 	}

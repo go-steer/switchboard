@@ -210,6 +210,18 @@ and history.
 
 ### Lifecycle
 
+_As built (#173):_
+- **The sweep:** once a minute, it deletes the task of a dormant thread-scope
+  conversation quiet past `delete_after`. `delete_after` is capped at the
+  30-day record lifetime, so a task is never orphaned by its record being
+  pruned first.
+- **The record** is kept, marked, so the next message starts over and says
+  why.
+- **Drifted thread tasks** are replaced when their conversation next starts or
+  revives.
+- **The admin API** lists an agent's tasks by name pattern, since ax keeps no
+  labels, and deletes only names of that pattern.
+
 ax deletes nothing on its own, and lookout leaves deletion open (#567).
 switchboard owns its tasks:
 

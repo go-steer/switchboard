@@ -23,6 +23,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -44,7 +45,9 @@ type axServer struct {
 	axapi.UnimplementedAXServer
 	mu       sync.Mutex
 	tasks    map[string]bool
+	specs    map[string]*axapi.TaskSpec // what each task was created with
 	creates  []string
+	deletes  []string
 	failAll  bool // every create and get fails: ax-server in trouble
 	listener string
 }
@@ -61,14 +64,48 @@ func (s *axServer) CreateTask(_ context.Context, r *axapi.CreateTaskRequest) (*a
 		return nil, status.Error(codes.FailedPrecondition, "already exists and is immutable")
 	}
 	s.tasks[name] = true
+	if s.specs == nil {
+		s.specs = map[string]*axapi.TaskSpec{}
+	}
+	s.specs[name] = r.Task.Spec
 	return r.Task, nil
+}
+
+func (s *axServer) DeleteTask(_ context.Context, r *axapi.DeleteTaskRequest) (*axapi.DeleteTaskResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.tasks[r.Name] {
+		return nil, status.Error(codes.NotFound, "no such task")
+	}
+	delete(s.tasks, r.Name)
+	delete(s.specs, r.Name)
+	s.deletes = append(s.deletes, r.Name)
+	return &axapi.DeleteTaskResponse{}, nil
+}
+
+func (s *axServer) ListTasks(_ context.Context, r *axapi.ListTasksRequest) (*axapi.ListTasksResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var names []string
+	for n := range s.tasks {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	resp := &axapi.ListTasksResponse{}
+	for i, n := range names {
+		if int64(i) < r.Offset || int64(len(resp.Tasks)) >= r.Limit {
+			continue
+		}
+		resp.Tasks = append(resp.Tasks, &axapi.Task{Metadata: &axapi.ObjectMeta{Name: n}, Status: &axapi.TaskStatus{Phase: "Running"}})
+	}
+	return resp, nil
 }
 
 func (s *axServer) GetTask(_ context.Context, r *axapi.GetTaskRequest) (*axapi.Task, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.failAll && s.tasks[r.Name] {
-		return &axapi.Task{Metadata: &axapi.ObjectMeta{Name: r.Name}}, nil
+		return &axapi.Task{Metadata: &axapi.ObjectMeta{Name: r.Name}, Spec: s.specs[r.Name]}, nil
 	}
 	return nil, status.Error(codes.NotFound, "no such task")
 }
