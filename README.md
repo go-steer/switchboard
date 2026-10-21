@@ -467,6 +467,47 @@ looks as before.
 {"name": "general", "display_name": "General agent", "icon_url": "https://example.com/general.png", …}
 ```
 
+### ax agents: a task per thread
+
+On [Agent Substrate](https://github.com/mastersingh24/substrate) an agent
+can be an [ax](https://github.com/mastersingh24/ax) task instead of a daemon
+somebody runs: a sandbox that suspends when idle and wakes on the next
+request (#168, `docs/ax-backend.md`). An agent of `kind: "ax"` is a task
+template, and each conversation gets a task of its own.
+
+```json
+{"name": "triage", "display_name": "SRE triage", "kind": "ax",
+ "token_env": "SWITCHBOARD_AGENT_TOKEN_TRIAGE",
+ "ax": {"server": "ax-server.ax-system.svc.cluster.local:8080",
+        "router": "http://atenet-router.ate-system.svc.cluster.local",
+        "atespace": "default",
+        "task_template_file": "/etc/switchboard/ax/triage.yaml"}}
+```
+
+- **`task_template_file`** is a full ax Task manifest, as k8s-lookout's
+  `--ax-task-template` takes one. It's read strictly at startup, and must set
+  `spec.http.port`: the port the agent inside serves the session contract on.
+  It should set `spec.idle` so tasks suspend.
+- **`token_env`** holds the token that agent expects; for mast, its
+  `MAST_ATTACH_TOKEN`.
+- **Starting:** on a conversation's first message, switchboard creates its
+  task, or reuses it if it exists. It resumes the task and waits for it to
+  answer (`ax.ready_timeout`, default `2m`). A start that takes more than a
+  couple of seconds shows "⏳ Starting …" in the thread.
+- **Every request** then goes through the atenet router to that task. The
+  task's name is deterministic and recorded with the conversation, so a
+  restart goes back to the same task. That happens on the conversation's next
+  message, not at boot, which would wake every task.
+- **`--gateway-id`** (default: the platform) goes into task names, so two
+  gateways in one cluster never share a task.
+- **ax-server and the router take no credentials,** so switchboard reaches
+  both in plaintext, inside the cluster. Protect them with a NetworkPolicy.
+- **Not yet:** one task per person or one shared task (`scope`, #172),
+  streams scoped to the turn so idle tasks can suspend (#171), and deleting
+  old tasks (#173).
+- **An ax agent added through the admin API** must name a template under
+  `--admin-ax-template-dir`, because the gateway reads that file.
+
 ### The admin API
 
 `--admin-addr` serves an API for changing agents and agent settings at

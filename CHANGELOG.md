@@ -6,6 +6,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **ax agents: a task per thread** (#170, `docs/ax-backend.md`). An agent of
+  `kind: "ax"` is an ax task template, and each conversation gets a task of
+  its own on Agent Substrate.
+  - switchboard creates the task, resumes it and waits for it to answer, then
+    speaks the usual session contract to it through the atenet router.
+  - A slow start shows in the thread.
+  - The task's name is deterministic and recorded with the conversation, and
+    a restart returns to it on the next message.
+  - New settings: `ax` per agent, `--gateway-id`, and
+    `--admin-ax-template-dir` for ax agents added through the admin API.
+  - Owner and shared scopes, turn-scoped streams and task cleanup follow
+    (#171–#173).
+
 ## [v0.8.0] — 2026-10-21
 
 A release about managing agents without restarting the gateway, and about

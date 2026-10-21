@@ -134,6 +134,9 @@ func runServe(args []string) (err error) {
 		"core-agent daemon base URL (no trailing slash)")
 	tokenEnv := fs.String("token-env", "SWITCHBOARD_DAEMON_TOKEN",
 		"env var holding the daemon bearer token (never pass the token as a bare flag)")
+	gatewayID := fs.String("gateway-id", "",
+		"names this gateway in the ax tasks it starts, so gateways sharing a cluster never share "+
+			"a conversation's task; empty = the platform (slack or googlechat)")
 	platform := fs.String("platform", "slack",
 		"chat platform to bridge: \"slack\" (Socket Mode) or \"googlechat\" (Pub/Sub)")
 	outboundOnly := fs.Bool("outbound-only", false,
@@ -218,6 +221,9 @@ func runServe(args []string) (err error) {
 			"(a SPIFFE ID or token subject); required with oidc and mtls")
 	adminTokenEnv := fs.String("admin-token-env", "SWITCHBOARD_ADMIN_TOKEN",
 		"with --admin-auth token: env var holding the bearer token")
+	adminAXTemplateDir := fs.String("admin-ax-template-dir", "",
+		"the directory an ax agent added through the admin API must name its task_template_file in; "+
+			"empty = such agents are refused")
 	adminTokenPrefix := fs.String("admin-token-env-prefix", "SWITCHBOARD_AGENT_TOKEN_",
 		"the prefix an agent added through the admin API must name its token_env under, so it "+
 			"cannot name the gateway's own secrets; empty = such agents use a certificate method")
@@ -311,11 +317,13 @@ func runServe(args []string) (err error) {
 	res.str("admin-oidc-issuer", "SWITCHBOARD_ADMIN_OIDC_ISSUER", cfg.AdminIssuer, adminIssuer)
 	res.str("admin-token-env", "", cfg.AdminTokenEnv, adminTokenEnv)
 	res.str("admin-token-env-prefix", "", cfg.AdminTokenPrefix, adminTokenPrefix)
+	res.str("admin-ax-template-dir", "", cfg.AdminAXTemplateDir, adminAXTemplateDir)
 	res.str("admin-tls-cert-file", "SWITCHBOARD_ADMIN_TLS_CERT_FILE", cfg.AdminTLSCert, adminTLSCert)
 	res.str("admin-tls-key-file", "SWITCHBOARD_ADMIN_TLS_KEY_FILE", cfg.AdminTLSKey, adminTLSKey)
 	res.str("log-format", "SWITCHBOARD_LOG_FORMAT", cfg.LogFormat, logFormat)
 	res.str("audit-log", "SWITCHBOARD_AUDIT_LOG", cfg.AuditLog, auditLogDest)
 	res.str("state-dir", "SWITCHBOARD_STATE_DIR", cfg.StateDir, stateDir)
+	res.str("gateway-id", "SWITCHBOARD_GATEWAY_ID", cfg.GatewayID, gatewayID)
 	res.str("identity", "SWITCHBOARD_IDENTITY", cfg.Identity, identity)
 	res.str("spiffe-dir", "SWITCHBOARD_SPIFFE_DIR", cfg.SPIFFEDir, spiffeDir)
 	res.str("spiffe-trust-domain", "SWITCHBOARD_SPIFFE_TRUST_DOMAIN", cfg.SPIFFETrustDomain, spiffeTD)
@@ -486,7 +494,7 @@ func runServe(args []string) (err error) {
 		if gid.kind != identityNone {
 			logf.Infof("identity: %s; agents with auth.method spiffe or pki are reached with it", gid.kind)
 		}
-		builder = agentBuilder{approvals: wantApprovals, identity: gid}
+		builder = agentBuilder{approvals: wantApprovals, identity: gid, ax: &axClients{}}
 		if agents, err = agentsFrom(cfg, *daemonURL, *tokenEnv, builder); err != nil {
 			return err
 		}
@@ -649,6 +657,11 @@ func runServe(args []string) (err error) {
 	if inbound {
 		router = NewRouter(nil, adapter, progress, m, logf)
 		router.setAgents(agents)
+		gw := *gatewayID
+		if gw == "" {
+			gw = *platform
+		}
+		router.setGateway(gw)
 		configureRouter(router, router.defaultApprovals(), defaults, byChannel)
 	}
 	// Opened before anything is dispatched, and a failure to open it stops the
@@ -808,6 +821,7 @@ func runServe(args []string) (err error) {
 			AgentChannels: agentChannels(cfg),
 			Builder:       builder,
 			TokenPrefix:   *adminTokenPrefix,
+			AXTemplateDir: *adminAXTemplateDir,
 			Store:         rstore,
 			Logf:          logf,
 		})

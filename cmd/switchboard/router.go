@@ -467,9 +467,12 @@ type Router struct {
 	// regAdmin changes reg at runtime; nil when nothing may (a test, an
 	// outbound-only run).
 	regAdmin *registryAdmin
-	out      sender
-	metrics  *metrics
-	logf     logging.Logf
+	// gatewayID goes into ax task names, so gateways sharing a cluster never
+	// share a conversation's task (setGateway).
+	gatewayID string
+	out       sender
+	metrics   *metrics
+	logf      logging.Logf
 
 	// parkWait overrides parkRespondTimeout; zero means the constant. A test
 	// seam.
@@ -632,6 +635,9 @@ type sessionEntry struct {
 	// entry revived from a record written before the registry existed, which
 	// belongs to the default agent. Set before ready closes.
 	agent string
+	// task is the ax task the conversation lives in, for an agent of kind
+	// "ax" (#170): set before anything is sent, never changed after.
+	task string
 
 	// adopted marks a session switchboard did not create but was told about by
 	// the outbound ingress (#38). It changes two things: the entry starts at the
@@ -2823,7 +2829,7 @@ func (r *Router) sessionAs(ctx context.Context, conv, channel, caller, agent str
 	// starts fresh, which is all that was possible before there were records.
 	if rec, ok := r.dormant[conv]; ok {
 		if e := r.reviveLocked(ctx, conv, channel, rec); e != nil {
-			return e, nil
+			return e, e.err
 		}
 	}
 	// This goroutine owns creation; publish a not-yet-ready entry so
@@ -2870,6 +2876,18 @@ func (r *Router) sessionAs(ctx context.Context, conv, channel, caller, agent str
 		return e, nil
 	}
 
+	if a, ok := set.lookup(e.agent); ok && a.ax != nil {
+		// An ax agent: the conversation's task, started (or woken, or found)
+		// before the session it will hold.
+		e.task = a.ax.taskName(a.name, r.gatewayID, conv)
+		if e.err = r.startAXTask(ctx, conv, a, e); e.err != nil {
+			r.mu.Lock()
+			delete(r.sessions, conv)
+			r.mu.Unlock()
+			close(e.ready)
+			return e, e.err
+		}
+	}
 	start := time.Now()
 	e.sess, e.err = r.daemonOf(e).CreateSession(ctx, caller)
 	r.metrics.recordDaemon("create", time.Since(start), e.err)
@@ -2906,6 +2924,21 @@ func (r *Router) reviveLocked(ctx context.Context, conv, channel string, rec ses
 	e.touch()
 	r.sessions[conv] = e
 	r.mu.Unlock()
+	if a, ok := r.agents().lookup(e.agent); ok && a.ax != nil && e.task != "" {
+		// Its task may be suspended, or gone: wake it, or start a fresh one
+		// (whose agent no longer has the session, which the first inject
+		// finds and the thread is told about, as for any lost session).
+		if e.err = r.startAXTask(ctx, conv, a, e); e.err != nil {
+			r.mu.Lock()
+			if r.sessions[conv] == e {
+				delete(r.sessions, conv)
+				r.dormant[conv] = rec // kept: the next message tries again
+			}
+			r.mu.Unlock()
+			close(e.ready)
+			return e
+		}
+	}
 	if _, ok := r.agents().lookup(e.agent); rec.Adopted && stale && ok {
 		// An adopted session the thread stopped following long ago has been
 		// working the whole time; resuming from where the thread left off
@@ -2951,7 +2984,7 @@ func (r *Router) liveOrRevived(ctx context.Context, conv, channel string) (*sess
 	}
 	if rec, ok := r.dormant[conv]; ok {
 		if e := r.reviveLocked(ctx, conv, channel, rec); e != nil {
-			return e, true
+			return e, e.err == nil // an ax task that would not start
 		}
 	}
 	r.mu.Unlock()

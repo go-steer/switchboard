@@ -74,6 +74,8 @@ type Config struct {
 	LogFormat    *string `json:"log_format,omitempty"`
 	AuditLog     *string `json:"audit_log,omitempty"`
 	StateDir     *string `json:"state_dir,omitempty"`
+	// GatewayID names this gateway in the ax tasks it starts (#170).
+	GatewayID *string `json:"gateway_id,omitempty"`
 
 	// The gateway's own identity (#158): how it authenticates to an agent
 	// whose auth.method is spiffe or pki. Paths and names, never secrets.
@@ -129,6 +131,8 @@ type Config struct {
 	AdminTokenPrefix *string `json:"admin_token_env_prefix,omitempty"`
 	AdminTLSCert     *string `json:"admin_tls_cert_file,omitempty"`
 	AdminTLSKey      *string `json:"admin_tls_key_file,omitempty"`
+	// AdminAXTemplateDir fences the task templates runtime ax agents name.
+	AdminAXTemplateDir *string `json:"admin_ax_template_dir,omitempty"`
 
 	// Token *variable names*, never token values — see checkNoSecrets. These
 	// exist in the file for the same reason they exist as flags: naming the

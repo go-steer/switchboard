@@ -70,6 +70,7 @@ type AgentConfig struct {
 	TokenEnv    string            `json:"token_env,omitempty"`
 	Auth        *AgentAuth        `json:"auth,omitempty"`
 	Kind        string            `json:"kind,omitempty"`
+	AX          *AXConfig         `json:"ax,omitempty"` // kind "ax" (#170)
 	Labels      map[string]string `json:"labels,omitempty"`
 }
 
@@ -94,11 +95,12 @@ const (
 type agentBuilder struct {
 	approvals bool             // build an approval client too
 	identity  *gatewayIdentity // nil: bearer only
+	ax        *axClients       // caches ax-server clients across rebuilds
 }
 
 // agentKinds are the daemon flavours an agent may declare. Informational today
 // — both speak the same contract — and the place a difference would attach.
-var agentKinds = []string{"core-agent", "mast"}
+var agentKinds = []string{"core-agent", "mast", agentKindAX}
 
 // agent is one routable daemon and the clients switchboard holds for it.
 type agent struct {
@@ -110,6 +112,9 @@ type agent struct {
 	// approvals is nil when no channel relays permission prompts: a run with
 	// approvals off everywhere holds no client for a surface it does not offer.
 	approvals *approval.Client
+	// ax is set for an agent of kind "ax", which has no daemon of its own:
+	// each conversation's task has its clients (axagent.go).
+	ax *axAgent
 }
 
 // label is how the agent is named to a person.
@@ -229,21 +234,48 @@ func (goneDaemon) HeadSeq(context.Context, daemon.Session, string) (int64, error
 // errAgentGone, so a caller handles it like any other daemon failure.
 func (r *Router) daemonFor(name string) daemonAPI {
 	if a, ok := r.agents().lookup(name); ok {
+		if a.ax != nil {
+			return needsTask{}
+		}
 		return a.daemon
 	}
 	return goneDaemon{}
 }
 
-// daemonOf is daemonFor for a conversation.
-func (r *Router) daemonOf(e *sessionEntry) daemonAPI { return r.daemonFor(e.agent) }
+// daemonOf is daemonFor for a conversation: for an ax agent, its task's.
+func (r *Router) daemonOf(e *sessionEntry) daemonAPI {
+	a, ok := r.agents().lookup(e.agent)
+	if !ok || a.ax == nil {
+		return r.daemonFor(e.agent)
+	}
+	if e.task == "" {
+		return needsTask{}
+	}
+	tc, err := a.ax.forTask(e.task)
+	if err != nil {
+		r.logf.Errorf("agent %s: clients for task %s: %v", a.name, e.task, err)
+		return goneDaemon{}
+	}
+	return tc.daemon
+}
 
 // approvalsOf is the approval client of a conversation's agent, nil when it
 // relays no prompts or the agent is gone.
 func (r *Router) approvalsOf(e *sessionEntry) *approval.Client {
-	if a, ok := r.agents().lookup(e.agent); ok {
+	a, ok := r.agents().lookup(e.agent)
+	switch {
+	case !ok:
+		return nil
+	case a.ax == nil:
 		return a.approvals
+	case e.task == "":
+		return nil
 	}
-	return nil
+	tc, err := a.ax.forTask(e.task)
+	if err != nil {
+		return nil
+	}
+	return tc.approvals
 }
 
 // identityOf is how a conversation's agent signs what it writes (phase 5):
@@ -352,6 +384,16 @@ func buildAgent(ac AgentConfig, b agentBuilder) (*agent, error) {
 		if u, err := url.Parse(icon); err != nil || u.Scheme != "https" || u.Host == "" || len(icon) > maxIconURL {
 			return nil, fmt.Errorf(".icon_url %q: want an https URL to an image, at most %d characters", ac.IconURL, maxIconURL)
 		}
+	}
+	if ac.Kind == agentKindAX {
+		x, err := buildAXAgent(ac, b)
+		if err != nil {
+			return nil, err
+		}
+		return &agent{name: ac.Name, display: ac.DisplayName, desc: strings.TrimSpace(ac.Description), icon: strings.TrimSpace(ac.IconURL), ax: x}, nil
+	}
+	if ac.AX != nil {
+		return nil, fmt.Errorf(`.ax is for kind "ax"`)
 	}
 	if strings.TrimSpace(ac.DaemonURL) == "" {
 		return nil, fmt.Errorf(".daemon_url is required")
