@@ -98,6 +98,8 @@ type sessionRecord struct {
 	// Absent in a record written before the registry existed, which belongs
 	// to the default agent — so old snapshots load unchanged.
 	Agent string `json:"agent,omitempty"`
+	// Task is the ax task holding Session, for an agent of kind "ax" (#170).
+	Task string `json:"task,omitempty"`
 	// Owner is the identity the relay subscribes as: the creator, or empty for
 	// an adopted session (sessionEntry.owner).
 	Owner   string `json:"owner,omitempty"`
@@ -350,6 +352,7 @@ func (e *sessionEntry) record() sessionRecord {
 		Channel: e.channel,
 		Session: sessionRef(e.sess),
 		Agent:   e.agent,
+		Task:    e.task,
 		Owner:   e.owner,
 		Adopted: e.adopted,
 		// delivered, not relayed: relayed moves before the post is made, so a
@@ -398,6 +401,7 @@ func entryFromRecord(rec sessionRecord, channel string) (*sessionEntry, error) {
 		ready:   make(chan struct{}),
 		sess:    sess,
 		agent:   rec.Agent,
+		task:    rec.Task,
 		channel: channel,
 		adopted: rec.Adopted,
 		owner:   rec.Owner,
@@ -454,7 +458,11 @@ func (r *Router) restore(ctx context.Context, st routerState, now time.Time) (re
 			continue
 		}
 		r.dormant[conv] = rec
-		if now.Sub(rec.Touched) <= r.reviveWindow() {
+		// An ax conversation stays dormant until its next message, since
+		// attaching at boot would wake every task the gateway knows — unless
+		// a turn was in flight, whose answer and placeholder would otherwise
+		// wait for somebody to speak again (caught in review).
+		if now.Sub(rec.Touched) <= r.reviveWindow() && (rec.Task == "" || rec.Placeholder != "") {
 			recent = append(recent, conv)
 		}
 	}

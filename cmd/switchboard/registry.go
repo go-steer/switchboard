@@ -184,6 +184,11 @@ type registryAdmin struct {
 	// the gateway's own secret variables — the platform tokens — and point
 	// daemon_url at a server that collects it (caught in review).
 	tokenPrefix string
+	// axTemplateDir is the directory a runtime ax agent's task template must
+	// be in; empty refuses runtime ax agents. The gateway reads the file,
+	// and parse errors can quote it: without a fence an admin could aim it
+	// at a mounted secret.
+	axTemplateDir string
 	// problems are those of the current state, kept for the listings rather
 	// than compiled — which builds every runtime agent — on every read.
 	problems []error
@@ -227,6 +232,7 @@ type registryConfig struct {
 	AgentChannels map[string]bool
 	Builder       agentBuilder
 	TokenPrefix   string // see registryAdmin.tokenPrefix
+	AXTemplateDir string // see registryAdmin.axTemplateDir
 	Store         registryStore
 	Logf          logging.Logf
 }
@@ -238,6 +244,7 @@ func newRegistryAdmin(r *Router, c registryConfig) *registryAdmin {
 		logf:           c.Logf,
 		builder:        c.Builder,
 		tokenPrefix:    c.TokenPrefix,
+		axTemplateDir:  c.AXTemplateDir,
 		pinnedDefault:  c.PinnedDefault,
 		configDefault:  c.Base.def,
 		defaults:       c.Defaults,
@@ -463,6 +470,23 @@ func (a *registryAdmin) apply(st registryState) error {
 // checkTokenEnv holds a runtime agent's token variable to the prefix set
 // aside for them.
 func (a *registryAdmin) checkTokenEnv(ac AgentConfig) error {
+	if ac.AX != nil && ac.AX.TaskTemplateFile != "" {
+		if a.axTemplateDir == "" {
+			return errors.New("runtime ax agents need --admin-ax-template-dir, the directory their task templates are read from")
+		}
+		dir, err := filepath.Abs(a.axTemplateDir)
+		if err != nil {
+			return fmt.Errorf("--admin-ax-template-dir: %w", err)
+		}
+		if !strings.HasSuffix(dir, string(filepath.Separator)) {
+			dir += string(filepath.Separator) // "/" stays "/"
+		}
+		// Lexical: a symlink inside the directory is followed, so only
+		// operators should be able to write to it.
+		if p := filepath.Clean(ac.AX.TaskTemplateFile); !filepath.IsAbs(p) || !strings.HasPrefix(p, dir) {
+			return fmt.Errorf("ax.task_template_file %q: a runtime agent's template must be in %s (--admin-ax-template-dir)", ac.AX.TaskTemplateFile, a.axTemplateDir)
+		}
+	}
 	if ac.TokenEnv == "" {
 		return nil // a certificate method; buildAgent checks the rest
 	}

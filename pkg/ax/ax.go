@@ -81,6 +81,12 @@ func LoadTemplate(path string) (*Template, error) {
 	if err != nil {
 		return nil, fmt.Errorf("ax task template: %w", err)
 	}
+	return ParseTemplate(raw, path)
+}
+
+// ParseTemplate is LoadTemplate for a manifest already read; path names it in
+// errors.
+func ParseTemplate(raw []byte, path string) (*Template, error) {
 	if moreDocuments(raw) {
 		return nil, fmt.Errorf("ax task template %s: one document, not several", path)
 	}
@@ -329,7 +335,9 @@ func (c *Client) waitReady(ctx context.Context, task string) error {
 				return nil
 			}
 			last = resp.Status
-		} else {
+		} else if ctx.Err() == nil || last == "" {
+			// A request cut short by the deadline says nothing about the
+			// task; keep what it last answered.
 			last = err.Error()
 		}
 		select {

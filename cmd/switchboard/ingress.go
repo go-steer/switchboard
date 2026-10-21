@@ -525,6 +525,10 @@ func bindError(sess daemon.Session, err error) *ingressError {
 		return wrapf(http.StatusConflict, err,
 			"another post is binding session %q right now; retry once it has answered", sessionRef(sess))
 	}
+	if errors.Is(err, errNeedsTask) {
+		return wrapf(http.StatusConflict, err,
+			"the default agent runs a task per conversation, which has no session to bind; binding needs a daemon agent")
+	}
 	if isMissingSession(err) {
 		return wrapf(http.StatusNotFound, err, "the agent backend has no session %q", sessionRef(sess))
 	}
