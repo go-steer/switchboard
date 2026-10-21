@@ -6,6 +6,41 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [v0.8.0] — 2026-10-21
+
+A release about managing agents without restarting the gateway, and about
+switchboard proving who it is. v0.7.0 put several agents behind one chat app,
+fixed in a config file. v0.8.0 lets an operator add, replace and remove them
+at runtime. It also lays the groundwork for doing that without a shared
+secret per agent.
+
+**An admin API.** `--admin-addr` serves `/v1/agents`, `/v1/defaults` and
+`/v1/channels`. Callers authenticate through
+[purser](https://github.com/go-steer/purser): OIDC for people, mTLS for
+automation, or a token on loopback for a laptop. Every request needs an admin
+named by `--admin-allow`. What the config file declares stays pinned. A
+change that would leave a channel unable to start a thread is refused.
+Changes survive a restart under `--state-dir`, and every change is audited
+with who made it.
+
+**switchboard can authenticate as itself.** Instead of a bearer token per
+agent, the gateway can present one workload identity: a SPIFFE SVID, as GKE
+managed workload identity delivers it, or a certificate from a standard CA.
+Each agent entry then names how it is reached. A daemon has to accept mTLS
+for this to be used; core-agent's support is go-steer/core-agent#1313, and
+until it lands agents stay on bearer tokens.
+
+**The daemon clients follow no redirects.** A 3xx used to be followed, and
+net/http resends the bearer token on a same-host hop, https to http
+included. The image is built with Go 1.26.10, for a `crypto/x509` advisory
+reachable from switchboard.
+
+Upgrading needs no flag change: everything new is off until configured. One
+thing can stop a config that used to load. An agent's `daemon_url` must now
+be a bare `http(s)://host[:port]`, with no path, query or user info, because
+the contract's paths are appended to it. A daemon that answers with a
+redirect now fails the call instead of being followed.
+
 ### Added
 - **An admin API for agents** (#157, `--admin-addr`). It adds, replaces and
   removes agents, moves the global default, and sets a channel's default
