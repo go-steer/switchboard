@@ -199,6 +199,13 @@ switchboard owns its tasks:
   `DELETE /v1/agents/{name}/tasks/{task}` and a listing
   (`GET /v1/agents/{name}/tasks`, from switchboard's records) cover the rest.
 - **Removing an ax agent** deletes none of its tasks; the admin decides.
+- **A template change reaches only new tasks.** Tasks are immutable, so a
+  task created before a change keeps its old spec, including an old token,
+  which then fails every request with 401.
+  - `pkg/ax` reports such a task as drifted when it reuses it, and
+    switchboard logs it.
+  - Replacing drifted thread tasks (delete, then create) belongs with the
+    lifecycle work (X5).
 
 ### What stays the same
 
