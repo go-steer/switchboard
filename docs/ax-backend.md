@@ -1,7 +1,7 @@
 # The ax backend — switchboard starts agents as ax tasks
 
-**Status:** proposal (2026-10-21) · **Tracks:** _filled in when the issues are
-filed_ · **Builds on:** multi-agent (#140, `docs/multi-agent.md`), the runtime
+**Status:** proposal (2026-10-21) · **Tracks:** #168 (X1 #169, X2 #170, X3 #171,
+X4 #172, X5 #173; X6 go-steer/shipmind#39) · **Builds on:** multi-agent (#140, `docs/multi-agent.md`), the runtime
 registry (#156) · **Wanted by:** shipmind Milestone 3 ("switchboard starts
 agents", go-steer/shipmind `docs/DESIGN.md`) · **Target:** v0.9
 
