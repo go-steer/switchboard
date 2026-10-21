@@ -235,7 +235,10 @@ func TestACreateFailureIsReported(t *testing.T) {
 func TestATaskThatNeverAnswersTimesOut(t *testing.T) {
 	c, _, router := fixture(t)
 	router.notReady = 1 << 30
-	c.cfg.ReadyTimeout = 100 * time.Millisecond
+	// Room for many 10ms polls: at 100ms a slow CI runner's first request
+	// was still open at the deadline, so the last answer was its timeout,
+	// not the 503 (seen on #176).
+	c.cfg.ReadyTimeout = 750 * time.Millisecond
 	_, err := c.Ensure(context.Background(), "sb-x-0123456789abcdef")
 	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "503") {
 		t.Errorf("err = %v, want the deadline and the last status", err)
