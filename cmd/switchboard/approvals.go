@@ -711,6 +711,15 @@ func (r *Router) HandlePress(ctx context.Context, p chat.Press) error {
 		rec.Outcome = auditInvalid
 		return fmt.Errorf("press on %s carried an answer that is not a decision: %q", p.Conversation, p.Option)
 	}
+	if o, ok := r.ownerOf(p.Conversation); ok && !sameOwner(o, p.Caller) {
+		// A personal agent's prompts are its owner's to answer: an answer
+		// runs with their credentials, and a standing one writes a grant
+		// into the task every thread of theirs shares (caught in review).
+		// Before the prompt is located, as the approver check is.
+		r.logf.Warnf("perms %s: press by %q is not the owner of this personal agent's thread", p.Conversation, p.Caller)
+		rec.Outcome = auditNotOwner
+		return r.surfaceNotice(ctx, p.Conversation, noticeNotOwnerPress)
+	}
 	if !settings.approvers.allows(p.Caller) {
 		// Refused here, before the prompt is even located: a press switchboard
 		// will not relay should not get to learn whether the question is still

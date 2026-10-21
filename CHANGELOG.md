@@ -29,7 +29,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - **Personal and shared agents** (#172).
     - **`ax.scope: "owner"`** gives each person a task of their own, and every
       thread they start with the agent is a session in it. Its threads answer
-      their owner only.
+      their owner only, messages and approval presses alike.
+    - **Ownership is persisted** with the routing table and survives rebuilt
+      sessions and scope changes. Others' messages are audited as
+      `not_owner`.
     - **`"shared"`** is one task for everyone; startup warns.
   - Task cleanup follows (#173).
 

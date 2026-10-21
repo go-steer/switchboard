@@ -128,9 +128,12 @@ func (x *axAgent) forTask(task string) (*taskClients, error) {
 func (x *axAgent) taskName(agentName, gateway, conv, caller string) string {
 	switch x.scope {
 	case axScopeOwner:
-		return ax.TaskName("sb-"+agentName+"-u", gateway, caller)
+		// The scope is hashed too, so agent "foo" here and agent "foo-u" in
+		// thread scope never share a name (caught in review); the owner is
+		// folded, as their identity compares (sameOwner).
+		return ax.TaskName("sb-"+agentName+"-u", axScopeOwner, gateway, strings.ToLower(caller))
 	case axScopeShared:
-		return ax.TaskName("sb-"+agentName+"-shared", gateway)
+		return ax.TaskName("sb-"+agentName+"-shared", axScopeShared, gateway)
 	}
 	return ax.TaskName("sb-"+agentName, gateway, conv)
 }
@@ -330,12 +333,83 @@ func (r *Router) startAXTask(ctx context.Context, conv string, a *agent, e *sess
 	return created, nil
 }
 
-// personalToSomeoneElse reports whether e is an owner-scope conversation and
-// caller is not its owner.
-func (r *Router) personalToSomeoneElse(e *sessionEntry, caller string) bool {
-	a, ok := r.agents().lookup(e.agent)
-	return ok && a.ax != nil && a.ax.scope == axScopeOwner && e.owner != "" && caller != e.owner
+// Personal agents' threads (#172).
+//
+// An owner-scope thread belongs to the person who started it, recorded once
+// — owners, persisted with the routing table — and never reassigned. It is
+// the record, not the session or the agent's current scope, that decides:
+// a session is rebuilt for many reasons (a task re-created, a lost session,
+// a restart) and whoever spoke at that moment must not become the owner, and
+// a scope changed in the config must not open a personal task to everyone
+// (both caught in review).
+
+// errNotOwner is a message or press in a personal agent's thread from
+// someone other than its owner.
+var errNotOwner = errors.New("this thread talks to its starter's personal agent")
+
+// threadOwner is who a personal agent's thread belongs to.
+type threadOwner struct {
+	Owner string    `json:"owner"`
+	Since time.Time `json:"since"`
 }
+
+// ownerMaxAge is how long a thread's owner is remembered: long after its
+// session is forgotten, since forgetting it lets anyone take the thread.
+const ownerMaxAge = 365 * 24 * time.Hour
+
+// sameOwner compares identities as switchboard's approver lists do, folding
+// case: an email's case does not make another person.
+func sameOwner(a, b string) bool { return strings.EqualFold(a, b) }
+
+// ownerOf is the owner of conv's thread, if it belongs to a personal agent.
+func (r *Router) ownerOf(conv string) (string, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	o, ok := r.owners[conv]
+	return o.Owner, ok
+}
+
+// claimOwnerLocked records caller as conv's owner unless it has one, and
+// reports whether caller owns it. The caller holds r.mu.
+func (r *Router) claimOwnerLocked(conv, caller string) bool {
+	if o, ok := r.owners[conv]; ok {
+		return sameOwner(o.Owner, caller)
+	}
+	if r.owners == nil {
+		r.owners = make(map[string]threadOwner)
+	}
+	r.owners[conv] = threadOwner{Owner: caller, Since: time.Now().UTC()}
+	r.markDirty() // a non-blocking send: safe under mu
+	return true
+}
+
+// refuseNonOwner tells conv's thread, at most once per caller every
+// ownerNoticeEvery, that it answers its owner alone: posted in the thread,
+// so a stranger repeating themselves must not turn it into a stream.
+func (r *Router) refuseNonOwner(ctx context.Context, conv, caller string) {
+	key := conv + "\x00" + strings.ToLower(caller)
+	r.mu.Lock()
+	last, seen := r.ownerNoticed[key]
+	if seen && time.Since(last) < ownerNoticeEvery {
+		r.mu.Unlock()
+		return
+	}
+	if r.ownerNoticed == nil {
+		r.ownerNoticed = make(map[string]time.Time)
+	}
+	r.ownerNoticed[key] = time.Now()
+	r.mu.Unlock()
+	if err := r.surfaceNotice(ctx, conv, noticeNotOwner); err != nil {
+		r.logf.Errorf("handle %s: surface personal agent: %v", conv, err)
+	}
+}
+
+// ownerNoticeEvery spaces the not-the-owner notice per caller and thread.
+var ownerNoticeEvery = 10 * time.Minute
+
+const noticeNotOwnerPress = "This thread talks to its starter's personal agent: its questions are theirs to answer."
+
+const noticeNotOwner = "This thread talks to its starter's personal agent, which answers them alone. Start a thread of your own to talk to yours."
 
 // axStartNoticeAfter is how long a task start runs before the thread is told.
 var axStartNoticeAfter = 2 * time.Second

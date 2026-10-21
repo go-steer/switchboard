@@ -167,6 +167,12 @@ func (r *Router) release(now time.Time, idle func(*sessionEntry) bool) int {
 			pruned = true
 		}
 	}
+	for conv, o := range r.owners {
+		if now.Sub(o.Since) > ownerMaxAge {
+			delete(r.owners, conv)
+			pruned = true
+		}
+	}
 	r.mu.Unlock()
 	for _, e := range released {
 		// Outside the lock, as discard does: stopping the relay is a context

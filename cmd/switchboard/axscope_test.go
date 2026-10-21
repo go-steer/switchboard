@@ -18,6 +18,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-steer/switchboard/pkg/ax"
 	"github.com/go-steer/switchboard/pkg/chat"
@@ -66,8 +67,8 @@ func TestAPersonalAgentIsATaskPerPerson(t *testing.T) {
 	f.server.mu.Lock()
 	tasks := distinct(f.server.creates)
 	f.server.mu.Unlock()
-	alice := ax.TaskName("sb-triage-u", "slack", "alice@x.com")
-	bob := ax.TaskName("sb-triage-u", "slack", "bob@x.com")
+	alice := (&axAgent{scope: axScopeOwner}).taskName("triage", "slack", "", "alice@x.com")
+	bob := (&axAgent{scope: axScopeOwner}).taskName("triage", "slack", "", "bob@x.com")
 	if len(tasks) != 2 || !tasks[alice] || !tasks[bob] {
 		t.Errorf("tasks = %v, want alice's and bob's", tasks)
 	}
@@ -89,7 +90,7 @@ func TestAPersonalAgentAnswersItsOwnerOnly(t *testing.T) {
 	defer cancel()
 
 	f.sayAs(t, ctx, "C1:1", "alice@x.com", "mine")
-	alice := "agents/" + ax.TaskName("sb-triage-u", "slack", "alice@x.com")
+	alice := "agents/" + (&axAgent{scope: axScopeOwner}).taskName("triage", "slack", "", "alice@x.com")
 	waitFor(t, func() bool { return len(f.router.callsMatching(alice+" POST /sessions/")) == 1 }, "alice's inject")
 
 	f.sayAs(t, ctx, "C1:1", "mallory@x.com", "let me in")
@@ -117,7 +118,7 @@ func TestASharedAgentIsOneTask(t *testing.T) {
 	f.sayAs(t, ctx, "C1:2", "bob@x.com", "two")
 	f.server.mu.Lock()
 	defer f.server.mu.Unlock()
-	want := ax.TaskName("sb-triage-shared", "slack")
+	want := (&axAgent{scope: axScopeShared}).taskName("triage", "slack", "", "")
 	if tasks := distinct(f.server.creates); len(tasks) != 1 || !tasks[want] {
 		t.Errorf("tasks = %v, want only %s", tasks, want)
 	}
@@ -139,5 +140,132 @@ func TestScopesNameTasksApart(t *testing.T) {
 		if err := ax.ValidName(n); err != nil {
 			t.Error(err)
 		}
+	}
+}
+
+// Ownership is the thread's, recorded once: a scope later changed in the
+// config must not open a personal task to everyone (caught in review).
+func TestAScopeChangeDoesNotOpenAPersonalThread(t *testing.T) {
+	f := newAXFixture(t)
+	withScope(t, f, axScopeOwner)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f.sayAs(t, ctx, "C1:1", "alice@x.com", "mine")
+	alice := "agents/" + (&axAgent{scope: axScopeOwner}).taskName("triage", "slack", "", "alice@x.com")
+	waitFor(t, func() bool { return len(f.router.callsMatching(alice+" POST /sessions/")) == 1 }, "alice's inject")
+
+	withScope(t, f, axScopeThread)
+	f.sayAs(t, ctx, "C1:1", "mallory@x.com", "now?")
+	if n := len(f.router.callsMatching(alice + " POST /sessions/")); n != 1 {
+		t.Errorf("injects into alice's task = %d after the scope change, want hers alone", n)
+	}
+}
+
+// A thread that has to start over — its task re-created after a restart —
+// stays its owner's: a stranger speaking first neither wakes it nor takes it
+// (caught in review: they became its owner and locked her out).
+func TestAStrangerCannotTakeAPersonalThread(t *testing.T) {
+	f := newAXFixture(t)
+	withScope(t, f, axScopeOwner)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f.sayAs(t, ctx, "C1:1", "alice@x.com", "mine")
+	st := f.r.snapshot()
+	if st.Owners["C1:1"].Owner != "alice@x.com" {
+		t.Fatalf("owners = %+v, want alice recorded", st.Owners)
+	}
+	f.server.mu.Lock()
+	f.server.tasks = map[string]bool{} // gone while the gateway was down
+	f.server.mu.Unlock()
+
+	g := newAXFixtureSharing(t, f)
+	withScope(t, g, axScopeOwner)
+	g.r.restore(ctx, st, time.Now())
+	before := f.server.createCount()
+	calls := len(f.router.callsMatching(""))
+	g.sayAs(t, ctx, "C1:1", "mallory@x.com", "mine now")
+	if f.server.createCount() != before || len(f.router.callsMatching("")) != calls {
+		t.Error("a stranger's message woke or re-created the owner's task")
+	}
+	g.sayAs(t, ctx, "C1:1", "Alice@X.com", "back") // her address, another case
+	if o, _ := g.r.ownerOf("C1:1"); o != "alice@x.com" {
+		t.Errorf("owner = %q, want alice still", o)
+	}
+	alice := "agents/" + (&axAgent{scope: axScopeOwner}).taskName("triage", "slack", "", "alice@x.com")
+	waitFor(t, func() bool { return len(f.router.callsMatching(alice+" POST /sessions/")) == 2 }, "alice carrying on in her task")
+}
+
+// A personal agent's questions are its owner's to answer: an answer runs with
+// their credentials, and a standing one covers every thread of theirs
+// (caught in review).
+func TestAPersonalAgentsQuestionsAreItsOwners(t *testing.T) {
+	d := newPermsDaemon(t)
+	r, fake, _ := permsRouter(t, d)
+	liveEntry(r, "C1:1")
+	r.mu.Lock()
+	r.claimOwnerLocked("C1:1", "alice@x.com")
+	r.mu.Unlock()
+	press := func(who string) {
+		t.Helper()
+		if err := r.HandlePress(context.Background(), chat.Press{
+			Conversation: "C1:1", Caller: who,
+			DecisionID: agentDecisionRef(r.agents().stored(""), testSession, "pr1"),
+			Option:     "allow-once",
+		}); err != nil {
+			t.Fatalf("HandlePress by %s: %v", who, err)
+		}
+	}
+	press("mallory@x.com")
+	if posts := d.posts(); len(posts) != 0 {
+		t.Fatalf("answered %v for a stranger", posts)
+	}
+	if got := recvReply(t, fake.replies); got.Text != noticeNotOwnerPress {
+		t.Errorf("thread got %q", got.Text)
+	}
+	press("alice@x.com")
+	if posts := d.posts(); len(posts) != 1 {
+		t.Errorf("posts = %v, want the owner's press answered", posts)
+	}
+}
+
+// A refused message is audited as refused, not as injected, and the notice
+// telling the thread is not repeated to the same person every time (caught
+// in review).
+func TestARefusalIsAuditedAndNotRepeated(t *testing.T) {
+	f := newAXFixture(t)
+	withScope(t, f, axScopeOwner)
+	al, buf := testAudit()
+	f.r.setAudit(al)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f.sayAs(t, ctx, "C1:1", "alice@x.com", "mine")
+	f.sayAs(t, ctx, "C1:1", "mallory@x.com", "one")
+	f.sayAs(t, ctx, "C1:1", "mallory@x.com", "two")
+
+	var notices int
+	for drained := false; !drained; {
+		select {
+		case r := <-f.out.replies:
+			if r.Text == noticeNotOwner {
+				notices++
+			}
+		default:
+			drained = true
+		}
+	}
+	if notices != 1 {
+		t.Errorf("notices = %d, want one", notices)
+	}
+	var refused int
+	for _, rec := range records(t, buf) {
+		if rec.Caller == "mallory@x.com" {
+			if rec.Outcome != auditNotOwner || rec.Session != "" {
+				t.Errorf("mallory's turn audited as %+v", rec)
+			}
+			refused++
+		}
+	}
+	if refused != 2 {
+		t.Errorf("refusals audited = %d, want 2", refused)
 	}
 }

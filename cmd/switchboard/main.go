@@ -506,6 +506,9 @@ func runServe(args []string) (err error) {
 			if a.ax.scope == axScopeShared {
 				logf.Warnf("agent %s: scope shared runs one task for every caller, so they all share one sandbox, its credentials and its history", n)
 			}
+			if a.ax.scope == axScopeOwner && *stateDir == "" {
+				logf.Warnf("agent %s: scope owner without --state-dir: a restart forgets whose each thread is, and the next person to speak in one becomes its owner", n)
+			}
 			switch {
 			case !a.ax.idle:
 				logf.Warnf("agent %s: its task template sets no spec.idle, so its tasks never suspend and hold their resources until deleted", n)

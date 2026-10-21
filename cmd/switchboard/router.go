@@ -470,9 +470,13 @@ type Router struct {
 	// gatewayID goes into ax task names, so gateways sharing a cluster never
 	// share a conversation's task (setGateway).
 	gatewayID string
-	out       sender
-	metrics   *metrics
-	logf      logging.Logf
+	// owners is who each personal agent's thread belongs to (#172), under
+	// mu and persisted; ownerNoticed spaces the notice telling others so.
+	owners       map[string]threadOwner
+	ownerNoticed map[string]time.Time
+	out          sender
+	metrics      *metrics
+	logf         logging.Logf
 
 	// parkWait overrides parkRespondTimeout; zero means the constant. A test
 	// seam.
@@ -1870,18 +1874,28 @@ func (r *Router) Handle(ctx context.Context, msg chat.Message) (err error) {
 	// And one audit line, on the way out for the same reason: every exit is
 	// a turn somebody caused, including the ones that failed.
 	var entry *sessionEntry
-	defer func() { r.auditTurn(msg, entry, err) }()
-
-	entry, err = r.session(ctx, msg.Conversation, msg.Channel, msg.Caller)
-	if err == nil && r.personalToSomeoneElse(entry, msg.Caller) {
-		// A personal agent's thread answers its owner only: mast in a task
-		// is single-user and holds its owner's credentials and history, so
-		// anyone else driving it would act with the owner's access (#172).
-		if sendErr := r.surfaceNotice(ctx, msg.Conversation, "This thread talks to its starter's personal agent, which answers them alone. Start a thread of your own to talk to yours."); sendErr != nil {
-			r.logf.Errorf("handle %s: surface personal agent: %v", msg.Conversation, sendErr)
+	refused := false // a personal agent's thread, and not its owner
+	defer func() {
+		if refused {
+			r.auditTurn(msg, entry, errNotOwner) // refused, nothing sent
+			return
 		}
+		r.auditTurn(msg, entry, err)
+	}()
+
+	// A personal agent's thread answers its owner only: mast in a task is
+	// single-user and holds its owner's credentials and history, so anyone
+	// else driving it would act with the owner's access (#172). Before the
+	// session is looked up, so a stranger neither wakes the owner's task nor,
+	// where the session has to be rebuilt, becomes its owner (caught in
+	// review). Audited as refused; not an error to the adapter.
+	if o, ok := r.ownerOf(msg.Conversation); ok && !sameOwner(o, msg.Caller) {
+		r.refuseNonOwner(ctx, msg.Conversation, msg.Caller)
+		refused = true
 		return nil
 	}
+
+	entry, err = r.session(ctx, msg.Conversation, msg.Channel, msg.Caller)
 	if err != nil {
 		if errors.Is(err, errNoAgentHere) {
 			if sendErr := r.surfaceNotice(ctx, msg.Conversation, "No agent is available in this channel: its allowed agents exclude its default. An admin needs to fix the channel's agent settings."); sendErr != nil {
@@ -2868,6 +2882,18 @@ func (r *Router) sessionAs(ctx context.Context, conv, channel, caller, agent str
 	default:
 		e.agent, e.err = set.channelAgent(cs)
 	}
+	if e.err == nil {
+		if a, ok := set.lookup(e.agent); ok && a.ax != nil && a.ax.scope == axScopeOwner {
+			// Claimed here, under the lock that publishes the entry, so two
+			// first messages cannot both own the thread; refused if it is
+			// someone else's (a turn racing the early check in Handle).
+			if caller == "" {
+				e.err = fmt.Errorf("%s is a personal agent, and this message names no caller", a.label())
+			} else if !r.claimOwnerLocked(conv, caller) {
+				e.err = errNotOwner
+			}
+		}
+	}
 	if e.err != nil {
 		// No agent this channel may use. Not published: nothing to wait on and
 		// nothing to retry until the configuration changes.
@@ -2901,15 +2927,6 @@ func (r *Router) sessionAs(ctx context.Context, conv, channel, caller, agent str
 	if a, ok := set.lookup(e.agent); ok && a.ax != nil {
 		// An ax agent: the conversation's task, started (or woken, or found)
 		// before the session it will hold.
-		if a.ax.scope == axScopeOwner && caller == "" {
-			// Nobody to own it: an owner-scope task is named by its owner.
-			e.err = fmt.Errorf("%s is a personal agent, and this message names no caller", a.label())
-			r.mu.Lock()
-			delete(r.sessions, conv)
-			r.mu.Unlock()
-			close(e.ready)
-			return e, e.err
-		}
 		e.task = a.ax.taskName(a.name, r.gatewayID, conv, caller)
 		if _, e.err = r.startAXTask(ctx, conv, a, e); e.err != nil {
 			r.mu.Lock()

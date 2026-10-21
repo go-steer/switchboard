@@ -81,6 +81,7 @@ const (
 	auditMaybeApplied     = "maybe_applied"      // the daemon took it and did not confirm
 	auditFailed           = "failed"             // it did not reach the daemon
 	auditPressError       = "error"              // anything else
+	auditNotOwner         = "not_owner"          // a personal agent's thread, and not its owner (#172)
 )
 
 // auditRecord is one line. Field names are a format operators will parse, so
@@ -206,6 +207,8 @@ func (r *Router) auditTurn(msg chat.Message, e *sessionEntry, err error) {
 	}
 	switch {
 	case err == nil:
+	case errors.Is(err, errNotOwner):
+		rec.Outcome = auditNotOwner // refused, nothing sent (#172)
 	case rec.Session == "":
 		rec.Outcome = auditNoSession
 		rec.Status = statusOf(err)
