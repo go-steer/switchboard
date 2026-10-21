@@ -107,7 +107,8 @@ type sessionRecord struct {
 	// TaskDeleted: Task was deleted (#173) — quiet past the agent's
 	// delete_after, or by an admin — so the next message starts over, and
 	// the thread is told why.
-	TaskDeleted bool `json:"task_deleted,omitempty"`
+	TaskDeleted       bool   `json:"task_deleted,omitempty"`
+	TaskDeletedReason string `json:"task_deleted_reason,omitempty"` // "quiet" or "admin"
 	// Owner is the identity the relay subscribes as: the creator, or empty for
 	// an adopted session (sessionEntry.owner).
 	Owner   string `json:"owner,omitempty"`

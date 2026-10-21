@@ -81,8 +81,13 @@ type AXConfig struct {
 }
 
 // defaultDeleteAfter is how long a thread-scope task outlives its
-// conversation's last traffic.
-const defaultDeleteAfter = 14 * 24 * time.Hour
+// conversation's last traffic. maxDeleteAfter leaves a day under the record's
+// own lifetime: at the cap the record was pruned before the deleting sweep
+// could see it, orphaning the task (caught in review).
+const (
+	defaultDeleteAfter = 14 * 24 * time.Hour
+	maxDeleteAfter     = dormantMaxAge - 24*time.Hour
+)
 
 // minStreamLinger bounds stream_linger from below: shorter, a conversation
 // would let go between a message and its reply.
@@ -273,8 +278,8 @@ func buildAXAgent(ac AgentConfig, b agentBuilder) (*axAgent, error) {
 	deleteAfter := defaultDeleteAfter
 	if c.DeleteAfter != "" {
 		d, err := time.ParseDuration(c.DeleteAfter)
-		if err != nil || d < 0 || d > dormantMaxAge {
-			return nil, fmt.Errorf(".ax.delete_after %q: want 0 (keep tasks) or a duration up to %s, like 336h", c.DeleteAfter, dormantMaxAge)
+		if err != nil || d < 0 || d > maxDeleteAfter {
+			return nil, fmt.Errorf(".ax.delete_after %q: want 0 (keep tasks) or a duration up to %s, like 336h", c.DeleteAfter, maxDeleteAfter)
 		}
 		deleteAfter = d
 	}
@@ -350,15 +355,26 @@ func (r *Router) startAXTask(ctx context.Context, conv string, a *agent, e *sess
 		}
 	}()
 	start := time.Now()
-	got, err := a.ax.client.Ensure(ctx, e.task)
-	if err == nil && got.Drifted && a.ax.scope == axScopeThread && a.ax.replaceDrifted {
+	// A deletion of this task in flight finishes first: starting it now would
+	// reuse a task about to vanish under the conversation (caught in review).
+	err = r.waitTaskDelete(ctx, e.task)
+	replaced := false
+	if err == nil && a.ax.scope == axScopeThread && a.ax.replaceDrifted {
 		// Made from an earlier template — an old token fails every request —
-		// and a thread's task holds one conversation: replace it. The
-		// conversation starts over in the new one (#173).
-		r.logf.Warnf("session %s: replacing task %s, made from an earlier version of agent %s's template", conv, e.task, a.name)
-		if err = a.ax.client.Delete(ctx, e.task); err == nil {
-			got, err = a.ax.client.Ensure(ctx, e.task)
+		// and a thread's task holds one conversation: replace it, before
+		// waking it, which it may not even manage. The conversation starts
+		// over in the new one (#173).
+		var in ax.Inspection
+		if in, err = a.ax.client.Inspect(ctx, e.task); err == nil && in.Exists && in.Drifted {
+			r.logf.Warnf("session %s: replacing task %s, made from an earlier version of agent %s's template", conv, e.task, a.name)
+			err = a.ax.client.Delete(ctx, e.task)
+			replaced = err == nil
 		}
+	}
+	var got ax.Ensured
+	if err == nil {
+		got, err = a.ax.client.Ensure(ctx, e.task)
+		got.Created = got.Created || replaced
 	}
 	close(done)
 	created = got.Created
@@ -459,6 +475,62 @@ var ownerNoticeEvery = 10 * time.Minute
 const noticeNotOwnerPress = "This thread talks to its starter's personal agent: its questions are theirs to answer."
 
 const noticeNotOwner = "This thread talks to its starter's personal agent, which answers them alone. Start a thread of your own to talk to yours."
+
+// The delete gate (caught in review). A task is deleted outside the router's
+// lock, and a conversation can wake its task meanwhile: without a gate, the
+// sweep deleted a task its conversation had just resumed, leaving a live
+// conversation on a deleted task. A deleter takes the gate after checking,
+// under the lock, that nothing is using the task; a start waits on it.
+
+// beginTaskDeleteLocked takes task's delete gate, or reports it taken. The
+// caller holds r.mu and calls done when the delete is over.
+func (r *Router) beginTaskDeleteLocked(task string) (done func(), ok bool) {
+	if _, busy := r.axDeleting[task]; busy {
+		return nil, false
+	}
+	if r.axDeleting == nil {
+		r.axDeleting = make(map[string]chan struct{})
+	}
+	ch := make(chan struct{})
+	r.axDeleting[task] = ch
+	return func() {
+		r.mu.Lock()
+		delete(r.axDeleting, task)
+		r.mu.Unlock()
+		close(ch)
+	}, true
+}
+
+// waitTaskDelete waits out a deletion of task in flight.
+func (r *Router) waitTaskDelete(ctx context.Context, task string) error {
+	r.mu.Lock()
+	ch, busy := r.axDeleting[task]
+	r.mu.Unlock()
+	if !busy {
+		return nil
+	}
+	select {
+	case <-ch:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// Why a task was deleted, for what its conversation is told.
+const (
+	taskDeletedQuiet = "quiet"
+	taskDeletedAdmin = "admin"
+)
+
+// taskDeletedNotice is what a conversation whose task was deleted is told
+// when it next speaks.
+func taskDeletedNotice(label, reason string) string {
+	if reason == taskDeletedAdmin {
+		return label + "'s task for this conversation was deleted by an administrator, so this conversation starts over."
+	}
+	return label + "'s task for this conversation was cleaned up after it went quiet, so this conversation starts over."
+}
 
 // taskNote is what switchboard's records say about one task.
 type taskNote struct {

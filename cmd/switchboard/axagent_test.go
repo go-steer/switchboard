@@ -48,7 +48,8 @@ type axServer struct {
 	specs    map[string]*axapi.TaskSpec // what each task was created with
 	creates  []string
 	deletes  []string
-	failAll  bool // every create and get fails: ax-server in trouble
+	ops      []string // "op name", in order
+	failAll  bool     // every create and get fails: ax-server in trouble
 	listener string
 }
 
@@ -57,6 +58,7 @@ func (s *axServer) CreateTask(_ context.Context, r *axapi.CreateTaskRequest) (*a
 	defer s.mu.Unlock()
 	name := r.Task.Metadata.Name
 	s.creates = append(s.creates, name)
+	s.ops = append(s.ops, "create "+name)
 	if s.failAll {
 		return nil, status.Error(codes.Unavailable, "ax-server is down")
 	}
@@ -80,6 +82,7 @@ func (s *axServer) DeleteTask(_ context.Context, r *axapi.DeleteTaskRequest) (*a
 	delete(s.tasks, r.Name)
 	delete(s.specs, r.Name)
 	s.deletes = append(s.deletes, r.Name)
+	s.ops = append(s.ops, "delete "+r.Name)
 	return &axapi.DeleteTaskResponse{}, nil
 }
 
@@ -111,6 +114,9 @@ func (s *axServer) GetTask(_ context.Context, r *axapi.GetTaskRequest) (*axapi.T
 }
 
 func (s *axServer) ResumeTask(_ context.Context, r *axapi.ResumeTaskRequest) (*axapi.Task, error) {
+	s.mu.Lock()
+	s.ops = append(s.ops, "resume "+r.Name)
+	s.mu.Unlock()
 	return &axapi.Task{Metadata: &axapi.ObjectMeta{Name: r.Name}}, nil
 }
 

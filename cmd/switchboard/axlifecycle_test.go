@@ -111,7 +111,7 @@ func TestOnlyThreadTasksAreDeletedAutomatically(t *testing.T) {
 // the task to delete, first.
 func TestDeleteAfterIsBounded(t *testing.T) {
 	f := newAXFixture(t)
-	for _, d := range []string{"721h", "1000h", "-1h", "soon"} {
+	for _, d := range []string{"697h", "720h", "1000h", "-1h", "soon"} {
 		c := f.cfg
 		axc := *c.AX
 		axc.DeleteAfter = d
@@ -211,5 +211,186 @@ func TestTheAdminAPIListsAndDeletesTasks(t *testing.T) {
 	}
 	if !audited {
 		t.Error("the task delete was not audited")
+	}
+}
+
+// A conversation waking its task is not swept: the sweep deleted a task its
+// conversation had just resumed, leaving it live on a deleted task (caught in
+// review).
+func TestAWakingConversationsTaskIsNotDeleted(t *testing.T) {
+	f := newAXFixture(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f.say(t, ctx, "C1:1", "old")
+	quietFor(t, f, "C1:1", 15*24*time.Hour)
+	f.r.mu.Lock()
+	f.r.sessions["C1:1"] = &sessionEntry{ready: make(chan struct{})} // reviving
+	f.r.mu.Unlock()
+	if n := f.r.deleteQuietTasks(ctx, time.Now()); n != 0 {
+		t.Errorf("deleted %d under a waking conversation", n)
+	}
+}
+
+// A task start waits out a deletion of its task in flight, rather than reuse
+// a task about to vanish under it.
+func TestATaskStartWaitsOutItsDeletion(t *testing.T) {
+	f := newAXFixture(t)
+	task := ax.TaskName("sb-triage", "slack", "C1:1")
+	f.r.mu.Lock()
+	done, ok := f.r.beginTaskDeleteLocked(task)
+	f.r.mu.Unlock()
+	if !ok {
+		t.Fatal("no gate")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		f.say(t, ctx, "C1:1", "hi")
+	}()
+	time.Sleep(200 * time.Millisecond)
+	if f.server.createCount() != 0 {
+		t.Fatal("the task was started while its deletion was in flight")
+	}
+	done()
+	<-finished
+	if f.server.createCount() != 1 {
+		t.Errorf("creates = %d after the deletion, want 1", f.server.createCount())
+	}
+}
+
+// delete_after at its cap still deletes before the record is pruned (caught
+// in review: at dormantMaxAge the prune always won).
+func TestDeleteAfterAtItsCapStillDeletes(t *testing.T) {
+	f := newAXFixture(t)
+	axc := *f.cfg.AX
+	axc.DeleteAfter = maxDeleteAfter.String()
+	f.cfg.AX = &axc
+	withScope(t, f, axScopeThread)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f.say(t, ctx, "C1:1", "hi")
+	quietFor(t, f, "C1:1", maxDeleteAfter+time.Hour)
+	f.r.releaseIdleAX(time.Now()) // the 10s tick that prunes first
+	if n := f.r.deleteQuietTasks(ctx, time.Now()); n != 1 {
+		t.Errorf("deleted %d, want the task deleted before its record is pruned", n)
+	}
+}
+
+// A drifted thread task is deleted before it is woken: one whose old spec
+// cannot start would otherwise never be replaced (caught in review).
+func TestADriftedTaskIsReplacedBeforeItIsWoken(t *testing.T) {
+	f := newAXFixture(t)
+	task := ax.TaskName("sb-triage", "slack", "C1:1")
+	f.server.mu.Lock()
+	f.server.tasks[task] = true
+	f.server.specs = map[string]*axapi.TaskSpec{task: {Image: "a-removed-image", Http: &axapi.TaskHTTP{Port: 8484}}}
+	f.server.mu.Unlock()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f.say(t, ctx, "C1:1", "hi")
+	f.server.mu.Lock()
+	defer f.server.mu.Unlock()
+	if len(f.server.ops) < 2 || f.server.ops[0] != "delete "+task {
+		t.Errorf("ops = %v, want the delete before anything else", f.server.ops)
+	}
+}
+
+// The admin listing says which tasks this gateway has no record of — an
+// orphan or another gateway's — and deleting one takes force.
+func TestAnUnrecordedTaskNeedsForce(t *testing.T) {
+	f := newAXFixture(t)
+	other := ax.TaskName("sb-triage", "googlechat", "spaces/A:spaces/A/threads/T")
+	f.server.mu.Lock()
+	f.server.tasks[other] = true
+	f.server.mu.Unlock()
+	admin := newRegistryAdmin(f.r, registryConfig{Base: f.r.agents()})
+	s, err := newAdminServer(adminConfig{Addr: "127.0.0.1:0", Auth: adminAuthToken, Token: "t", Platform: "slack"}, f.r, admin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(s.h)
+	defer srv.Close()
+	do := func(method, path string) (int, string) {
+		req, _ := http.NewRequest(method, srv.URL+path, nil)
+		req.Header.Set("Authorization", "Bearer t")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, string(b)
+	}
+	if _, body := do("GET", "/v1/agents/triage/tasks"); !strings.Contains(body, `"recorded":false`) {
+		t.Errorf("listing = %s, want the task marked unrecorded", body)
+	}
+	if code, _ := do("DELETE", "/v1/agents/triage/tasks/"+other); code != http.StatusConflict {
+		t.Errorf("unforced delete: %d, want 409", code)
+	}
+	if code, _ := do("DELETE", "/v1/agents/triage/tasks/"+other+"?force=true"); code != http.StatusNoContent {
+		t.Errorf("forced delete: %d, want 204", code)
+	}
+}
+
+// After an admin deletes a conversation's task, it is told so in those words,
+// and a press there neither answers nor uses up the notice (caught in review).
+func TestAnAdminDeleteIsExplainedAndPressesDoNotSpendIt(t *testing.T) {
+	f := newAXFixture(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f.say(t, ctx, "C1:1", "hi")
+	task := ax.TaskName("sb-triage", "slack", "C1:1")
+	f.r.markTaskDeleted(ctx, task, taskDeletedAdmin)
+	if _, ok := f.r.liveOrRevived(ctx, "C1:1", "C1"); ok {
+		t.Error("a press found a session in a conversation whose task was deleted")
+	}
+	f.r.mu.Lock()
+	rec, kept := f.r.dormant["C1:1"]
+	f.r.mu.Unlock()
+	if !kept || !rec.TaskDeleted {
+		t.Fatalf("the press used up the record (%+v, kept %v): the next message would start over unexplained", rec, kept)
+	}
+	f.say(t, ctx, "C1:1", "back")
+	var found bool
+	for drained := false; !drained; {
+		select {
+		case r := <-f.out.replies:
+			if strings.Contains(r.Text, "deleted by an administrator") {
+				found = true
+			}
+		default:
+			drained = true
+		}
+	}
+	if !found {
+		t.Error("no notice that an administrator deleted the task")
+	}
+}
+
+// Starting over keeps the agent the conversation had, not the channel's
+// default (caught in review).
+func TestStartingOverKeepsTheConversationsAgent(t *testing.T) {
+	f := newAXFixture(t)
+	d := newRecordingDaemon(t, "sd")
+	t.Setenv("TOK_DAEMON", "tok")
+	set, err := buildAgents([]AgentConfig{
+		{Name: "plain", DaemonURL: d.url, TokenEnv: "TOK_DAEMON"},
+		f.cfg,
+	}, "plain", agentBuilder{ax: &axClients{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.r.setAgents(set)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f.r.mu.Lock()
+	f.r.dormant["C1:1"] = sessionRecord{Channel: "C1", Session: "mast/old", Agent: "triage", Task: ax.TaskName("sb-triage", "slack", "C1:1"),
+		Touched: time.Now(), TaskDeleted: true, TaskDeletedReason: taskDeletedQuiet}
+	f.r.mu.Unlock()
+	f.say(t, ctx, "C1:1", "back")
+	if f.server.createCount() != 1 || d.creates.Load() != 0 {
+		t.Errorf("ax creates %d, daemon creates %d; want the conversation back on its ax agent", f.server.createCount(), d.creates.Load())
 	}
 }

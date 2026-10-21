@@ -371,6 +371,10 @@ type taskView struct {
 	Conversations []string  `json:"conversations,omitempty"`
 	Owner         string    `json:"owner,omitempty"`
 	LastTraffic   time.Time `json:"last_traffic,omitzero"`
+	// Recorded: this gateway has a record of the task. One without may be
+	// an orphan — or another gateway's, since names show the agent and
+	// not which gateway made them (caught in review).
+	Recorded bool `json:"recorded"`
 }
 
 // axAgentFor is the named agent if it is an ax agent, else an error reply.
@@ -404,7 +408,7 @@ func (s *adminServer) listTasks(w http.ResponseWriter, r *http.Request) {
 	for _, t := range tasks {
 		v := taskView{Task: t.Name, Phase: t.Phase}
 		if n, ok := notes[t.Name]; ok {
-			v.Conversations, v.Owner, v.LastTraffic = n.convs, n.owner, n.last
+			v.Conversations, v.Owner, v.LastTraffic, v.Recorded = n.convs, n.owner, n.last, true
 		}
 		out = append(out, v)
 	}
@@ -420,13 +424,28 @@ func (s *adminServer) deleteTask(w http.ResponseWriter, r *http.Request) {
 	if !a.ax.ownsTask(name, task) {
 		// Only this agent's own tasks: the atespace holds others' too
 		// (lookout's, say), which switchboard has no business deleting.
+		s.audited(r, "delete task "+task+" of agent "+name, task, nil, fmt.Errorf("task %q: %w", task, errUnknown))
 		writeAdminError(w, http.StatusNotFound, fmt.Sprintf("no task %q belongs to agent %q", task, name))
+		return
+	}
+	if _, recorded := s.router.taskNotes()[task]; !recorded && r.URL.Query().Get("force") != "true" {
+		// No record here: an orphan, or another gateway's live task, which
+		// the name cannot tell apart.
+		writeAdminError(w, http.StatusConflict, fmt.Sprintf("this gateway has no record of task %q: it may be another gateway's; add ?force=true to delete it anyway", task))
+		return
+	}
+	s.router.mu.Lock()
+	done, ok := s.router.beginTaskDeleteLocked(task)
+	s.router.mu.Unlock()
+	if !ok {
+		writeAdminError(w, http.StatusConflict, fmt.Sprintf("task %q is being deleted already", task))
 		return
 	}
 	err := a.ax.client.Delete(r.Context(), task)
 	if err == nil {
-		s.router.markTaskDeleted(task)
+		s.router.markTaskDeleted(r.Context(), task, taskDeletedAdmin)
 	}
+	done()
 	s.audited(r, "delete task "+task+" of agent "+name, task, nil, err)
 	if err != nil {
 		s.cfg.Logf.Warnf("admin: %v", err)

@@ -120,6 +120,7 @@ func (r *Router) deleteQuietTasks(ctx context.Context, now time.Time) int {
 	type doomed struct {
 		conv, task string
 		a          *agent
+		touched    time.Time
 	}
 	set := r.agents()
 	var due []doomed
@@ -128,23 +129,43 @@ func (r *Router) deleteQuietTasks(ctx context.Context, now time.Time) int {
 		if rec.Task == "" || rec.TaskDeleted {
 			continue
 		}
+		if _, waking := r.sessions[conv]; waking {
+			continue // a revive keeps the record until its task answers
+		}
 		a, ok := set.lookup(rec.Agent)
 		if !ok || a.ax == nil || a.ax.scope != axScopeThread || a.ax.deleteAfter <= 0 || now.Sub(rec.Touched) <= a.ax.deleteAfter {
 			continue
 		}
-		due = append(due, doomed{conv, rec.Task, a})
+		due = append(due, doomed{conv, rec.Task, a, rec.Touched})
 	}
 	r.mu.Unlock()
 	deleted := 0
 	for _, d := range due {
+		// Checked again just before: the conversation may have woken since
+		// the list was made. Then the gate, which a start waits on.
+		r.mu.Lock()
+		rec, still := r.dormant[d.conv]
+		_, waking := r.sessions[d.conv]
+		var done func()
+		ok := still && !waking && rec.Task == d.task && !rec.TaskDeleted && rec.Touched.Equal(d.touched)
+		if ok {
+			done, ok = r.beginTaskDeleteLocked(d.task)
+		}
+		r.mu.Unlock()
+		if !ok {
+			continue
+		}
 		dctx, cancel := context.WithTimeout(ctx, platformTimeout)
 		err := d.a.ax.client.Delete(dctx, d.task)
 		cancel()
+		if err == nil {
+			r.markTaskDeleted(ctx, d.task, taskDeletedQuiet)
+		}
+		done()
 		if err != nil {
 			r.logf.Warnf("ax: delete quiet task %s of %s: %v", d.task, d.conv, err)
 			continue
 		}
-		r.markTaskDeleted(d.task)
 		r.logf.Infof("ax: deleted task %s of %s, quiet for over %s", d.task, d.conv, d.a.ax.deleteAfter)
 		deleted++
 	}
@@ -152,10 +173,15 @@ func (r *Router) deleteQuietTasks(ctx context.Context, now time.Time) int {
 }
 
 // markTaskDeleted marks every record of task deleted, live entries included:
-// a live one is released first, its streams stopped, so its next message
-// finds the mark rather than a task that is not there.
-func (r *Router) markTaskDeleted(task string) {
-	var stopped []*sessionEntry
+// a live one is released first, its streams stopped and its placeholder
+// finalised (caught in review: it was left frozen), so its next message finds
+// the mark rather than a task that is not there.
+func (r *Router) markTaskDeleted(ctx context.Context, task, reason string) {
+	type stoppedEntry struct {
+		conv string
+		e    *sessionEntry
+	}
+	var stopped []stoppedEntry
 	r.mu.Lock()
 	for conv, e := range r.sessions {
 		select {
@@ -164,23 +190,26 @@ func (r *Router) markTaskDeleted(task string) {
 			continue
 		}
 		if e.task == task {
-			r.dormant[conv] = e.record()
+			rec := e.record()
+			rec.Placeholder = "" // finalised below
+			r.dormant[conv] = rec
 			delete(r.sessions, conv)
-			stopped = append(stopped, e)
+			stopped = append(stopped, stoppedEntry{conv, e})
 		}
 	}
 	for conv, rec := range r.dormant {
 		if rec.Task == task && !rec.TaskDeleted {
-			rec.TaskDeleted = true
+			rec.TaskDeleted, rec.TaskDeletedReason = true, reason
 			r.dormant[conv] = rec
 		}
 	}
 	r.mu.Unlock()
-	for _, e := range stopped {
-		if e.stop != nil {
-			e.stop()
+	for _, s := range stopped {
+		if s.e.stop != nil {
+			s.e.stop()
 		}
-		e.stopTicker()
+		s.e.stopTicker()
+		r.failProgress(ctx, s.e, s.conv)
 		r.metrics.sessionClosed()
 	}
 	r.markDirty()
