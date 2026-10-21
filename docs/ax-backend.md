@@ -210,6 +210,24 @@ and history.
 
 ### Lifecycle
 
+_As built (#173):_
+- **The sweep:** once a minute, it deletes the task of a dormant thread-scope
+  conversation quiet past `delete_after`.
+  - `delete_after` is capped a day under the 30-day record lifetime, so the
+    sweep sees a task before its record is pruned. A delete that keeps failing
+    for that day still orphans the task, which the admin API can remove.
+  - A per-task gate, plus a re-check under the lock, stops a delete racing a
+    conversation that is waking its task. A start waits for any delete in
+    flight.
+- **The record** is kept, marked with why, so the next message starts over and
+  says so.
+- **Drifted thread tasks** are found before they are woken, then deleted and
+  re-created.
+- **The admin API** lists an agent's tasks by name pattern, since ax keeps no
+  labels, and deletes only names of that pattern.
+  - A task this gateway has no record of may be another gateway's, so deleting
+    it takes `force`.
+
 ax deletes nothing on its own, and lookout leaves deletion open (#567).
 switchboard owns its tasks:
 

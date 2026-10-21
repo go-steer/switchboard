@@ -34,7 +34,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
       sessions and scope changes. Others' messages are audited as
       `not_owner`.
     - **`"shared"`** is one task for everyone; startup warns.
-  - Task cleanup follows (#173).
+  - **Task cleanup** (#173).
+    - **Thread tasks:** a thread's task is deleted once its conversation has
+      been quiet for `ax.delete_after` (default 14 days, `0` keeps). The
+      thread's next message starts over and says why.
+    - **Template changes:** a thread task made from an earlier template is
+      replaced (`ax.replace_drifted`).
+    - **Admin API:** `GET /v1/agents/{name}/tasks` lists an agent's tasks,
+      and `DELETE /v1/agents/{name}/tasks/{task}` deletes one of them.
 
 ## [v0.8.0] — 2026-10-21
 

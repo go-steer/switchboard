@@ -474,9 +474,11 @@ type Router struct {
 	// mu and persisted; ownerNoticed spaces the notice telling others so.
 	owners       map[string]threadOwner
 	ownerNoticed map[string]time.Time
-	out          sender
-	metrics      *metrics
-	logf         logging.Logf
+	// axDeleting gates each ax task being deleted (#173), under mu.
+	axDeleting map[string]chan struct{}
+	out        sender
+	metrics    *metrics
+	logf       logging.Logf
 
 	// parkWait overrides parkRespondTimeout; zero means the constant. A test
 	// seam.
@@ -2867,6 +2869,12 @@ func (r *Router) sessionAs(ctx context.Context, conv, channel, caller, agent str
 		if e := r.reviveLocked(ctx, conv, channel, rec); e != nil {
 			return e, e.err
 		}
+		if agent == "" {
+			// Starting over keeps the agent the conversation had — one
+			// chosen with `agent` included — rather than the channel's
+			// default (caught in review).
+			agent = rec.Agent
+		}
 	}
 	// This goroutine owns creation; publish a not-yet-ready entry so
 	// concurrent turns on the same conversation wait rather than
@@ -2977,6 +2985,16 @@ func (r *Router) reviveLocked(ctx context.Context, conv, channel string, rec ses
 	}
 	a, ok := r.agents().lookup(e.agent)
 	isAX := ok && a.ax != nil
+	if rec.TaskDeleted {
+		// Its task was cleaned up: start over in a fresh one, and say why.
+		delete(r.dormant, conv)
+		label := e.agent
+		if ok {
+			label = a.label()
+		}
+		go r.surfaceNotice(ctx, conv, taskDeletedNotice(label, rec.TaskDeletedReason))
+		return nil
+	}
 	if isAX && e.task == "" {
 		// Recorded while the agent was not an ax agent: no task holds it.
 		delete(r.dormant, conv)
@@ -3067,7 +3085,10 @@ func (r *Router) liveOrRevived(ctx context.Context, conv, channel string) (*sess
 		<-e.ready
 		return e, e.err == nil
 	}
-	if rec, ok := r.dormant[conv]; ok {
+	if rec, ok := r.dormant[conv]; ok && !rec.TaskDeleted {
+		// Not for a conversation whose task was deleted: a press cannot
+		// answer anything there, and reviving would use up the record whose
+		// notice the next message is owed (caught in review).
 		if e := r.reviveLocked(ctx, conv, channel, rec); e != nil {
 			return e, e.err == nil // an ax task that would not start
 		}

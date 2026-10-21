@@ -536,7 +536,30 @@ template, and each conversation gets a task of its own.
       task-wide, its history say, can surface across their threads.
   - `shared`: one task for everyone. Every caller shares one sandbox, its
     credentials and its history, and startup warns.
-- **Not yet:** deleting old tasks (#173).
+- **Old tasks are cleaned up.** ax deletes nothing on its own, so
+  switchboard does:
+  - **Thread tasks:** a thread's task is deleted once its conversation has
+    been quiet for `ax.delete_after` (default `336h`, 14 days; `0` keeps
+    tasks; at most `696h`, a day under the 30 days after which the
+    conversation itself is forgotten). The thread's next message starts over
+    in a fresh task and says why.
+  - **Personal and shared tasks** hold more than one conversation and are
+    never deleted automatically.
+  - **Template changes:** a thread task made from an earlier version of the
+    template, an old token say, is replaced with a fresh one, and its
+    conversation starts over (`ax.replace_drifted`, default `true`). That is
+    any edit to the template, resources or an env var included, so every
+    thread restarts on its next message after one; set it `false` to keep
+    old tasks. Personal and shared tasks keep their old spec until deleted;
+    switchboard logs it.
+  - **By hand:** the admin API lists and deletes an agent's tasks.
+  - **Limits:** deletion works from switchboard's records.
+    - **Without `--state-dir`,** a restart forgets them, and those tasks are
+      left for the admin API.
+    - **Templates without `spec.idle`** never go quiet, so their tasks are
+      never deleted automatically.
+    - **An agent removed from the config** can't be listed through the API
+      any more, nor can its tasks.
 - **An ax agent added through the admin API** must name a template under
   `--admin-ax-template-dir`, because the gateway reads that file. The check
   is on the path, so a symlink inside the directory is followed: only
@@ -559,6 +582,8 @@ public route.
 | `GET`, `PUT`, `DELETE` | `/v1/agents/{name}` | one agent; `PUT` takes an agent entry as in the config file |
 | `GET`, `PUT` | `/v1/defaults` | the global default agent: `{"default_agent": "general"}`, `""` to return to the config's |
 | `GET`, `PUT`, `DELETE` | `/v1/channels/{channel}` | a channel's `default_agent` and `agents` allow list; the ID as the platform gives it (`C0123ABCD`, `spaces/AAAA`) |
+| `GET` | `/v1/agents/{name}/tasks` | an ax agent's tasks: each one's phase, from ax-server, plus the conversations, owner and last traffic switchboard has recorded for it |
+| `DELETE` | `/v1/agents/{name}/tasks/{task}` | deletes one of that agent's tasks (only a name the agent's tasks take); its conversations start over, told an administrator deleted it. A task this gateway has no record of (`"recorded": false` in the listing) may be an orphan or another gateway's, since task names show the agent and not the gateway; deleting it takes `?force=true` |
 
 ```sh
 curl -X PUT http://127.0.0.1:9090/v1/agents/research -H "Authorization: Bearer $TOKEN" \

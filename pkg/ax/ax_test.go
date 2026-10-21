@@ -17,11 +17,13 @@ package ax
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -86,6 +88,24 @@ func (f *fakeAX) ResumeTask(_ context.Context, r *axapi.ResumeTaskRequest) (*axa
 		return t, nil
 	}
 	return nil, status.Error(codes.NotFound, "no such task")
+}
+
+func (f *fakeAX) ListTasks(_ context.Context, r *axapi.ListTasksRequest) (*axapi.ListTasksResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var names []string
+	for k := range f.tasks {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	resp := &axapi.ListTasksResponse{}
+	for i, k := range names {
+		if int64(i) < r.Offset || int64(len(resp.Tasks)) >= r.Limit {
+			continue
+		}
+		resp.Tasks = append(resp.Tasks, f.tasks[k])
+	}
+	return resp, nil
 }
 
 func (f *fakeAX) DeleteTask(_ context.Context, r *axapi.DeleteTaskRequest) (*axapi.DeleteTaskResponse, error) {
@@ -464,5 +484,43 @@ func TestMoreConfigIsValidated(t *testing.T) {
 		if _, err := New(cfg); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
+	}
+}
+
+// List pages through ax's tasks and keeps the ones that match.
+func TestListPagesAndFilters(t *testing.T) {
+	c, ax, _ := fixture(t)
+	for i := range 250 {
+		name := fmt.Sprintf("other-%03d", i)
+		if i%50 == 0 {
+			name = TaskName("sb-triage", fmt.Sprint(i))
+		}
+		ax.tasks["agents/"+name] = &axapi.Task{Metadata: &axapi.ObjectMeta{Name: name}, Status: &axapi.TaskStatus{Phase: "Suspended"}}
+	}
+	got, err := c.List(context.Background(), NameMatcher("sb-triage"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 5 || got[0].Phase != "Suspended" {
+		t.Errorf("got %d tasks (%+v), want the 5 of ours across pages", len(got), got)
+	}
+}
+
+// NameMatcher recognizes exactly the names TaskName gives for a prefix.
+func TestNameMatcher(t *testing.T) {
+	m := NameMatcher("sb-triage")
+	for name, want := range map[string]bool{
+		TaskName("sb-triage", "slack", "C1:1"):    true,
+		TaskName("sb-triage-u", "owner", "alice"): false, // another prefix
+		"sb-triage-0123456789abcdeg":              false, // not hex
+		"sb-triage-0123456789abcde":               false, // too short
+		"lookout-0123456789abcdef":                false,
+	} {
+		if m(name) != want {
+			t.Errorf("%s: %v, want %v", name, !want, want)
+		}
+	}
+	if !NameMatcher("sb-triage-")(TaskName("sb-triage-", "x")) {
+		t.Error("a prefix that slugs differently does not match its own names")
 	}
 }

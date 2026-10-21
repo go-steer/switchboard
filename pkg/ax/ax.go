@@ -367,6 +367,82 @@ func (c *Client) Delete(ctx context.Context, task string) error {
 	return nil
 }
 
+// Inspection is what Inspect found of a task.
+type Inspection struct {
+	Exists  bool
+	Phase   string
+	Drifted bool // exists with a spec that is not the template's
+}
+
+// Inspect looks a task up without touching it — no create, no resume — so a
+// caller can act on a drifted task before waking it (caught in review: a
+// drifted task that could not start was never replaced).
+func (c *Client) Inspect(ctx context.Context, task string) (Inspection, error) {
+	t, err := c.api.GetTask(ctx, &axapi.GetTaskRequest{Atespace: c.cfg.Atespace, Name: task})
+	if isNotFound(err) {
+		return Inspection{}, nil
+	}
+	if err != nil {
+		return Inspection{}, fmt.Errorf("ax: inspect task %s: %w", c.actor(task), err)
+	}
+	return Inspection{Exists: true, Phase: t.GetStatus().GetPhase(), Drifted: !proto.Equal(t.GetSpec(), c.cfg.Template.task.GetSpec())}, nil
+}
+
+// Task is a task as List reports it.
+type Task struct {
+	Name  string
+	Phase string
+}
+
+// listPage is how many tasks List asks ax for at a time, and maxListPages
+// how many pages it reads before giving up: a server ignoring the offset
+// would otherwise keep it going forever.
+const (
+	listPage     = 100
+	maxListPages = 100
+)
+
+// List reports the tasks in the client's atespace whose names match, page by
+// page; a nil match is every task.
+func (c *Client) List(ctx context.Context, match func(name string) bool) ([]Task, error) {
+	var out []Task
+	seen := map[string]bool{} // pages over a changing set can repeat a task
+	for page := range maxListPages {
+		resp, err := c.api.ListTasks(ctx, &axapi.ListTasksRequest{Atespace: c.cfg.Atespace, Limit: listPage, Offset: int64(page) * listPage})
+		if err != nil {
+			return out, fmt.Errorf("ax: list tasks in %s: %w", c.cfg.Atespace, err)
+		}
+		for _, t := range resp.GetTasks() {
+			if n := t.GetMetadata().GetName(); !seen[n] && (match == nil || match(n)) {
+				seen[n] = true
+				out = append(out, Task{Name: n, Phase: t.GetStatus().GetPhase()})
+			}
+		}
+		if len(resp.GetTasks()) < listPage {
+			return out, nil
+		}
+	}
+	return out, fmt.Errorf("ax: list tasks in %s: more than %d pages", c.cfg.Atespace, maxListPages)
+}
+
+// NameMatcher reports whether a name is one TaskName could give for prefix:
+// the prefix as TaskName writes it, a dash, and the 16-character hash.
+func NameMatcher(prefix string) func(string) bool {
+	p := TaskName(prefix)
+	p = p[:len(p)-16] // the prefix and its dash, as TaskName clamps them
+	return func(name string) bool {
+		if !strings.HasPrefix(name, p) || len(name) != len(p)+16 {
+			return false
+		}
+		for _, r := range name[len(p):] {
+			if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+				return false
+			}
+		}
+		return true
+	}
+}
+
 // Router is the router's base URL: the daemon URL of every task.
 func (c *Client) Router() string { return c.cfg.Router }
 
