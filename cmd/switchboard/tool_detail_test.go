@@ -36,6 +36,15 @@ func failRes(name, detail string) *daemon.ToolResult {
 	return &daemon.ToolResult{Name: name, Failed: true, Detail: detail}
 }
 
+// tookLine matches a finished call's duration line.
+var tookLine = regexp.MustCompile(`\n⏱ [^\n]*`)
+
+// withoutTook drops the duration lines from a rendered notice, for the tests
+// about which verdict lands on which line: a result filed in a test takes
+// however long the runner takes, and TestAStreamNoticeSaysHowLongEachCallTook
+// is where durations are pinned.
+func withoutTook(s string) string { return tookLine.ReplaceAllString(s, "") }
+
 // TestActivityText pins the rendered shapes the doc comment promises, in both
 // disclosure modes. These are what a reader actually sees, so they are compared
 // whole rather than by substring.
@@ -245,7 +254,7 @@ func TestResolveToolMatchesOnCallID(t *testing.T) {
 	want := "▸ Running 2 tools\n\n" +
 		"▸ **bash**\n```\nmake test\n```\n\n" +
 		"✖\uFE0E **bash** (exit 1)\n```\nmake lint\n```"
-	if text != want {
+	if text := withoutTook(text); text != want {
 		t.Fatalf("re-render =\n%s\nwant\n%s", text, want)
 	}
 }
@@ -437,8 +446,8 @@ func TestApplyToolResultsCoalescesAFrame(t *testing.T) {
 	want := "✖\uFE0E Ran 2 tools (1 failed)\n\n" +
 		"✔\uFE0E **bash**\n```\none\n```\n\n" +
 		"✖\uFE0E **bash** (exit 2)\n```\ntwo\n```"
-	if edits[0].text != want {
-		t.Fatalf("the single edit is not the final state:\n%s\nwant\n%s", edits[0].text, want)
+	if got := withoutTook(edits[0].text); got != want {
+		t.Fatalf("the single edit is not the final state:\n%s\nwant\n%s", got, want)
 	}
 }
 
@@ -465,8 +474,8 @@ func TestApplyToolResultsFilesIdsBeforeGuessingByName(t *testing.T) {
 	want := "✖\uFE0E Ran 2 tools (1 failed)\n\n" +
 		"✔\uFE0E **bash**\n```\none\n```\n\n" +
 		"✖\uFE0E **bash** (exit 7)\n```\ntwo\n```"
-	if edits[0].text != want {
-		t.Fatalf("the frame was filed in arrival order, not ids first:\n%s\nwant\n%s", edits[0].text, want)
+	if got := withoutTook(edits[0].text); got != want {
+		t.Fatalf("the frame was filed in arrival order, not ids first:\n%s\nwant\n%s", got, want)
 	}
 }
 
@@ -511,7 +520,7 @@ func TestAFailedEditHealsOnTheNextResult(t *testing.T) {
 	want := "✖\uFE0E Ran 2 tools (1 failed)\n\n" +
 		"✖\uFE0E **bash** (exit 2)\n```\none\n```\n\n" +
 		"✔\uFE0E **bash**\n```\ntwo\n```"
-	if text != want {
+	if text := withoutTook(text); text != want {
 		t.Fatalf("the lost verdict was not carried in:\n%s\nwant\n%s", text, want)
 	}
 }
@@ -591,8 +600,8 @@ func TestStreamModeTicksResultsOffTheNoticeItPosted(t *testing.T) {
 	wantFinal := "✖\uFE0E Ran 2 tools (1 failed)\n\n" +
 		"✔\uFE0E **bash**\n```\nkubectl get pods -A\n```\n\n" +
 		"✖\uFE0E **bash** (exit 2)\n```\nkubectl get ns --context nope\n```"
-	if last.text != wantFinal {
-		t.Fatalf("final notice =\n%s\nwant\n%s", last.text, wantFinal)
+	if got := withoutTook(last.text); got != wantFinal {
+		t.Fatalf("final notice =\n%s\nwant\n%s", got, wantFinal)
 	}
 }
 
@@ -640,8 +649,8 @@ func TestOffModeSurfacesNoToolActivityAtAll(t *testing.T) {
 }
 
 // A finished call in a stream notice says how long it ran, measured from when
-// its frame reached the gateway; one too quick to matter says nothing, and a
-// call still running has no number yet.
+// its frame reached the gateway; one too quick to measure says "<0.1s" rather
+// than nothing, and a call still running has no number yet.
 func TestAStreamNoticeSaysHowLongEachCallTook(t *testing.T) {
 	e := &sessionEntry{}
 	e.noteToolCalls(chat.MessageRef{ID: "ts1"}, []daemon.ToolCall{
@@ -660,8 +669,8 @@ func TestAStreamNoticeSaysHowLongEachCallTook(t *testing.T) {
 	if !strings.Contains(got, "kubectl get pods -A\n```\n⏱ 2.") { // 2.3s, give or take a slow runner
 		t.Errorf("slow call carries no duration line:\n%s", got)
 	}
-	if strings.Contains(got, "echo hi\n```\n⏱") {
-		t.Errorf("an instant call printed a duration:\n%s", got)
+	if !strings.Contains(got, "echo hi\n```\n⏱ <0.1s") {
+		t.Errorf("an instant call does not say it was under a tenth of a second:\n%s", got)
 	}
 	if strings.Contains(got, "sleep 30\n```\n⏱") {
 		t.Errorf("a running call printed a duration:\n%s", got)
@@ -676,6 +685,9 @@ func TestFormatTook(t *testing.T) {
 		150 * time.Second:       "2m30s",
 		9970 * time.Millisecond: "10s",
 		9940 * time.Millisecond: "9.9s",
+		100 * time.Millisecond:  "0.1s",
+		60 * time.Millisecond:   "<0.1s",
+		time.Millisecond:        "<0.1s",
 	} {
 		if got := formatTook(d); got != want {
 			t.Errorf("formatTook(%v) = %q, want %q", d, got, want)

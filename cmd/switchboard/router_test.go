@@ -46,7 +46,13 @@ type fakeSender struct {
 
 	stallText string
 	stallFor  time.Duration
+
+	// draws makes the fake report chat.DrawsActivity, as the Slack adapter
+	// does. Set before the router starts relaying; read without the lock.
+	draws bool
 }
+
+func (f *fakeSender) DrawsActivity() bool { return f.draws }
 
 // failUpdates makes every edit fail, for the paths where an edit is bookkeeping
 // on top of something that already happened and must not be reported as the
