@@ -64,6 +64,9 @@ type Template struct {
 	// Idle reports whether the template lets its tasks suspend when idle;
 	// without it a task runs until it is deleted.
 	Idle bool
+	// IdleAfter is spec.idle.suspendAfter: how long a task must see no
+	// traffic before ax suspends it. Zero without Idle.
+	IdleAfter time.Duration
 }
 
 // LoadTemplate reads a Task manifest (YAML or JSON), as k8s-lookout's
@@ -107,10 +110,14 @@ func ParseTemplate(raw []byte, path string) (*Template, error) {
 	if err := checkSpec(t.GetSpec()); err != nil {
 		return nil, fmt.Errorf("ax task template %s: %w", path, err)
 	}
-	return &Template{
+	tmpl := &Template{
 		task: &axapi.Task{ApiVersion: t.GetApiVersion(), Kind: t.GetKind(), Spec: t.GetSpec()},
 		Idle: t.GetSpec().GetIdle() != nil,
-	}, nil
+	}
+	if tmpl.Idle {
+		tmpl.IdleAfter, _ = time.ParseDuration(t.GetSpec().GetIdle().GetSuspendAfter()) // checked above
+	}
+	return tmpl, nil
 }
 
 // The runner's own ports, which a task's server cannot take

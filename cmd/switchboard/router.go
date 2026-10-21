@@ -638,6 +638,17 @@ type sessionEntry struct {
 	// task is the ax task the conversation lives in, for an agent of kind
 	// "ax" (#170): set before anything is sent, never changed after.
 	task string
+	// agentBusy is the daemon's own word that a turn is running or parked on
+	// a human: set by a working or blocked status-update, cleared only by an
+	// idle one (the snapshot every stream opens with included). Releasing a
+	// conversation consults it as well as inFlight, which can read idle while
+	// the daemon still works — after a reconnect, a long turn's narration is
+	// taken as its answer (caught in review, #171).
+	agentBusy atomic.Bool
+	// pins counts turns being set up on this entry — from finding it to
+	// marking the turn in flight, platform posts in between — which a
+	// release must not take the entry out from under (caught in review).
+	pins atomic.Int32
 
 	// adopted marks a session switchboard did not create but was told about by
 	// the outbound ingress (#38). It changes two things: the entry starts at the
@@ -1892,6 +1903,8 @@ func (r *Router) Handle(ctx context.Context, msg chat.Message) (err error) {
 	// between the two the entry reads as idle while the figures it is holding
 	// are the ones that answer is about to print.
 	entry.touch()
+	entry.pins.Add(1)
+	defer entry.pins.Add(-1) // the turn is in flight, or failed, by then
 	if !entry.turnInFlight() && !entry.awaitingAnswer() {
 		entry.resetUsage()
 	}
@@ -2887,6 +2900,7 @@ func (r *Router) sessionAs(ctx context.Context, conv, channel, caller, agent str
 			close(e.ready)
 			return e, e.err
 		}
+		e.touch() // a slow wake is not idle time
 	}
 	start := time.Now()
 	e.sess, e.err = r.daemonOf(e).CreateSession(ctx, caller)
@@ -2973,6 +2987,7 @@ func (r *Router) reviveLocked(ctx context.Context, conv, channel string, rec ses
 		}
 		delete(r.dormant, conv)
 		r.mu.Unlock()
+		e.touch() // a slow wake is not idle time (caught in review)
 	}
 	if _, ok := r.agents().lookup(e.agent); rec.Adopted && stale && ok {
 		// An adopted session the thread stopped following long ago has been
@@ -3278,6 +3293,10 @@ func (r *Router) relay(ctx context.Context, conv string, e *sessionEntry, owner 
 					r.logf.Warnf("relay %s: unreadable status-update: %s", conv, ev.Data)
 					return nil
 				}
+				// Before anything else reads the frame: what the daemon says
+				// it is doing decides whether the conversation may let go of
+				// its streams.
+				e.agentBusy.Store(!st.Idle())
 				switch {
 				case st.Working():
 					streaming = true

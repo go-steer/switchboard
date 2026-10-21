@@ -78,6 +78,67 @@ func (r *Router) runReaper(ctx context.Context) {
 // exists to prevent, reproduced on purpose.
 func (r *Router) reapIdle(now time.Time) int {
 	cutoff := now.Add(-r.idleTTL).UnixNano()
+	return r.release(now, func(e *sessionEntry) bool { return e.touched.Load() <= cutoff })
+}
+
+// axSweepEvery is how often ax conversations are checked for release.
+var axSweepEvery = 10 * time.Second
+
+// runAXRelease releases ax conversations once their streams have lingered
+// past the agent's stream_linger with nothing going on (#171): an open
+// stream is traffic to ax, so a conversation holding one would keep its task
+// from ever suspending. Released, it re-attaches on its next message, which
+// wakes the task. Runs whatever --session-idle-ttl says; a gateway with no
+// ax agents finds nothing to release.
+func (r *Router) runAXRelease(ctx context.Context) {
+	t := time.NewTicker(axSweepEvery)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-t.C:
+			r.releaseIdleAX(now)
+		}
+	}
+}
+
+// releaseIdleAX releases the ax conversations idle for their agent's linger.
+func (r *Router) releaseIdleAX(now time.Time) int {
+	set := r.agents()
+	return r.release(now, func(e *sessionEntry) bool {
+		a, ok := set.lookup(e.agent)
+		// A template without spec.idle never suspends its tasks, so letting
+		// go of the streams would only cost a revive (caught in review).
+		if !ok || a.ax == nil || !a.ax.idle || e.task == "" {
+			return false
+		}
+		return e.touched.Load() <= now.Add(-a.ax.linger).UnixNano()
+	})
+}
+
+// busy reports what keeps a conversation's streams open beyond switchboard's
+// own idea of a turn: the daemon saying it is working or parked, a turn being
+// set up, or a question on screen that nobody has answered — the prompt
+// stream is what would carry the next one (caught in review).
+func (e *sessionEntry) busy() bool {
+	if e.agentBusy.Load() || e.pins.Load() > 0 {
+		return true
+	}
+	e.qmu.Lock()
+	defer e.qmu.Unlock()
+	for _, a := range e.asked {
+		if a.settled == unsettled && a.posted {
+			return true
+		}
+	}
+	return false
+}
+
+// release moves to dormant every live conversation idle reports as idle and
+// that is not busy, stopping its streams; each re-attaches on its next
+// message. It also prunes records too old to keep.
+func (r *Router) release(now time.Time, idle func(*sessionEntry) bool) int {
 	var released []*sessionEntry
 	r.mu.Lock()
 	for conv, e := range r.sessions {
@@ -90,7 +151,7 @@ func (r *Router) reapIdle(now time.Time) int {
 		// thread has no human turn to keep it live, and releasing its relay
 		// would silently stop its output reaching the thread until somebody
 		// spoke there. Bindings are already capped (maxBindings).
-		if e.adopted || e.err != nil || e.touched.Load() > cutoff || e.turnInFlight() || e.awaitingAnswer() {
+		if e.adopted || e.err != nil || e.turnInFlight() || e.awaitingAnswer() || e.busy() || !idle(e) {
 			continue
 		}
 		r.dormant[conv] = e.record()
