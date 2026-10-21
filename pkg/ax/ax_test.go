@@ -62,8 +62,10 @@ func (f *fakeAX) CreateTask(_ context.Context, r *axapi.CreateTaskRequest) (*axa
 	if _, ok := f.tasks[k]; ok {
 		return nil, status.Errorf(codes.FailedPrecondition, "task %s already exists and is immutable", k)
 	}
-	f.tasks[k] = r.Task
-	return r.Task, nil
+	saved := proto.Clone(r.Task).(*axapi.Task)
+	saved.Status = &axapi.TaskStatus{Phase: "Suspended"}
+	f.tasks[k] = saved
+	return saved, nil
 }
 
 func (f *fakeAX) GetTask(_ context.Context, r *axapi.GetTaskRequest) (*axapi.Task, error) {
@@ -80,6 +82,7 @@ func (f *fakeAX) ResumeTask(_ context.Context, r *axapi.ResumeTaskRequest) (*axa
 	defer f.mu.Unlock()
 	f.resumes = append(f.resumes, key(r.Atespace, r.Name))
 	if t, ok := f.tasks[key(r.Atespace, r.Name)]; ok {
+		t.Status = &axapi.TaskStatus{Phase: "Running"}
 		return t, nil
 	}
 	return nil, status.Error(codes.NotFound, "no such task")
@@ -184,7 +187,7 @@ func TestEnsureCreatesResumesAndWaits(t *testing.T) {
 	c, ax, router := fixture(t)
 	router.notReady = 3
 
-	if err := c.Ensure(context.Background(), "sb-triage-0123456789abcdef"); err != nil {
+	if _, err := c.Ensure(context.Background(), "sb-triage-0123456789abcdef"); err != nil {
 		t.Fatal(err)
 	}
 	if len(ax.creates) != 1 {
@@ -208,12 +211,12 @@ func TestEnsureCreatesResumesAndWaits(t *testing.T) {
 func TestEnsureReusesAnExistingTask(t *testing.T) {
 	c, ax, _ := fixture(t)
 	for range 2 {
-		if err := c.Ensure(context.Background(), "sb-x-0123456789abcdef"); err != nil {
+		if _, err := c.Ensure(context.Background(), "sb-x-0123456789abcdef"); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if len(ax.creates) != 2 || len(ax.resumes) != 2 || len(ax.tasks) != 1 {
-		t.Errorf("creates %d, resumes %d, tasks %d; want the second create refused and the task reused",
+	if len(ax.creates) != 2 || len(ax.resumes) != 1 || len(ax.tasks) != 1 {
+		t.Errorf("creates %d, resumes %d, tasks %d; want the second create refused, the running task reused and not resumed again",
 			len(ax.creates), len(ax.resumes), len(ax.tasks))
 	}
 }
@@ -222,7 +225,7 @@ func TestEnsureReusesAnExistingTask(t *testing.T) {
 func TestACreateFailureIsReported(t *testing.T) {
 	c, ax, _ := fixture(t)
 	ax.createEr = status.Error(codes.Unavailable, "redis is down")
-	err := c.Ensure(context.Background(), "sb-x-0123456789abcdef")
+	_, err := c.Ensure(context.Background(), "sb-x-0123456789abcdef")
 	if err == nil || !strings.Contains(err.Error(), "redis is down") {
 		t.Errorf("err = %v", err)
 	}
@@ -233,7 +236,7 @@ func TestATaskThatNeverAnswersTimesOut(t *testing.T) {
 	c, _, router := fixture(t)
 	router.notReady = 1 << 30
 	c.cfg.ReadyTimeout = 100 * time.Millisecond
-	err := c.Ensure(context.Background(), "sb-x-0123456789abcdef")
+	_, err := c.Ensure(context.Background(), "sb-x-0123456789abcdef")
 	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "503") {
 		t.Errorf("err = %v, want the deadline and the last status", err)
 	}
@@ -241,7 +244,7 @@ func TestATaskThatNeverAnswersTimesOut(t *testing.T) {
 
 func TestDeleteIsIdempotent(t *testing.T) {
 	c, ax, _ := fixture(t)
-	if err := c.Ensure(context.Background(), "sb-x-0123456789abcdef"); err != nil {
+	if _, err := c.Ensure(context.Background(), "sb-x-0123456789abcdef"); err != nil {
 		t.Fatal(err)
 	}
 	for range 2 {
@@ -325,5 +328,138 @@ func TestTaskNames(t *testing.T) {
 	}
 	if err := ValidName("Has_Upper"); err == nil {
 		t.Error("an invalid name passed")
+	}
+}
+
+// A task created from an older template is reused, and says so: tasks are
+// immutable, so a rotated token never reaches it (caught in review).
+func TestEnsureReportsATemplateThatChanged(t *testing.T) {
+	c, ax, _ := fixture(t)
+	ax.tasks["agents/sb-x-0123456789abcdef"] = &axapi.Task{
+		Metadata: &axapi.ObjectMeta{Name: "sb-x-0123456789abcdef", Atespace: "agents"},
+		Spec:     &axapi.TaskSpec{Image: "an-older-image", Http: &axapi.TaskHTTP{Port: 8484}},
+		Status:   &axapi.TaskStatus{Phase: "Suspended"},
+	}
+	got, err := c.Ensure(context.Background(), "sb-x-0123456789abcdef")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Created || !got.Drifted {
+		t.Errorf("Ensured = %+v, want reused and drifted", got)
+	}
+	again, _ := c.Ensure(context.Background(), "sb-y-0123456789abcdef")
+	if !again.Created || again.Drifted {
+		t.Errorf("a new task: %+v", again)
+	}
+}
+
+// A task being deleted is not resurrected (caught in review).
+func TestEnsureLeavesATerminatingTaskAlone(t *testing.T) {
+	c, ax, _ := fixture(t)
+	ax.tasks["agents/sb-x-0123456789abcdef"] = &axapi.Task{
+		Metadata: &axapi.ObjectMeta{Name: "sb-x-0123456789abcdef"},
+		Status:   &axapi.TaskStatus{Phase: "Terminating"},
+	}
+	if _, err := c.Ensure(context.Background(), "sb-x-0123456789abcdef"); err == nil || !strings.Contains(err.Error(), "being deleted") {
+		t.Errorf("err = %v", err)
+	}
+	if len(ax.resumes) != 0 {
+		t.Errorf("resumed a terminating task: %v", ax.resumes)
+	}
+}
+
+// Only the template's spec goes into a task: a status or creation time in it
+// would give every task one identity (caught in review).
+func TestTheTemplatesStatusIsNotCopied(t *testing.T) {
+	c, ax, _ := fixture(t)
+	tmpl, err := LoadTemplate(writeTemplate(t, testTemplate+"status:\n  id: shared\n  phase: Running\nmetadata:\n  name: fixed\n  createTime: \"2026-01-01T00:00:00Z\"\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.cfg.Template = tmpl
+	if _, err := c.Ensure(context.Background(), "sb-x-0123456789abcdef"); err != nil {
+		t.Fatal(err)
+	}
+	got := ax.creates[0]
+	if got.GetStatus() != nil || got.GetMetadata().GetCreateTime() != nil || got.GetMetadata().GetName() != "sb-x-0123456789abcdef" {
+		t.Errorf("created %v", got)
+	}
+}
+
+// Strict means strict: what ax would refuse at every thread fails here, at
+// startup (caught in review).
+func TestTemplatesAreStrict(t *testing.T) {
+	ok := "kind: Task\nspec:\n  http:\n    port: 8484\n"
+	for name, tc := range map[string]struct{ body, want string }{
+		"a duplicate key":      {"kind: Task\nspec:\n  image: a\n  image: b\n  http:\n    port: 8484\n", "image"},
+		"a second document":    {ok + "---\nkind: Task\nspec:\n  image: other\n", "one document"},
+		"the runner's port":    {"kind: Task\nspec:\n  http:\n    port: 80\n", "runner's own ports"},
+		"the metadata port":    {"kind: Task\nspec:\n  http:\n    port: 8099\n", "runner's own ports"},
+		"an impossible port":   {"kind: Task\nspec:\n  http:\n    port: 70000\n", "not a valid port"},
+		"a short idle":         {ok + "  idle:\n    suspendAfter: 1s\n", "minimum"},
+		"a bad idle":           {ok + "  idle:\n    suspendAfter: banana\n", "suspendAfter"},
+		"idle with no timeout": {ok + "  idle:\n    busyPath: /busy\n", "required"},
+		"a relative busy path": {ok + "  idle:\n    suspendAfter: 30s\n    busyPath: busy\n", "must start with /"},
+	} {
+		if _, err := LoadTemplate(writeTemplate(t, tc.body)); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: err = %v, want %q", name, err, tc.want)
+		}
+	}
+	if _, err := LoadTemplate(writeTemplate(t, "---\n# a leading separator is one document\n"+ok)); err != nil {
+		t.Errorf("a leading separator: %v", err)
+	}
+}
+
+// Two prefixes that make the same name-safe slug still name two tasks
+// (caught in review: "sb-triage-" and "sb-triage" shared one).
+func TestPrefixesThatSlugAlikeDoNotCollide(t *testing.T) {
+	for _, pair := range [][2]string{{"sb-triage-", "sb-triage"}, {"sb-sre--triage", "sb-sre-triage"}} {
+		if TaskName(pair[0], "slack", "C1:1") == TaskName(pair[1], "slack", "C1:1") {
+			t.Errorf("%q and %q name one task", pair[0], pair[1])
+		}
+	}
+}
+
+// Requests to a task follow no redirect, whatever answers: the bearer and the
+// asserted caller would go along (caught in review).
+func TestTheTaskClientFollowsNoRedirect(t *testing.T) {
+	var followed int
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { followed++ }))
+	defer target.Close()
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+r.URL.Path, http.StatusTemporaryRedirect)
+	}))
+	defer redirector.Close()
+	tmpl, _ := LoadTemplate(writeTemplate(t, testTemplate))
+	c, err := New(Config{Server: "ax:8080", Router: redirector.URL, Template: tmpl, HTTPClient: nil})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := c.HTTPClient("sb-x-0123456789abcdef").Get(redirector.URL + "/sessions")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if followed != 0 || resp.StatusCode != http.StatusTemporaryRedirect {
+		t.Errorf("followed %d, status %d; want the 307 itself", followed, resp.StatusCode)
+	}
+	slow := &http.Client{Timeout: time.Second}
+	c2, _ := New(Config{Server: "ax:8080", Router: redirector.URL, Template: tmpl, HTTPClient: slow})
+	if c2.HTTPClient("t").Timeout != 0 {
+		t.Error("a client timeout reached the SSE clients")
+	}
+}
+
+func TestMoreConfigIsValidated(t *testing.T) {
+	tmpl, _ := LoadTemplate(writeTemplate(t, testTemplate))
+	for name, cfg := range map[string]Config{
+		"an empty template": {Server: "ax:8080", Router: "http://r", Template: &Template{}},
+		"a bad atespace":    {Server: "ax:8080", Router: "http://r", Atespace: "Not_Valid", Template: tmpl},
+		"a router query":    {Server: "ax:8080", Router: "http://r?", Template: tmpl},
+		"a router fragment": {Server: "ax:8080", Router: "http://r#", Template: tmpl},
+	} {
+		if _, err := New(cfg); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
 	}
 }
