@@ -499,14 +499,23 @@ template, and each conversation gets a task of its own.
   restart goes back to the same task. That happens on the conversation's next
   message, not at boot, which would wake every task.
 - **`--gateway-id`** (default: the platform) goes into task names, so two
-  gateways in one cluster never share a task.
+  gateways in one cluster never share a task. Keep it stable. A conversation
+  already recorded keeps its task, but one that starts over after a change
+  gets a task under the new name, and the old one stays until deleted.
 - **ax-server and the router take no credentials,** so switchboard reaches
   both in plaintext, inside the cluster. Protect them with a NetworkPolicy.
 - **Not yet:** one task per person or one shared task (`scope`, #172),
   streams scoped to the turn so idle tasks can suspend (#171), and deleting
   old tasks (#173).
 - **An ax agent added through the admin API** must name a template under
-  `--admin-ax-template-dir`, because the gateway reads that file.
+  `--admin-ax-template-dir`, because the gateway reads that file. The check
+  is on the path, so a symlink inside the directory is followed: only
+  operators should be able to write there.
+- **Restarts:** after a restart an ax conversation reattaches on its next
+  message, unless a turn was in flight, which reattaches at once so its
+  answer still arrives. If its task had been deleted meanwhile, the
+  conversation starts over in a fresh one, and the thread is told.
+- **Approvals** work as for any agent; prompts come from the task's agent.
 
 ### The admin API
 

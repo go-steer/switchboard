@@ -72,9 +72,6 @@ type axAgent struct {
 	scope     string
 	approvals bool
 	idle      bool // the template lets tasks suspend
-
-	mu    sync.Mutex
-	tasks map[string]*taskClients
 }
 
 // taskClients are one task's contract clients.
@@ -84,13 +81,10 @@ type taskClients struct {
 }
 
 // forTask is task's clients: the contract through the router, addressed to
-// the task by the actor header.
+// the task by the actor header. Built per call — they hold no connections of
+// their own (the transport is shared), and a cache would grow with every
+// conversation ever seen (caught in review).
 func (x *axAgent) forTask(task string) (*taskClients, error) {
-	x.mu.Lock()
-	defer x.mu.Unlock()
-	if tc, ok := x.tasks[task]; ok {
-		return tc, nil
-	}
 	cfg := daemon.Config{BaseURL: x.client.Router(), BearerToken: x.token, HTTPClient: x.client.HTTPClient(task)}
 	dc, err := daemon.New(cfg)
 	if err != nil {
@@ -102,10 +96,6 @@ func (x *axAgent) forTask(task string) (*taskClients, error) {
 			return nil, err
 		}
 	}
-	if x.tasks == nil {
-		x.tasks = make(map[string]*taskClients)
-	}
-	x.tasks[task] = tc
 	return tc, nil
 }
 
@@ -172,8 +162,9 @@ func buildAXAgent(ac AgentConfig, b agentBuilder) (*axAgent, error) {
 	var ready time.Duration
 	if c.ReadyTimeout != "" {
 		d, err := time.ParseDuration(c.ReadyTimeout)
-		if err != nil || d <= 0 {
-			return nil, fmt.Errorf(".ax.ready_timeout %q: want a positive duration like 2m", c.ReadyTimeout)
+		if err != nil || d <= 0 || d > maxReadyTimeout {
+			// Capped: every other message in the thread waits on a start.
+			return nil, fmt.Errorf(".ax.ready_timeout %q: want a duration up to %s, like 2m", c.ReadyTimeout, maxReadyTimeout)
 		}
 		ready = d
 	}
@@ -188,7 +179,10 @@ func buildAXAgent(ac AgentConfig, b agentBuilder) (*axAgent, error) {
 	sum := sha256.Sum256(raw)
 	key := strings.Join([]string{c.Server, c.Router, c.Atespace, c.TaskTemplateFile, hex.EncodeToString(sum[:]), ready.String()}, "|")
 	cl, err := b.axCache().get(key, func() (axClient, error) {
-		t, err := ax.LoadTemplate(c.TaskTemplateFile)
+		// From the bytes the key hashes, not a second read (caught in
+		// review: a file changed between the two was cached under the old
+		// hash).
+		t, err := ax.ParseTemplate(raw, c.TaskTemplateFile)
 		if err != nil {
 			return axClient{}, err
 		}
@@ -214,6 +208,13 @@ func (b agentBuilder) axCache() *axClients {
 }
 
 // --- in the router -------------------------------------------------------------
+
+// maxReadyTimeout bounds ax.ready_timeout.
+const maxReadyTimeout = 10 * time.Minute
+
+// errTaskRestarted is a conversation whose task was gone and was started
+// afresh, so its session is gone: what a turn waiting on the revive gets.
+var errTaskRestarted = errors.New("this conversation's task was restarted; send the message again")
 
 // errNeedsTask is an ax agent asked for a daemon with no task named: a path
 // that addresses an agent rather than a conversation, such as an ingress
@@ -242,7 +243,7 @@ func (r *Router) setGateway(id string) { r.gatewayID = id }
 // sent to it. A start that takes more than a moment says so in the thread:
 // waking a task suspended for days can take a while, and silence would read
 // as the app ignoring the message.
-func (r *Router) startAXTask(ctx context.Context, conv string, a *agent, e *sessionEntry) error {
+func (r *Router) startAXTask(ctx context.Context, conv string, a *agent, e *sessionEntry) (created bool, err error) {
 	done := make(chan struct{})
 	var notice chat.MessageRef
 	var noticed sync.WaitGroup
@@ -264,6 +265,7 @@ func (r *Router) startAXTask(ctx context.Context, conv string, a *agent, e *sess
 	start := time.Now()
 	got, err := a.ax.client.Ensure(ctx, e.task)
 	close(done)
+	created = got.Created
 	noticed.Wait()
 	if notice.ID != "" {
 		pctx, cancel := platformContext(ctx)
@@ -272,7 +274,7 @@ func (r *Router) startAXTask(ctx context.Context, conv string, a *agent, e *sess
 	}
 	if err != nil {
 		r.logf.Warnf("session %s: start task %s for agent %s: %v", conv, e.task, a.name, err)
-		return fmt.Errorf("%s could not be started: %w", a.label(), err)
+		return created, fmt.Errorf("%s could not be started: %w", a.label(), err)
 	}
 	if got.Drifted {
 		// Tasks are immutable: one created before the template changed keeps
@@ -281,7 +283,7 @@ func (r *Router) startAXTask(ctx context.Context, conv string, a *agent, e *sess
 		r.logf.Warnf("session %s: task %s was created from an earlier version of agent %s's template; it keeps the old spec until it is deleted", conv, e.task, a.name)
 	}
 	r.logf.Infof("session %s: task %s ready for agent %s in %s", conv, e.task, a.name, time.Since(start).Round(time.Millisecond))
-	return nil
+	return created, nil
 }
 
 // axStartNoticeAfter is how long a task start runs before the thread is told.

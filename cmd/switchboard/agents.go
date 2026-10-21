@@ -198,7 +198,9 @@ func (s *agentSet) resolve(name string) string {
 // anyApprovals reports whether any agent can relay permission prompts.
 func (s *agentSet) anyApprovals() bool {
 	for _, a := range s.byName {
-		if a.approvals != nil {
+		// An ax agent's approval clients are its tasks' (caught in review:
+		// an ax-only gateway posted prompts and refused every press).
+		if a.approvals != nil || (a.ax != nil && a.ax.approvals) {
 			return true
 		}
 	}

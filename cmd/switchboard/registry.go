@@ -474,7 +474,15 @@ func (a *registryAdmin) checkTokenEnv(ac AgentConfig) error {
 		if a.axTemplateDir == "" {
 			return errors.New("runtime ax agents need --admin-ax-template-dir, the directory their task templates are read from")
 		}
-		dir := filepath.Clean(a.axTemplateDir) + string(filepath.Separator)
+		dir, err := filepath.Abs(a.axTemplateDir)
+		if err != nil {
+			return fmt.Errorf("--admin-ax-template-dir: %w", err)
+		}
+		if !strings.HasSuffix(dir, string(filepath.Separator)) {
+			dir += string(filepath.Separator) // "/" stays "/"
+		}
+		// Lexical: a symlink inside the directory is followed, so only
+		// operators should be able to write to it.
 		if p := filepath.Clean(ac.AX.TaskTemplateFile); !filepath.IsAbs(p) || !strings.HasPrefix(p, dir) {
 			return fmt.Errorf("ax.task_template_file %q: a runtime agent's template must be in %s (--admin-ax-template-dir)", ac.AX.TaskTemplateFile, a.axTemplateDir)
 		}

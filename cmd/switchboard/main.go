@@ -498,6 +498,11 @@ func runServe(args []string) (err error) {
 		if agents, err = agentsFrom(cfg, *daemonURL, *tokenEnv, builder); err != nil {
 			return err
 		}
+		for _, n := range agents.order {
+			if a := agents.byName[n]; a.ax != nil && !a.ax.idle {
+				logf.Warnf("agent %s: its task template sets no spec.idle, so its tasks never suspend and hold their resources until deleted", n)
+			}
+		}
 		if err := checkChannelAgents(agents, "defaults", defaults); err != nil {
 			return err
 		}

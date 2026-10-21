@@ -2880,7 +2880,7 @@ func (r *Router) sessionAs(ctx context.Context, conv, channel, caller, agent str
 		// An ax agent: the conversation's task, started (or woken, or found)
 		// before the session it will hold.
 		e.task = a.ax.taskName(a.name, r.gatewayID, conv)
-		if e.err = r.startAXTask(ctx, conv, a, e); e.err != nil {
+		if _, e.err = r.startAXTask(ctx, conv, a, e); e.err != nil {
 			r.mu.Lock()
 			delete(r.sessions, conv)
 			r.mu.Unlock()
@@ -2910,34 +2910,69 @@ func (r *Router) sessionAs(ctx context.Context, conv, channel, caller, agent str
 
 // reviveLocked re-attaches a dormant conversation: the record becomes a live
 // entry and its relay resumes from the last answer delivered. The caller holds
-// r.mu, and on success it is released here; on failure — a record that cannot
-// be read — the record is dropped, the lock is still held, and nil is
-// returned.
+// r.mu. It returns:
+//
+//   - the live entry, the lock released;
+//   - an entry with err set, the lock released: an ax task that would not
+//     start, whose record is kept for the next message to try again;
+//   - nil, the lock still held: the record is dropped and the caller opens a
+//     new session — for a record that cannot be read, an ax agent's record
+//     with no task, or an ax task that had to be created afresh and so no
+//     longer holds the session.
 func (r *Router) reviveLocked(ctx context.Context, conv, channel string, rec sessionRecord) *sessionEntry {
-	delete(r.dormant, conv)
 	e, err := entryFromRecord(rec, channel)
 	if err != nil {
+		delete(r.dormant, conv)
 		r.logf.Warnf("session %s: unreadable record (%v); opening a new session", conv, err)
 		return nil
 	}
+	a, ok := r.agents().lookup(e.agent)
+	isAX := ok && a.ax != nil
+	if isAX && e.task == "" {
+		// Recorded while the agent was not an ax agent: no task holds it.
+		delete(r.dormant, conv)
+		r.logf.Warnf("session %s: recorded before agent %s ran a task per conversation; opening a new session", conv, e.agent)
+		return nil
+	}
+	if !isAX {
+		delete(r.dormant, conv)
+	}
+	// An ax conversation keeps its record until its task answers: waking one
+	// can take minutes, and a snapshot taken meanwhile, which skips entries
+	// not yet ready, would otherwise lose the conversation (caught in
+	// review).
 	stale := time.Since(rec.Touched) > r.reviveWindow()
 	e.touch()
 	r.sessions[conv] = e
 	r.mu.Unlock()
-	if a, ok := r.agents().lookup(e.agent); ok && a.ax != nil && e.task != "" {
-		// Its task may be suspended, or gone: wake it, or start a fresh one
-		// (whose agent no longer has the session, which the first inject
-		// finds and the thread is told about, as for any lost session).
-		if e.err = r.startAXTask(ctx, conv, a, e); e.err != nil {
-			r.mu.Lock()
-			if r.sessions[conv] == e {
+	if isAX {
+		created, err := r.startAXTask(ctx, conv, a, e)
+		r.mu.Lock()
+		ours := r.sessions[conv] == e
+		switch {
+		case err != nil:
+			if ours {
 				delete(r.sessions, conv)
-				r.dormant[conv] = rec // kept: the next message tries again
 			}
 			r.mu.Unlock()
+			e.err = err
 			close(e.ready)
 			return e
+		case created:
+			// The task was gone and has been started afresh, so it does not
+			// have the session: start over in it now rather than let the
+			// first message find out and be lost (caught in review).
+			if ours {
+				delete(r.sessions, conv)
+			}
+			delete(r.dormant, conv)
+			e.err = errTaskRestarted
+			close(e.ready)
+			go r.surfaceNotice(ctx, conv, a.label()+" was restarted, so this conversation starts over.")
+			return nil
 		}
+		delete(r.dormant, conv)
+		r.mu.Unlock()
 	}
 	if _, ok := r.agents().lookup(e.agent); rec.Adopted && stale && ok {
 		// An adopted session the thread stopped following long ago has been

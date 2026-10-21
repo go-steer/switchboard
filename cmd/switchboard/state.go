@@ -458,9 +458,11 @@ func (r *Router) restore(ctx context.Context, st routerState, now time.Time) (re
 			continue
 		}
 		r.dormant[conv] = rec
-		// An ax conversation stays dormant until its next message: attaching
-		// at boot would wake every task the gateway knows.
-		if now.Sub(rec.Touched) <= r.reviveWindow() && rec.Task == "" {
+		// An ax conversation stays dormant until its next message, since
+		// attaching at boot would wake every task the gateway knows — unless
+		// a turn was in flight, whose answer and placeholder would otherwise
+		// wait for somebody to speak again (caught in review).
+		if now.Sub(rec.Touched) <= r.reviveWindow() && (rec.Task == "" || rec.Placeholder != "") {
 			recent = append(recent, conv)
 		}
 	}

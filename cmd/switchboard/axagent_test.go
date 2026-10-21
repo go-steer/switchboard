@@ -333,6 +333,7 @@ func TestAXAgentEntriesAreValidated(t *testing.T) {
 		"no token_env":        func(c *AgentConfig) { c.TokenEnv = "" },
 		"owner scope (#172)":  func(c *AgentConfig) { ax := *c.AX; ax.Scope = "owner"; c.AX = &ax },
 		"a bad timeout":       func(c *AgentConfig) { ax := *c.AX; ax.ReadyTimeout = "soon"; c.AX = &ax },
+		"a long timeout":      func(c *AgentConfig) { ax := *c.AX; ax.ReadyTimeout = "11m"; c.AX = &ax },
 		"no template":         func(c *AgentConfig) { ax := *c.AX; ax.TaskTemplateFile = "/nope.yaml"; c.AX = &ax },
 		"an ax block on mast": func(c *AgentConfig) { c.Kind = "mast"; c.DaemonURL = "http://x:1" },
 	} {
@@ -401,5 +402,113 @@ func TestARuntimeAXAgentsTemplateIsFenced(t *testing.T) {
 	admin.axTemplateDir = filepath.Dir(f.cfg.AX.TaskTemplateFile)
 	if err := admin.putAgent(f.cfg); err != nil {
 		t.Errorf("a template inside the dir: %v", err)
+	}
+}
+
+// An ax-only gateway counts its agents' approvals: their clients are their
+// tasks', and the press gate refused every press (caught in review).
+func TestAnAXOnlyGatewayTakesPresses(t *testing.T) {
+	f := newAXFixture(t)
+	set, err := buildAgents([]AgentConfig{f.cfg}, "triage", agentBuilder{approvals: true, ax: &axClients{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !set.anyApprovals() {
+		t.Error("an ax agent with approvals is not counted")
+	}
+}
+
+// While a dormant conversation's task wakes, the conversation stays in every
+// snapshot (caught in review: a save in that window lost it).
+func TestAWakingConversationStaysInTheSnapshot(t *testing.T) {
+	f := newAXFixture(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f.say(t, ctx, "C1:1", "hello")
+	st := f.r.snapshot()
+
+	g := newAXFixtureSharing(t, f)
+	g.r.restore(ctx, st, time.Now())
+	f.router.notReady.Store(2) // two polls of a second each: a slow wake
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = g.r.Handle(ctx, chat.Message{Conversation: "C1:1", Channel: "C1", Caller: "u@x.com", Text: "again"})
+	}()
+	waitFor(t, func() bool { return len(f.router.callsMatching("/readyz")) >= 2 }, "the wake to begin")
+	if _, ok := g.r.snapshot().Sessions["C1:1"]; !ok {
+		t.Error("the conversation dropped out of the snapshot while its task woke")
+	}
+	<-done
+}
+
+// A conversation whose turn was in flight at the restart reattaches at boot,
+// so its answer and placeholder are not left waiting for the next message
+// (caught in review).
+func TestAnInFlightAXConversationReattachesAtBoot(t *testing.T) {
+	f := newAXFixture(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f.say(t, ctx, "C1:1", "hello")
+	st := f.r.snapshot()
+	rec := st.Sessions["C1:1"]
+	rec.Placeholder = "ph-1"
+	st.Sessions["C1:1"] = rec
+
+	g := newAXFixtureSharing(t, f)
+	if revived, _ := g.r.restore(ctx, st, time.Now()); revived != 1 {
+		t.Errorf("revived %d, want the in-flight conversation", revived)
+	}
+}
+
+// A task deleted while its conversation slept is started afresh, and the
+// conversation starts over in it at once, the thread told — not left to lose
+// the next message to a 404 (caught in review).
+func TestARecreatedTaskStartsTheConversationOver(t *testing.T) {
+	f := newAXFixture(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f.say(t, ctx, "C1:1", "hello")
+	st := f.r.snapshot()
+
+	f.server.mu.Lock()
+	f.server.tasks = map[string]bool{} // deleted while dormant
+	f.server.mu.Unlock()
+	g := newAXFixtureSharing(t, f)
+	g.r.restore(ctx, st, time.Now())
+	g.say(t, ctx, "C1:1", "back")
+
+	actor := "agents/" + ax.TaskName("sb-triage", "slack", "C1:1")
+	if creates := f.router.callsMatching(actor + " POST /sessions"); len(creates) < 3 {
+		t.Errorf("calls = %v, want a second session created", creates)
+	}
+	got := recvReply(t, g.out.replies)
+	if !strings.Contains(got.Text, "starts over") {
+		t.Errorf("notice = %q", got.Text)
+	}
+}
+
+// A record of an ax agent with no task — the agent was redefined — opens a
+// new session rather than a relay that can never connect (caught in review).
+func TestATasklessRecordOfAnAXAgentStartsOver(t *testing.T) {
+	f := newAXFixture(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	st := routerState{Version: stateVersion, Sessions: map[string]sessionRecord{
+		"C1:1": {Channel: "C1", Session: "core-agent/old", Agent: "triage", Touched: time.Now()},
+	}}
+	f.r.restore(ctx, st, time.Now())
+	f.say(t, ctx, "C1:1", "hi")
+	if f.server.createCount() != 1 {
+		t.Errorf("creates = %d, want the conversation's task started", f.server.createCount())
+	}
+}
+
+// Binding a session to the ax default agent is refused as such, not as a
+// backend that would not answer (caught in review).
+func TestBindingToAnAXAgentIsAClearConflict(t *testing.T) {
+	ie := bindError(testSession, errNeedsTask)
+	if ie.status != http.StatusConflict || !strings.Contains(ie.msg, "task per conversation") {
+		t.Errorf("bindError = %d %q", ie.status, ie.msg)
 	}
 }
