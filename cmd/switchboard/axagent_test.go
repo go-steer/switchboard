@@ -148,6 +148,7 @@ type axRouter struct {
 	calls    []string // "actor METHOD path"
 	bearer   []string
 	notReady atomic.Int64
+	conns    atomic.Int64 // connections opened, where the server counts them
 	srv      *httptest.Server
 }
 

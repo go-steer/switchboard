@@ -37,9 +37,9 @@ v1.0 (`substrate-v1-12dbe16`); what changed is in "The rebased fork" below.
   of at most 63 characters. The mapping to a thread has to live in the name
   or in switchboard's state.
 - **No template or prompt field.** A task is `image`, `command`, `env`,
-  `workspaces`, `egress`, `http`, `idle`. Instructions travel as flags, env or
-  workspace files. (After the rebase, one `workspace`, and a free-form
-  `config` the runner reads.)
+  `workspace` (one, since the rebase; `workspaces` before), `config` (a
+  free-form object the runner reads), `egress`, `http`, `idle`. Instructions
+  travel as flags, env, `config` or workspace files.
 - **Nothing expires.** A task lives until it is deleted.
 - **No authentication.** No interceptors on the server, and the CLI dials
   insecure. Protection is the network.
@@ -52,7 +52,8 @@ carry it).
 - **Readiness:** `/readyz` holds at 503 until that server listens (b52d147),
   so a request that wakes a task waits instead of failing.
 
-**The atenet router** (`atenet-router.ate-system:80`):
+**The atenet router** (`atenet-router.ate-system`, `:80` before Agent
+Substrate v1.0, TLS on `:443` since):
 - **Routing:** it routes on one header, `ate-target-actor: <atespace>/<task>`.
 - **Waking:** it resumes a suspended actor before proxying.
 - **Plaintext, no auth** in shipmind's deployment. _Since Agent Substrate
@@ -89,12 +90,14 @@ switchboard carries the proto at `substrate-v1-12dbe16`:
 - **One workspace.** `spec.workspaces` (a list) became `spec.workspace` (one
   binding, the same field number). A template still using `workspaces:` is
   refused at startup.
-- **Status is read live from Substrate.** Phase `Unknown`, with Ready reason
-  `SubstrateUnavailable`, means ax couldn't reach Substrate. `Ensure` then
-  fails with `ax.ErrSubstrateUnavailable` and ax's reason rather than
-  attempting a resume, which needs Substrate too. `Failed` with
-  `ActorNotFound` means the task's actor is gone; `Ensure` resumes it, which
-  re-creates the actor.
+- **Status is read live from Substrate.** Phase `Unknown` with Ready reason
+  `SubstrateUnavailable` means ax couldn't reach Substrate. `Ensure` then
+  fails with `ax.ErrSubstrateUnavailable` and ax's message rather than
+  attempting a resume, which needs Substrate too. `Unknown` with any other
+  reason is an actor in a state ax doesn't recognise, with Substrate
+  reachable, and `Ensure` resumes it as it would a suspended task. `Failed`
+  with `ActorNotFound` means the task's actor is gone; `Ensure` resumes it,
+  which re-creates the actor.
 - **Idle suspension** is recorded in an ax-owned `AutoSuspended` condition
   (`IdleSuspended`, `CompletedSuspended`; `False` with `ResumedByRequest`
   after a wake), not in a Ready reason. switchboard reads neither: it knows a
@@ -261,6 +264,14 @@ and history.
     `ax.router_server_name`, each defaulting to what
     `deploy/components/ax-router-mtls` mounts. One client per set of files
     serves every agent, so they share connections.
+  - **A certificate failure is reported at once.** A handshake the router
+    refuses (an identity not on its allowlist) or that fails verification
+    ends the readiness wait with the TLS error, instead of being retried
+    for `ready_timeout`.
+  - **Runtime agents** (the admin API) take the default files and server
+    name only: the gateway reads the files, and another server name would
+    send the pod's certificate and the agent's bearer to whichever Service
+    the servicedns CA certified under it.
   - **An `http://` router** is still reached in plaintext, for development
     and tests.
   - **Not `auth`:** an agent's `auth` block (`docs/agent-identity.md`) names

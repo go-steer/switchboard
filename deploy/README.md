@@ -205,10 +205,13 @@ The router admits only identities on its allowlist. Add the pod's SPIFFE ID,
 `spiffe://cluster.local/ns/<namespace>/sa/switchboard` for these manifests'
 ServiceAccount, to ate-setup's `--ingress-allowed-spiffe-ids`
 (`ATE_INGRESS_ALLOWED_SPIFFE_IDS`) and re-run it. Until then every task start
-fails, and the thread says the agent could not be started.
+fails with the router's TLS refusal, and the thread says the agent could not
+be started.
 
-Egress in the base is unrestricted. If you lock it down, admit
-`atenet-router.ate-system` on 443 and ax-server on its gRPC port.
+Egress in the base is unrestricted. If you lock it down, remember that a
+NetworkPolicy matches the pod's port after the Service translates it: admit
+the `atenet-router` pods in `ate-system` on TCP 8443 (the Service's 443, named
+port `https`), the `ax-server` pods in `ax-system` on TCP 8080, and kube-dns.
 
 ## Notes
 

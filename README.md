@@ -493,9 +493,10 @@ template, and each conversation gets a task of its own.
   task, or reuses it if it exists. It resumes the task and waits for it to
   answer (`ax.ready_timeout`, default `2m`). A start that takes more than a
   couple of seconds shows "⏳ Starting …" in the thread.
-  - When ax reports the task's phase `Unknown`, it couldn't reach Agent
-    Substrate. The thread is told the agent couldn't be started because
-    Substrate is unavailable, and no resume is tried.
+  - When ax reports the task's phase `Unknown` because it couldn't reach
+    Agent Substrate (Ready reason `SubstrateUnavailable`), the thread is told
+    the agent couldn't be started because Substrate is unavailable, and no
+    resume is tried.
 - **ax version:** switchboard speaks the ax fork rebased for Agent Substrate
   v1.0 (`mastersingh24/ax` `substrate-v1-12dbe16`), whose own Task fields
   were renumbered. Run it against that ax-server or a later one; an older
@@ -533,9 +534,10 @@ template, and each conversation gets a task of its own.
     switchboard's is `spiffe://cluster.local/ns/<namespace>/sa/<serviceaccount>`
     of its pod, `spiffe://cluster.local/ns/switchboard/sa/switchboard` with the
     deploy manifests in a `switchboard` namespace. Until it's listed, every
-    task start fails at the readiness check.
+    task start fails with the router's TLS refusal, reported at once rather
+    than after `ax.ready_timeout`.
   - **A missing or malformed file stops startup.** A runtime agent added
-    through the admin API uses the default paths only.
+    through the admin API uses the default paths and server name only.
   - **An `http://` router** is reached in plaintext, as before, for a
     development router or a test. The `router_*` settings are refused with it.
 - **ax-server takes no credentials,** so switchboard reaches it in plaintext,

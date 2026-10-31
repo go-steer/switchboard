@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"path/filepath"
 	"time"
 
 	"github.com/go-steer/purser/authn/mtls"
@@ -80,6 +81,13 @@ type RouterTLS struct {
 
 // WithDefaults is t with every empty field filled in.
 func (t RouterTLS) WithDefaults() RouterTLS {
+	// Cleaned, so one file spelled two ways is one cache entry.
+	if t.CredentialBundleFile != "" {
+		t.CredentialBundleFile = filepath.Clean(t.CredentialBundleFile)
+	}
+	if t.TrustBundleFile != "" {
+		t.TrustBundleFile = filepath.Clean(t.TrustBundleFile)
+	}
 	if t.CredentialBundleFile == "" {
 		t.CredentialBundleFile = DefaultCredentialBundleFile
 	}

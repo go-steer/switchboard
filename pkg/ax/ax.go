@@ -34,10 +34,13 @@ package ax
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -292,9 +295,12 @@ type Ensured struct {
 const (
 	phaseRunning     = "Running"
 	phaseTerminating = "Terminating"
-	// phaseUnknown: ax read the task's status live from Agent Substrate and
-	// could not reach it (Ready reason SubstrateUnavailable).
+	// phaseUnknown: ax reads a task's status live from Agent Substrate, and
+	// either could not reach it (Ready reason reasonSubstrateUnavailable)
+	// or found the actor in a state it doesn't know.
 	phaseUnknown = "Unknown"
+
+	reasonSubstrateUnavailable = "SubstrateUnavailable"
 )
 
 // ErrSubstrateUnavailable is Ensure finding a task whose status ax could not
@@ -340,14 +346,13 @@ func (c *Client) Ensure(ctx context.Context, task string) (Ensured, error) {
 		case phaseRunning:
 			resume = false // a resume would only reconcile again
 		case phaseUnknown:
-			// ax reads a task's status from Substrate on every get, so
-			// Unknown is Substrate unreachable from ax, which a resume
-			// needs as well.
-			reason := readyReason(existing)
-			if reason == "" {
-				reason = "no reason given"
+			// Substrate unreachable from ax: a resume needs it too, and
+			// would fail with less to say. An actor in a state ax doesn't
+			// know is Unknown with another reason, and a resume may well
+			// fix that one (caught in review).
+			if reason, detail := readyReason(existing); reason == reasonSubstrateUnavailable {
+				return out, fmt.Errorf("ax: task %s: %w (%s); try again shortly", c.actor(task), ErrSubstrateUnavailable, detail)
 			}
-			return out, fmt.Errorf("ax: task %s: %w (ax reports its phase Unknown: %s); try again shortly", c.actor(task), ErrSubstrateUnavailable, reason)
 		}
 		out.Drifted = !proto.Equal(existing.GetSpec(), t.GetSpec())
 	} else {
@@ -361,21 +366,20 @@ func (c *Client) Ensure(ctx context.Context, task string) (Ensured, error) {
 	return out, c.waitReady(ctx, task)
 }
 
-// readyReason is the task's Ready condition's reason and message, if any.
-func readyReason(t *axapi.Task) string {
+// readyReason is the reason of the task's Ready condition, and the reason
+// with its message for an error.
+func readyReason(t *axapi.Task) (reason, detail string) {
 	for _, cond := range t.GetStatus().GetConditions() {
 		if cond.GetType() != "Ready" {
 			continue
 		}
-		switch {
-		case cond.GetReason() != "" && cond.GetMessage() != "":
-			return cond.GetReason() + ": " + cond.GetMessage()
-		case cond.GetReason() != "":
-			return cond.GetReason()
+		detail = cond.GetReason()
+		if m := cond.GetMessage(); m != "" {
+			detail += ": " + m
 		}
-		return cond.GetMessage()
+		return cond.GetReason(), detail
 	}
-	return ""
+	return "", ""
 }
 
 // waitReady polls /readyz through the router until it answers 200.
@@ -388,6 +392,13 @@ func (c *Client) waitReady(ctx context.Context, task string) error {
 			return err
 		}
 		resp, err := hc.Do(req)
+		if err != nil && permanentTLSError(err) {
+			// Retrying a handshake that failed on a certificate only
+			// delays saying so by the whole ready timeout: an unlisted
+			// SPIFFE ID or a wrong router name won't fix itself (caught in
+			// review).
+			return fmt.Errorf("ax: task %s: the router refused the TLS handshake, or failed verification: %w", c.actor(task), err)
+		}
 		if err == nil {
 			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10)) // keep the connection
 			_ = resp.Body.Close()
@@ -406,6 +417,32 @@ func (c *Client) waitReady(ctx context.Context, task string) error {
 		case <-time.After(readyPoll):
 		}
 	}
+}
+
+// permanentTLSError reports whether err is a TLS handshake failure retrying
+// won't fix: the router's certificate didn't verify, or the router sent a
+// TLS alert, which is how it refuses a client certificate or an identity not
+// on its allowlist.
+func permanentTLSError(err error) bool {
+	var (
+		verify   *tls.CertificateVerificationError
+		hostname x509.HostnameError
+		unknown  x509.UnknownAuthorityError
+		invalid  x509.CertificateInvalidError
+		alert    tls.AlertError
+		op       *net.OpError
+	)
+	switch {
+	case errors.As(err, &verify), errors.As(err, &hostname), errors.As(err, &unknown),
+		errors.As(err, &invalid), errors.As(err, &alert):
+		return true
+	case errors.As(err, &op):
+		// crypto/tls reports an alert from the peer as a *net.OpError
+		// whose Op is "remote error" and whose Err is its unexported
+		// alert type.
+		return op.Op == "remote error" && strings.HasPrefix(op.Err.Error(), "tls: ")
+	}
+	return false
 }
 
 // readyPoll is how often waitReady asks.

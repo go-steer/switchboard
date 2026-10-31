@@ -198,13 +198,17 @@ type axClients struct {
 
 	mu      sync.Mutex
 	clients map[string]axClient
-	routers map[string]*ax.RouterClient
+	routers map[routerKey]*ax.RouterClient
 }
+
+// routerKey is what builds a router client. A struct, so no path can be
+// spelled to collide with another pair (caught in review).
+type routerKey struct{ bundle, trust, serverName string }
 
 // router is the mTLS client for t, made on first use.
 func (c *axClients) router(t ax.RouterTLS) (*ax.RouterClient, error) {
 	t = t.WithDefaults()
-	key := strings.Join([]string{t.CredentialBundleFile, t.TrustBundleFile, t.ServerName}, "|")
+	key := routerKey{t.CredentialBundleFile, t.TrustBundleFile, t.ServerName}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if rc, ok := c.routers[key]; ok {
@@ -221,7 +225,7 @@ func (c *axClients) router(t ax.RouterTLS) (*ax.RouterClient, error) {
 		return nil, err
 	}
 	if c.routers == nil {
-		c.routers = make(map[string]*ax.RouterClient)
+		c.routers = make(map[routerKey]*ax.RouterClient)
 	}
 	c.routers[key] = rc
 	return rc, nil

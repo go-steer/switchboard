@@ -200,6 +200,11 @@ func TestTheRouterIsVerified(t *testing.T) {
 			t.Errorf("%s: the request went through", name)
 			continue
 		}
+		// purser's verifyWithSource, not some other failure (caught in
+		// review: any error passed).
+		if !strings.Contains(err.Error(), "server certificate did not verify") || !permanentTLSError(err) {
+			t.Errorf("%s: err = %v, want the router's certificate refused", name, err)
+		}
 		if actors, _, _ := router.seen(); len(actors) != 0 {
 			t.Errorf("%s: the router served %v", name, actors)
 		}
@@ -331,5 +336,37 @@ func TestRouterTLSDefaults(t *testing.T) {
 	}
 	if !RouterIsTLS(DefaultRouter) {
 		t.Errorf("DefaultRouter %s is not https", DefaultRouter)
+	}
+}
+
+// A handshake that fails on a certificate is reported at once, not retried
+// for the whole ready timeout: neither an identity the router refuses (its
+// allowlist) nor a router that fails verification fixes itself.
+func TestEnsureFailsFastOnACertificateFailure(t *testing.T) {
+	p := newPodCerts(t)
+	stranger := newPodCerts(t) // its podidentity CA is not the router's
+	for name, tc := range map[string]struct {
+		router *tlsRouter
+		files  *podCerts
+	}{
+		"the router refuses the client": {newTLSRouter(t, stranger, stranger.servicedns.IssueServer(t, DefaultRouterServerName)), &podCerts{bundle: p.bundle, trust: stranger.trust}},
+		"the router fails verification": {newTLSRouter(t, p, p.servicedns.IssueServer(t, "mast-web.agents.svc")), p},
+	} {
+		rc := routerClient(t, RouterTLS{CredentialBundleFile: tc.files.bundle, TrustBundleFile: tc.files.trust})
+		_, conn := fakeServer(t)
+		tmpl, _ := LoadTemplate(writeTemplate(t, testTemplate))
+		c, err := New(Config{Router: tc.router.srv.URL, Atespace: "agents", Template: tmpl, Conn: conn, ReadyTimeout: 30 * time.Second, HTTPClient: rc.HTTP})
+		if err != nil {
+			t.Fatal(err)
+		}
+		fastPoll(t)
+		start := time.Now()
+		_, err = c.Ensure(context.Background(), "sb-x-0123456789abcdef")
+		if err == nil || !strings.Contains(err.Error(), "TLS handshake") {
+			t.Errorf("%s: err = %v, want the handshake failure", name, err)
+		}
+		if d := time.Since(start); d > 10*time.Second {
+			t.Errorf("%s: took %s, want it reported without waiting out the timeout", name, d)
+		}
 	}
 }

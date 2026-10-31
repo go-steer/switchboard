@@ -51,7 +51,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
       `atenet-router.ate-system.svc`. Both files are re-read as they rotate.
     - New settings: `ax.router_credential_bundle_file`,
       `ax.router_trust_bundle_file` and `ax.router_server_name`. A runtime
-      agent uses the default paths only.
+      agent uses the defaults only.
+    - A TLS handshake the router refuses, or that fails verification, ends a
+      task start at once with that error rather than retrying until
+      `ax.ready_timeout`.
     - `deploy/components/ax-router-mtls` mounts the two projected volumes. The
       pod's SPIFFE ID has to be on ate-setup's `--ingress-allowed-spiffe-ids`.
     - An explicit `http://` router still works, for development and tests.
@@ -63,8 +66,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
       ax-server or a later one. An older one misreads them.
     - Templates bind one `workspace:` instead of a `workspaces:` list, and
       may set `config`.
-    - A task ax reports as `Unknown` (Substrate unreachable) fails its start
-      with "Agent Substrate is unavailable" instead of a resume attempt.
+    - A task ax reports as `Unknown` because Substrate is unreachable (Ready
+      reason `SubstrateUnavailable`) fails its start with "Agent Substrate is
+      unavailable" instead of a resume attempt.
     - Templates are checked against the fork's validation at startup,
       `onCompletion` included.
 

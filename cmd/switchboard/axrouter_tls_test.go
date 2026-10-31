@@ -20,6 +20,7 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -81,6 +82,11 @@ func newMTLSAXFixture(t *testing.T) (f *axFixture, ids func() []string) {
 		}
 		h.ServeHTTP(w, req)
 	}))
+	srv.Config.ConnState = func(_ net.Conn, s http.ConnState) {
+		if s == http.StateNew {
+			f.router.conns.Add(1)
+		}
+	}
 	srv.EnableHTTP2 = true
 	srv.TLS = &tls.Config{
 		Certificates: []tls.Certificate{servicedns.IssueServer(t, ax.DefaultRouterServerName)},
@@ -185,24 +191,25 @@ func TestAnAXAgentDefaultsToTheHTTPSRouter(t *testing.T) {
 }
 
 // Agents on one router share its client: one pair of file watchers, and one
-// pool of connections.
+// pool of connections, so two agents' requests ride one TLS connection.
 func TestAXAgentsShareTheRouterClient(t *testing.T) {
-	f := newAXFixture(t)
-	bundle, trust, _, _ := routerFiles(t)
+	f, _ := newMTLSAXFixture(t)
 	b := agentBuilder{ax: &axClients{}}
-	var clients []*http.Client
 	for _, name := range []string{"triage", "deploy"} {
 		c := f.cfg
 		c.Name = name
 		axc := *c.AX
-		axc.Router, axc.RouterCredentialBundleFile, axc.RouterTrustBundleFile = "https://atenet-router.ate-system.svc", bundle, trust
 		axc.Atespace = name // a different ax client
 		c.AX = &axc
 		a, err := buildAgent(c, b)
 		if err != nil {
 			t.Fatal(err)
 		}
-		clients = append(clients, a.ax.client.HTTPClient("t"))
+		resp, err := a.ax.client.HTTPClient("t").Get(f.router.srv.URL + "/readyz")
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
 	}
 	if len(b.ax.routers) != 1 {
 		t.Errorf("router clients = %d, want 1", len(b.ax.routers))
@@ -210,8 +217,8 @@ func TestAXAgentsShareTheRouterClient(t *testing.T) {
 	if len(b.ax.clients) != 2 {
 		t.Errorf("ax clients = %d, want 2", len(b.ax.clients))
 	}
-	if clients[0].Transport == nil || clients[1].Transport == nil {
-		t.Error("a task client has no transport")
+	if n := f.router.conns.Load(); n != 1 {
+		t.Errorf("TLS connections = %d, want both agents on one", n)
 	}
 }
 
@@ -232,6 +239,7 @@ func TestARuntimeAXAgentsRouterFilesAreFenced(t *testing.T) {
 			c.RouterCredentialBundleFile = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 		},
 		"a trust bundle elsewhere": func(c *AXConfig) { c.RouterTrustBundleFile = "/etc/switchboard/secret.pem" },
+		"another server name":      func(c *AXConfig) { c.RouterServerName = "mast-web.agents.svc" },
 	} {
 		c := f.cfg
 		axc := *c.AX
@@ -247,6 +255,7 @@ func TestARuntimeAXAgentsRouterFilesAreFenced(t *testing.T) {
 	axc := *c.AX
 	axc.Router = "https://atenet-router.ate-system.svc"
 	axc.RouterCredentialBundleFile, axc.RouterTrustBundleFile = ax.DefaultCredentialBundleFile, ax.DefaultTrustBundleFile
+	axc.RouterServerName = ax.DefaultRouterServerName
 	c.AX = &axc
 	if err := admin.putAgent(c); err != nil && strings.Contains(err.Error(), "a runtime agent uses the default") {
 		t.Errorf("the default paths were fenced off: %v", err)

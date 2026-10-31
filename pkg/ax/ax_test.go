@@ -448,6 +448,24 @@ func TestEnsureReportsSubstrateUnavailable(t *testing.T) {
 	}
 }
 
+// Unknown for another reason is an actor in a state ax doesn't recognise, with
+// Substrate reachable: Ensure resumes it as it would a suspended task.
+func TestEnsureResumesATaskInAnUnrecognisedState(t *testing.T) {
+	c, ax, _ := fixture(t)
+	ax.tasks["agents/sb-x-0123456789abcdef"] = &axapi.Task{
+		Metadata: &axapi.ObjectMeta{Name: "sb-x-0123456789abcdef"},
+		Status: &axapi.TaskStatus{Phase: "Unknown", Conditions: []*axapi.Condition{
+			{Type: "Ready", Status: "Unknown", Reason: "Unknown", Message: "Actor is in state ACTOR_STATE_UNSPECIFIED"},
+		}},
+	}
+	if _, err := c.Ensure(context.Background(), "sb-x-0123456789abcdef"); err != nil {
+		t.Fatal(err)
+	}
+	if len(ax.resumes) != 1 {
+		t.Errorf("resumes = %v, want one", ax.resumes)
+	}
+}
+
 // Only the template's spec goes into a task: a status or creation time in it
 // would give every task one identity (caught in review).
 func TestTheTemplatesStatusIsNotCopied(t *testing.T) {

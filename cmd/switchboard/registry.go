@@ -489,16 +489,27 @@ func (a *registryAdmin) checkTokenEnv(ac AgentConfig) error {
 		}
 	}
 	if ac.AX != nil {
-		// The gateway reads these too, so they are fenced like the template:
-		// a runtime agent gets the files the pod mounts at the default paths,
-		// and an operator who mounts them elsewhere declares the agent in
-		// the config file.
-		for _, f := range []struct{ name, got, want string }{
-			{"router_credential_bundle_file", ac.AX.RouterCredentialBundleFile, ax.DefaultCredentialBundleFile},
-			{"router_trust_bundle_file", ac.AX.RouterTrustBundleFile, ax.DefaultTrustBundleFile},
+		// The gateway reads the files too, so they are fenced like the
+		// template: a runtime agent gets the files the pod mounts at the
+		// default paths, and an operator who mounts them elsewhere declares
+		// the agent in the config file. The server name too: the servicedns
+		// CA certifies every Service-selected pod for its own name, so another
+		// name would send the pod's certificate and the agent's bearer to any
+		// of them (caught in review).
+		for _, f := range []struct {
+			name, got, want string
+			path            bool
+		}{
+			{"router_credential_bundle_file", ac.AX.RouterCredentialBundleFile, ax.DefaultCredentialBundleFile, true},
+			{"router_trust_bundle_file", ac.AX.RouterTrustBundleFile, ax.DefaultTrustBundleFile, true},
+			{"router_server_name", ac.AX.RouterServerName, ax.DefaultRouterServerName, false},
 		} {
-			if f.got != "" && filepath.Clean(f.got) != f.want {
-				return fmt.Errorf("ax.%s %q: a runtime agent uses the default, %s; declare the agent in the config file to use another path", f.name, f.got, f.want)
+			got := f.got
+			if f.path && got != "" {
+				got = filepath.Clean(got)
+			}
+			if got != "" && got != f.want {
+				return fmt.Errorf("ax.%s %q: a runtime agent uses the default, %s; declare the agent in the config file to use another", f.name, f.got, f.want)
 			}
 		}
 	}
