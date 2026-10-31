@@ -6,6 +6,37 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [v0.9.0] — 2026-10-31
+
+A release about agents that are not daemons somebody runs. On Agent
+Substrate an agent can be an ax task: a sandbox that suspends when idle and
+wakes on the next request. An agent of `kind: "ax"` is a task template, and
+switchboard gives each conversation a task of its own, or each person one
+(`ax.scope: "owner"`), or everyone one (`"shared"`). It starts the task on the
+first message and speaks the usual session contract to it through Substrate's
+router.
+
+**Tasks can sleep, and are cleaned up.** A conversation lets go of its streams
+to the task shortly after its last turn, so ax can suspend it, and picks the
+stream up again on the next message. Thread tasks quiet for 14 days are
+deleted, tasks made from an older template are replaced, and the admin API
+lists and deletes an agent's tasks.
+
+**Built for Agent Substrate v1.0.** The router is reached over mTLS, with the
+pod's own Substrate certificate and the servicedns trust bundle, both
+followed as they rotate. switchboard speaks the ax fork rebased for v1.0
+(`mastersingh24/ax` `substrate-v1-12dbe16`), whose own Task fields were
+renumbered.
+
+Upgrading is free for anyone not using ax agents: daemon agents, the chat
+adapters and the admin API carry over unchanged, and everything ax is off
+until an agent declares it. Two things to know. ax agents need that rebased
+ax-server or a later one, since an older one misreads the renumbered fields,
+plus `deploy/components/ax-router-mtls` and the pod's SPIFFE ID on ate-setup's
+`--ingress-allowed-spiffe-ids`. And purser moves to v0.5.0, so under
+`--admin-auth oidc` an issuer whose keys won't load now draws a 503 instead
+of a 401.
+
 ### Added
 - **ax agents: a task per thread** (#170, `docs/ax-backend.md`). An agent of
   `kind: "ax"` is an ax task template, and each conversation gets a task of
