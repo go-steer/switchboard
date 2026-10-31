@@ -124,16 +124,21 @@ func ParseTemplate(raw []byte, path string) (*Template, error) {
 	return tmpl, nil
 }
 
-// The runner's own ports, which a task's server cannot take
-// (ax pkg/apis/v1alpha1/types.go).
+// ax's limits on a task's port and idling: the runner's own ports, which a
+// task's server cannot take, the shortest suspendAfter, and the onCompletion
+// values (ax pkg/apis/v1alpha1/types.go at substrate-v1-12dbe16).
 const (
-	runnerPort         = 80
-	runnerMetadataPort = 8099
-	minSuspendAfter    = 10 * time.Second
+	runnerPort          = 80
+	runnerMetadataPort  = 8099
+	minSuspendAfter     = 10 * time.Second
+	onCompletionKeep    = "Keep"
+	onCompletionSuspend = "Suspend"
 )
 
-// checkSpec is ax's validation of the port and idling, which a template
-// should fail at startup rather than at every thread's CreateTask.
+// checkSpec is ax's validation of the port and idling (validateTaskHTTP and
+// validateTaskIdle), which a template should fail at startup rather than at
+// every thread's CreateTask. It is stricter in one way: spec.http.port is
+// required, since nothing else in a task answers the router.
 func checkSpec(spec *axapi.TaskSpec) error {
 	port := spec.GetHttp().GetPort()
 	switch {
@@ -157,6 +162,11 @@ func checkSpec(spec *axapi.TaskSpec) error {
 		if p := idle.GetBusyPath(); p != "" && !strings.HasPrefix(p, "/") {
 			return fmt.Errorf("spec.idle.busyPath: %q must start with /", p)
 		}
+	}
+	switch oc := spec.GetOnCompletion(); oc {
+	case "", onCompletionKeep, onCompletionSuspend:
+	default:
+		return fmt.Errorf("spec.onCompletion: %q must be %q or %q", oc, onCompletionKeep, onCompletionSuspend)
 	}
 	return nil
 }
@@ -282,7 +292,14 @@ type Ensured struct {
 const (
 	phaseRunning     = "Running"
 	phaseTerminating = "Terminating"
+	// phaseUnknown: ax read the task's status live from Agent Substrate and
+	// could not reach it (Ready reason SubstrateUnavailable).
+	phaseUnknown = "Unknown"
 )
+
+// ErrSubstrateUnavailable is Ensure finding a task whose status ax could not
+// read from Agent Substrate: a resume would fail too, and say less.
+var ErrSubstrateUnavailable = errors.New("Agent Substrate is unavailable")
 
 // Ensure makes sure task exists, is running and answers through the router.
 // It creates the task from the template; if ax refuses because it exists
@@ -322,6 +339,15 @@ func (c *Client) Ensure(ctx context.Context, task string) (Ensured, error) {
 			return out, fmt.Errorf("ax: task %s is being deleted; try again once it is gone", c.actor(task))
 		case phaseRunning:
 			resume = false // a resume would only reconcile again
+		case phaseUnknown:
+			// ax reads a task's status from Substrate on every get, so
+			// Unknown is Substrate unreachable from ax, which a resume
+			// needs as well.
+			reason := readyReason(existing)
+			if reason == "" {
+				reason = "no reason given"
+			}
+			return out, fmt.Errorf("ax: task %s: %w (ax reports its phase Unknown: %s); try again shortly", c.actor(task), ErrSubstrateUnavailable, reason)
 		}
 		out.Drifted = !proto.Equal(existing.GetSpec(), t.GetSpec())
 	} else {
@@ -333,6 +359,23 @@ func (c *Client) Ensure(ctx context.Context, task string) (Ensured, error) {
 		}
 	}
 	return out, c.waitReady(ctx, task)
+}
+
+// readyReason is the task's Ready condition's reason and message, if any.
+func readyReason(t *axapi.Task) string {
+	for _, cond := range t.GetStatus().GetConditions() {
+		if cond.GetType() != "Ready" {
+			continue
+		}
+		switch {
+		case cond.GetReason() != "" && cond.GetMessage() != "":
+			return cond.GetReason() + ": " + cond.GetMessage()
+		case cond.GetReason() != "":
+			return cond.GetReason()
+		}
+		return cond.GetMessage()
+	}
+	return ""
 }
 
 // waitReady polls /readyz through the router until it answers 200.

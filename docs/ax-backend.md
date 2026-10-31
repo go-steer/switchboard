@@ -24,11 +24,13 @@ shape where it can.
 ## What ax and mast provide
 
 These are the facts the design rests on, measured at shipmind's pins
-(ax-server `685b160`, ax-runner `e8bc98d`, mast `922e549`).
+(ax-server `685b160`, ax-runner `e8bc98d`, mast `922e549`). _Since #182:_
+`internal/axapi` is the fork rebased onto upstream ax for Agent Substrate
+v1.0 (`substrate-v1-12dbe16`); what changed is in "The rebased fork" below.
 
 **ax-server** is gRPC only (h2c on `:8080`; `pkg/apis/v1alpha1/ax.proto`):
 `CreateTask`, `GetTask`, `ListTasks`, `DeleteTask`, `SuspendTask`,
-`ResumeTask`, `WatchTasks`.
+`ResumeTask` (and `WatchTask`, gone after the rebase).
 - **Immutable tasks.** Re-creating a name returns `FailedPrecondition`. There
   is no update.
 - **No labels, annotations or owner** on a task. Names are RFC 1123 labels
@@ -36,7 +38,8 @@ These are the facts the design rests on, measured at shipmind's pins
   or in switchboard's state.
 - **No template or prompt field.** A task is `image`, `command`, `env`,
   `workspaces`, `egress`, `http`, `idle`. Instructions travel as flags, env or
-  workspace files.
+  workspace files. (After the rebase, one `workspace`, and a free-form
+  `config` the runner reads.)
 - **Nothing expires.** A task lives until it is deleted.
 - **No authentication.** No interceptors on the server, and the CLI dials
   insecure. Protection is the network.
@@ -71,6 +74,36 @@ carry it).
 - **Sessions:** many per process, in a session DB that survives suspend.
 - **Single-user:** no owner, no ACL, and `X-Asserted-Caller` is not
   honoured with token auth.
+
+### The rebased fork (#182)
+
+The fork was rebased onto upstream ax (`f0228f1`) for Agent Substrate v1.0.
+switchboard carries the proto at `substrate-v1-12dbe16`:
+
+- **Field numbers.** The fork's own TaskSpec fields moved to 100 and up:
+  `egress` 100, `http` 101, `idle` 102, `on_completion` 103. Upstream took 7
+  for `config`, where the fork had `egress`. A client with the old copy would
+  send `http` under a number the server reads as something else, so the copy
+  and the server move together. The YAML keys didn't change.
+  `pkg/ax/wire_test.go` pins the numbers.
+- **One workspace.** `spec.workspaces` (a list) became `spec.workspace` (one
+  binding, the same field number). A template still using `workspaces:` is
+  refused at startup.
+- **Status is read live from Substrate.** Phase `Unknown`, with Ready reason
+  `SubstrateUnavailable`, means ax couldn't reach Substrate. `Ensure` then
+  fails with `ax.ErrSubstrateUnavailable` and ax's reason rather than
+  attempting a resume, which needs Substrate too. `Failed` with
+  `ActorNotFound` means the task's actor is gone; `Ensure` resumes it, which
+  re-creates the actor.
+- **Idle suspension** is recorded in an ax-owned `AutoSuspended` condition
+  (`IdleSuspended`, `CompletedSuspended`; `False` with `ResumedByRequest`
+  after a wake), not in a Ready reason. switchboard reads neither: it knows a
+  task idles from its template.
+- **Validation.** `checkSpec` mirrors the fork's `validateTaskHTTP` and
+  `validateTaskIdle`: a port in 1–65535 that is neither the runner's (80) nor
+  its metadata port (8099), `suspendAfter` of at least 10s, a `busyPath`
+  starting with `/`, and `onCompletion` of `Keep` or `Suspend`. It also
+  requires `spec.http.port`, which ax doesn't.
 
 ## The decision
 

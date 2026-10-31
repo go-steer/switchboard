@@ -493,6 +493,14 @@ template, and each conversation gets a task of its own.
   task, or reuses it if it exists. It resumes the task and waits for it to
   answer (`ax.ready_timeout`, default `2m`). A start that takes more than a
   couple of seconds shows "⏳ Starting …" in the thread.
+  - When ax reports the task's phase `Unknown`, it couldn't reach Agent
+    Substrate. The thread is told the agent couldn't be started because
+    Substrate is unavailable, and no resume is tried.
+- **ax version:** switchboard speaks the ax fork rebased for Agent Substrate
+  v1.0 (`mastersingh24/ax` `substrate-v1-12dbe16`), whose own Task fields
+  were renumbered. Run it against that ax-server or a later one; an older
+  server misreads `http` and `idle`. Templates bind one `workspace:`, not a
+  `workspaces:` list.
 - **Every request** then goes through the atenet router to that task. The
   task's name is deterministic and recorded with the conversation, so a
   restart goes back to the same task. That happens on the conversation's next

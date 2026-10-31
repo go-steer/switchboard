@@ -55,6 +55,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     - `deploy/components/ax-router-mtls` mounts the two projected volumes. The
       pod's SPIFFE ID has to be on ate-setup's `--ingress-allowed-spiffe-ids`.
     - An explicit `http://` router still works, for development and tests.
+  - **The rebased ax fork** (#182). `internal/axapi` is re-vendored from
+    `mastersingh24/ax` `substrate-v1-12dbe16`, the fork rebased onto
+    upstream ax for Agent Substrate v1.0.
+    - The fork's Task fields are renumbered (`egress`, `http`, `idle` and
+      `on_completion` are now 100 to 103), so switchboard needs that
+      ax-server or a later one. An older one misreads them.
+    - Templates bind one `workspace:` instead of a `workspaces:` list, and
+      may set `config`.
+    - A task ax reports as `Unknown` (Substrate unreachable) fails its start
+      with "Agent Substrate is unavailable" instead of a resume attempt.
+    - Templates are checked against the fork's validation at startup,
+      `onCompletion` included.
 
 ### Changed
 - **purser v0.5.0** (from v0.1.0), for the pod-certificate and rotating
