@@ -43,6 +43,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     - **Admin API:** `GET /v1/agents/{name}/tasks` lists an agent's tasks,
       and `DELETE /v1/agents/{name}/tasks/{task}` deletes one of them.
 
+### Changed
+- **purser v0.5.0** (from v0.1.0), for the pod-certificate and rotating
+  trust-bundle sources the router client uses. One behaviour change reaches
+  the admin API: under `--admin-auth oidc`, a request whose token can't be
+  checked because the issuer's keys won't load now gets a 503 with
+  `Retry-After` instead of a 401, so a client retries instead of discarding a
+  good token.
+
 ## [v0.8.0] — 2026-10-21
 
 A release about managing agents without restarting the gateway, and about
