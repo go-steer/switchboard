@@ -27,6 +27,7 @@ import (
 	"sync"
 
 	"github.com/go-steer/switchboard/internal/logging"
+	"github.com/go-steer/switchboard/pkg/ax"
 )
 
 // The runtime registry (#156, docs/agent-identity.md).
@@ -485,6 +486,20 @@ func (a *registryAdmin) checkTokenEnv(ac AgentConfig) error {
 		// operators should be able to write to it.
 		if p := filepath.Clean(ac.AX.TaskTemplateFile); !filepath.IsAbs(p) || !strings.HasPrefix(p, dir) {
 			return fmt.Errorf("ax.task_template_file %q: a runtime agent's template must be in %s (--admin-ax-template-dir)", ac.AX.TaskTemplateFile, a.axTemplateDir)
+		}
+	}
+	if ac.AX != nil {
+		// The gateway reads these too, so they are fenced like the template:
+		// a runtime agent gets the files the pod mounts at the default paths,
+		// and an operator who mounts them elsewhere declares the agent in
+		// the config file.
+		for _, f := range []struct{ name, got, want string }{
+			{"router_credential_bundle_file", ac.AX.RouterCredentialBundleFile, ax.DefaultCredentialBundleFile},
+			{"router_trust_bundle_file", ac.AX.RouterTrustBundleFile, ax.DefaultTrustBundleFile},
+		} {
+			if f.got != "" && filepath.Clean(f.got) != f.want {
+				return fmt.Errorf("ax.%s %q: a runtime agent uses the default, %s; declare the agent in the config file to use another path", f.name, f.got, f.want)
+			}
 		}
 	}
 	if ac.TokenEnv == "" {

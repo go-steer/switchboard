@@ -52,7 +52,9 @@ carry it).
 **The atenet router** (`atenet-router.ate-system:80`):
 - **Routing:** it routes on one header, `ate-target-actor: <atespace>/<task>`.
 - **Waking:** it resumes a suspended actor before proxying.
-- **Plaintext, no auth** in shipmind's deployment.
+- **Plaintext, no auth** in shipmind's deployment. _Since Agent Substrate
+  v1.0 (#181):_ TLS only on 443, admitting a podidentity pod certificate whose
+  SPIFFE ID is allowlisted; see "Identity" below.
 - **Route timeout:** 5 minutes, which also cuts an SSE stream.
 - **Parking budget:** 5s by default for a waking request; shipmind raises it
   to 60s.
@@ -86,7 +88,7 @@ An agent declares `kind: "ax"` and an `ax` block instead of a `daemon_url`:
    "token_env": "SWITCHBOARD_AGENT_TOKEN_TRIAGE",
    "ax": {
      "server": "ax-server.ax-system.svc.cluster.local:8080",
-     "router": "http://atenet-router.ate-system.svc.cluster.local",
+     "router": "https://atenet-router.ate-system.svc.cluster.local",
      "atespace": "default",
      "task_template_file": "/etc/switchboard/ax/triage.yaml",
      "scope": "thread"
@@ -200,13 +202,37 @@ and history.
 - **`X-Asserted-Caller` is still sent,** for mast's audit and for the day it
   honours a proxy. The owner of an `owner`-scope task is in its name, and
   switchboard's audit records both.
-- **ax-server and the router are unauthenticated.** switchboard reaches both
-  in-cluster in plaintext, as lookout does; a NetworkPolicy is the
-  protection.
-  - The purser identity of `docs/agent-identity.md` cannot apply until ax and
-    Substrate accept mTLS. Substrate's `static-mtls` ingress mode currently
-    breaks ax-server's own path.
-  - When they do, an ax agent gains an `auth` block like any other.
+- **ax-server is unauthenticated.** switchboard reaches it in-cluster in
+  plaintext, as lookout does; a NetworkPolicy is the protection.
+- **The router takes mTLS only** from Agent Substrate v1.0, which removed its
+  plaintext listener. _As built (#181):_
+  - **Client:** switchboard presents its pod certificate, from a
+    `podCertificate` projection (signer `podidentity.podcert.ate.dev/identity`,
+    `credentialBundlePath`: a PKCS#8 key, then the chain). Its identity is
+    `spiffe://cluster.local/ns/<namespace>/sa/<serviceaccount>`, which has to
+    be on ate-setup's `--ingress-allowed-spiffe-ids`; the router serves nothing
+    to an identity not listed.
+  - **Server:** the router's certificate comes from the servicedns signer and
+    carries only `atenet-router.ate-system.svc`. switchboard verifies it
+    against a `clusterTrustBundle` projection of that signer
+    (`podcert.ate.dev/canarying: live`) and that name, whatever address it
+    dials. The servicedns CA certifies every Service-selected pod for its own
+    name, so the name check is what pins the router.
+  - **Rotation:** purser v0.5.0's PKI client profile does both halves.
+    `mtls.CertificateFileSource` re-reads the bundle, and
+    `mtls.CertPoolFileSource` re-reads the trust bundle, consulted per
+    handshake (`RootCAsSource`). A pod certificate lives 24h at most and a
+    restart is never needed.
+  - **Settings:** `ax.router` (default the https in-cluster address),
+    `ax.router_credential_bundle_file`, `ax.router_trust_bundle_file` and
+    `ax.router_server_name`, each defaulting to what
+    `deploy/components/ax-router-mtls` mounts. One client per set of files
+    serves every agent, so they share connections.
+  - **An `http://` router** is still reached in plaintext, for development
+    and tests.
+  - **Not `auth`:** an agent's `auth` block (`docs/agent-identity.md`) names
+    how switchboard reaches a *daemon*. The router authenticates the pod, not
+    the gateway's configured identity, so it has settings of its own.
 
 ### Lifecycle
 

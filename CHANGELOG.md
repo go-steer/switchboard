@@ -42,6 +42,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
       replaced (`ax.replace_drifted`).
     - **Admin API:** `GET /v1/agents/{name}/tasks` lists an agent's tasks,
       and `DELETE /v1/agents/{name}/tasks/{task}` deletes one of them.
+  - **The router is reached over mTLS** (#181). Agent Substrate v1.0's router
+    serves TLS only and admits only allowlisted pod certificates.
+    - `ax.router` defaults to
+      `https://atenet-router.ate-system.svc.cluster.local`.
+    - switchboard presents its podidentity pod certificate and verifies the
+      router's certificate against the servicedns trust bundle, under the name
+      `atenet-router.ate-system.svc`. Both files are re-read as they rotate.
+    - New settings: `ax.router_credential_bundle_file`,
+      `ax.router_trust_bundle_file` and `ax.router_server_name`. A runtime
+      agent uses the default paths only.
+    - `deploy/components/ax-router-mtls` mounts the two projected volumes. The
+      pod's SPIFFE ID has to be on ate-setup's `--ingress-allowed-spiffe-ids`.
+    - An explicit `http://` router still works, for development and tests.
 
 ### Changed
 - **purser v0.5.0** (from v0.1.0), for the pod-certificate and rotating

@@ -169,19 +169,7 @@ func writeTemplate(t *testing.T, body string) string {
 // fixture wires a Client to a fake ax-server over bufconn and a fake router.
 func fixture(t *testing.T) (*Client, *fakeAX, *fakeRouter) {
 	t.Helper()
-	ax := &fakeAX{tasks: map[string]*axapi.Task{}}
-	lis := bufconn.Listen(1 << 20)
-	srv := grpc.NewServer()
-	axapi.RegisterAXServer(srv, ax)
-	go func() { _ = srv.Serve(lis) }()
-	t.Cleanup(srv.Stop)
-	conn, err := grpc.NewClient("passthrough:///bufnet",
-		grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return lis.Dial() }),
-		grpc.WithTransportCredentials(insecure.NewCredentials()))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = conn.Close() })
+	ax, conn := fakeServer(t)
 
 	router := &fakeRouter{}
 	rs := httptest.NewServer(router)
@@ -195,10 +183,34 @@ func fixture(t *testing.T) (*Client, *fakeAX, *fakeRouter) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	fastPoll(t)
+	return c, ax, router
+}
+
+// fastPoll shortens the readiness poll for the test.
+func fastPoll(t *testing.T) {
 	old := readyPoll
 	readyPoll = 10 * time.Millisecond
 	t.Cleanup(func() { readyPoll = old })
-	return c, ax, router
+}
+
+// fakeServer is a fake ax-server and a connection to it over bufconn.
+func fakeServer(t *testing.T) (*fakeAX, *grpc.ClientConn) {
+	t.Helper()
+	ax := &fakeAX{tasks: map[string]*axapi.Task{}}
+	lis := bufconn.Listen(1 << 20)
+	srv := grpc.NewServer()
+	axapi.RegisterAXServer(srv, ax)
+	go func() { _ = srv.Serve(lis) }()
+	t.Cleanup(srv.Stop)
+	conn, err := grpc.NewClient("passthrough:///bufnet",
+		grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return lis.Dial() }),
+		grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	return ax, conn
 }
 
 // Ensure creates the task from the template — only its name and atespace

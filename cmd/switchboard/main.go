@@ -494,7 +494,7 @@ func runServe(args []string) (err error) {
 		if gid.kind != identityNone {
 			logf.Infof("identity: %s; agents with auth.method spiffe or pki are reached with it", gid.kind)
 		}
-		builder = agentBuilder{approvals: wantApprovals, identity: gid, ax: &axClients{}}
+		builder = agentBuilder{approvals: wantApprovals, identity: gid, ax: &axClients{logf: logf}}
 		if agents, err = agentsFrom(cfg, *daemonURL, *tokenEnv, builder); err != nil {
 			return err
 		}

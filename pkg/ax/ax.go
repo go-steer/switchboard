@@ -22,6 +22,10 @@
 // serves the same session contract a daemon does (spec.http.port), so the
 // router plus Transport is a daemon URL like any other for pkg/daemon.
 //
+// The router takes mTLS only (Agent Substrate v1.0): NewRouterClient builds
+// the client that presents the pod's certificate and verifies the router's.
+// A plain http:// router still works, for a development router or a test.
+//
 // ax-server has no authentication: the client dials it in plaintext, in the
 // cluster, as k8s-lookout's ax sink does. A NetworkPolicy is the protection
 // until ax grows some.
@@ -180,7 +184,8 @@ func moreDocuments(raw []byte) bool {
 type Config struct {
 	// Server is ax-server's gRPC address, host:port.
 	Server string
-	// Router is the atenet router's base URL, scheme://host[:port].
+	// Router is the atenet router's base URL, scheme://host[:port]. An
+	// https router needs HTTPClient from NewRouterClient.
 	Router string
 	// Atespace the tasks live in; empty is DefaultAtespace.
 	Atespace string
@@ -189,10 +194,11 @@ type Config struct {
 	// ReadyTimeout bounds all of Ensure — create, resume and the wait for the
 	// task to answer; zero is DefaultReadyTimeout.
 	ReadyTimeout time.Duration
-	// HTTPClient is the base for requests through the router; nil is a
-	// client that follows no redirects (daemon.NoRedirects). Its transport
-	// is wrapped, never replaced, and its Timeout is dropped: these clients
-	// carry SSE streams.
+	// HTTPClient is the base for requests through the router: for an https
+	// router, RouterClient.HTTP, which holds the client certificate. For an
+	// http router nil is a client that follows no redirects
+	// (daemon.NoRedirects). Its transport is wrapped, never replaced, and
+	// its Timeout is dropped: these clients carry SSE streams.
 	HTTPClient *http.Client
 	// Conn overrides the connection to ax-server; nil dials Server. A test
 	// seam.
@@ -220,6 +226,10 @@ func New(cfg Config) (*Client, error) {
 		return nil, errors.New("ax: the ax-server address is required")
 	case !validRouter(cfg.Router):
 		return nil, fmt.Errorf("ax: router %q: want http(s)://host[:port]", cfg.Router)
+	case RouterIsTLS(cfg.Router) && cfg.HTTPClient == nil:
+		// A default client would trust the public roots and present no
+		// certificate, which the router refuses; fail here instead.
+		return nil, fmt.Errorf("ax: router %s: an https router needs a client with the pod's certificate (NewRouterClient)", cfg.Router)
 	}
 	if cfg.Atespace == "" {
 		cfg.Atespace = DefaultAtespace
@@ -533,6 +543,12 @@ func slug(s string) string {
 		}
 	}
 	return strings.Trim(b.String(), "-")
+}
+
+// RouterIsTLS reports whether router is an https URL.
+func RouterIsTLS(router string) bool {
+	u, err := url.Parse(router)
+	return err == nil && u.Scheme == "https"
 }
 
 // validRouter: the router is a base URL the contract's paths are appended to,

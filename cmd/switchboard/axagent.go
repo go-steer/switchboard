@@ -27,6 +27,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-steer/switchboard/internal/logging"
 	"github.com/go-steer/switchboard/pkg/approval"
 	"github.com/go-steer/switchboard/pkg/ax"
 	"github.com/go-steer/switchboard/pkg/chat"
@@ -49,8 +50,22 @@ const agentKindAX = "ax"
 type AXConfig struct {
 	// Server is ax-server's gRPC address, host:port.
 	Server string `json:"server"`
-	// Router is the atenet router's base URL.
-	Router string `json:"router"`
+	// Router is the atenet router's base URL; empty is ax.DefaultRouter.
+	// An https router is reached with mTLS (#181): the pod's podidentity
+	// certificate, verified against the servicedns trust bundle. An http
+	// router is reached in plaintext, for a development router or a test.
+	Router string `json:"router,omitempty"`
+	// RouterCredentialBundleFile is the client's key and certificate
+	// chain for an https router, from a podCertificate projection's
+	// credentialBundlePath; empty is ax.DefaultCredentialBundleFile.
+	RouterCredentialBundleFile string `json:"router_credential_bundle_file,omitempty"`
+	// RouterTrustBundleFile is the roots the router's certificate must
+	// chain to, from a clusterTrustBundle projection of the servicedns
+	// signer; empty is ax.DefaultTrustBundleFile.
+	RouterTrustBundleFile string `json:"router_trust_bundle_file,omitempty"`
+	// RouterServerName is the name verified on the router's certificate;
+	// empty is ax.DefaultRouterServerName.
+	RouterServerName string `json:"router_server_name,omitempty"`
 	// Atespace the tasks live in; empty is ax's default.
 	Atespace string `json:"atespace,omitempty"`
 	// TaskTemplateFile is a full ax Task manifest every task is created
@@ -175,10 +190,41 @@ func (x *axAgent) taskName(agentName, gateway, conv, caller string) string {
 
 // axClients caches ax-server clients by everything that builds one, so the
 // registry, which rebuilds every runtime agent on each change, does not open
-// a connection to ax-server every time and leak the last one.
+// a connection to ax-server every time and leak the last one. It caches the
+// router's mTLS clients the same way, by their files and server name: each
+// holds two file watchers, and agents that share one share its connections.
 type axClients struct {
+	logf logging.Logf // hears a router certificate reload that failed; nil is silent
+
 	mu      sync.Mutex
 	clients map[string]axClient
+	routers map[string]*ax.RouterClient
+}
+
+// router is the mTLS client for t, made on first use.
+func (c *axClients) router(t ax.RouterTLS) (*ax.RouterClient, error) {
+	t = t.WithDefaults()
+	key := strings.Join([]string{t.CredentialBundleFile, t.TrustBundleFile, t.ServerName}, "|")
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if rc, ok := c.routers[key]; ok {
+		return rc, nil
+	}
+	if c.logf != nil {
+		logf, files := c.logf, t.CredentialBundleFile+", "+t.TrustBundleFile
+		t.OnError = func(err error) {
+			logf.Warnf("ax router TLS (%s): reload failed, still using the last good files: %v", files, err)
+		}
+	}
+	rc, err := ax.NewRouterClient(t)
+	if err != nil {
+		return nil, err
+	}
+	if c.routers == nil {
+		c.routers = make(map[string]*ax.RouterClient)
+	}
+	c.routers[key] = rc
+	return rc, nil
 }
 
 // axClient is a cached client and what its template said about idling.
@@ -210,16 +256,28 @@ func buildAXAgent(ac AgentConfig, b agentBuilder) (*axAgent, error) {
 	c := ac.AX
 	switch {
 	case c == nil:
-		return nil, errors.New(`.ax is required for kind "ax": server, router and task_template_file`)
+		return nil, errors.New(`.ax is required for kind "ax": server and task_template_file`)
 	case ac.DaemonURL != "":
 		return nil, errors.New(`.daemon_url is not for kind "ax": its tasks are reached through .ax.router`)
 	case ac.Auth != nil:
-		// The router and ax-server take no credentials today (docs/ax-backend.md).
-		return nil, errors.New(`.auth is not supported for kind "ax" yet: Agent Substrate's router takes no client certificate`)
+		// The router's certificate is the pod's own, set by .ax.router_*;
+		// ax-server takes no credentials (docs/ax-backend.md).
+		return nil, errors.New(`.auth is not for kind "ax": the router is reached with the pod's certificate, set by .ax.router_credential_bundle_file and friends`)
 	case strings.TrimSpace(ac.TokenEnv) == "":
 		return nil, errors.New(".token_env is required: the variable holding the token the task's agent expects (its MAST_ATTACH_TOKEN)")
-	case c.Server == "" || c.Router == "" || c.TaskTemplateFile == "":
-		return nil, errors.New(".ax needs server, router and task_template_file")
+	case c.Server == "" || c.TaskTemplateFile == "":
+		return nil, errors.New(".ax needs server and task_template_file")
+	}
+	router := c.Router
+	if router == "" {
+		router = ax.DefaultRouter
+	}
+	routerTLS := ax.RouterTLS{CredentialBundleFile: c.RouterCredentialBundleFile, TrustBundleFile: c.RouterTrustBundleFile, ServerName: c.RouterServerName}
+	tlsRouter := ax.RouterIsTLS(router)
+	if !tlsRouter && (c.RouterCredentialBundleFile != "" || c.RouterTrustBundleFile != "" || c.RouterServerName != "") {
+		// They would be ignored, and a router meant to be authenticated
+		// reached in plaintext without a word.
+		return nil, fmt.Errorf(".ax.router %q: router_credential_bundle_file, router_trust_bundle_file and router_server_name are for an https router", router)
 	}
 	scope := c.Scope
 	if scope == "" {
@@ -248,8 +306,20 @@ func buildAXAgent(ac AgentConfig, b agentBuilder) (*axAgent, error) {
 		return nil, fmt.Errorf(".ax.task_template_file: %w", err)
 	}
 	sum := sha256.Sum256(raw)
-	key := strings.Join([]string{c.Server, c.Router, c.Atespace, c.TaskTemplateFile, hex.EncodeToString(sum[:]), ready.String()}, "|")
-	cl, err := b.axCache().get(key, func() (axClient, error) {
+	cache := b.axCache()
+	// No redirects through the router either (daemon.NoRedirects).
+	hc := &http.Client{CheckRedirect: daemon.NoRedirects}
+	if tlsRouter {
+		routerTLS = routerTLS.WithDefaults()
+		rc, err := cache.router(routerTLS)
+		if err != nil {
+			return nil, fmt.Errorf(".ax.router %s: %w", router, err)
+		}
+		hc = rc.HTTP
+	}
+	key := strings.Join([]string{c.Server, router, routerTLS.CredentialBundleFile, routerTLS.TrustBundleFile, routerTLS.ServerName,
+		c.Atespace, c.TaskTemplateFile, hex.EncodeToString(sum[:]), ready.String()}, "|")
+	cl, err := cache.get(key, func() (axClient, error) {
 		// From the bytes the key hashes, not a second read (caught in
 		// review: a file changed between the two was cached under the old
 		// hash).
@@ -258,9 +328,8 @@ func buildAXAgent(ac AgentConfig, b agentBuilder) (*axAgent, error) {
 			return axClient{}, err
 		}
 		client, err := ax.New(ax.Config{
-			Server: c.Server, Router: c.Router, Atespace: c.Atespace, Template: t, ReadyTimeout: ready,
-			// No redirects through the router either (daemon.NoRedirects).
-			HTTPClient: &http.Client{CheckRedirect: daemon.NoRedirects},
+			Server: c.Server, Router: router, Atespace: c.Atespace, Template: t, ReadyTimeout: ready,
+			HTTPClient: hc,
 		})
 		return axClient{client: client, idle: t.Idle, idleAfter: t.IdleAfter}, err
 	})
