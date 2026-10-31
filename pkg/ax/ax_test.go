@@ -169,19 +169,7 @@ func writeTemplate(t *testing.T, body string) string {
 // fixture wires a Client to a fake ax-server over bufconn and a fake router.
 func fixture(t *testing.T) (*Client, *fakeAX, *fakeRouter) {
 	t.Helper()
-	ax := &fakeAX{tasks: map[string]*axapi.Task{}}
-	lis := bufconn.Listen(1 << 20)
-	srv := grpc.NewServer()
-	axapi.RegisterAXServer(srv, ax)
-	go func() { _ = srv.Serve(lis) }()
-	t.Cleanup(srv.Stop)
-	conn, err := grpc.NewClient("passthrough:///bufnet",
-		grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return lis.Dial() }),
-		grpc.WithTransportCredentials(insecure.NewCredentials()))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = conn.Close() })
+	ax, conn := fakeServer(t)
 
 	router := &fakeRouter{}
 	rs := httptest.NewServer(router)
@@ -195,10 +183,34 @@ func fixture(t *testing.T) (*Client, *fakeAX, *fakeRouter) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	fastPoll(t)
+	return c, ax, router
+}
+
+// fastPoll shortens the readiness poll for the test.
+func fastPoll(t *testing.T) {
 	old := readyPoll
 	readyPoll = 10 * time.Millisecond
 	t.Cleanup(func() { readyPoll = old })
-	return c, ax, router
+}
+
+// fakeServer is a fake ax-server and a connection to it over bufconn.
+func fakeServer(t *testing.T) (*fakeAX, *grpc.ClientConn) {
+	t.Helper()
+	ax := &fakeAX{tasks: map[string]*axapi.Task{}}
+	lis := bufconn.Listen(1 << 20)
+	srv := grpc.NewServer()
+	axapi.RegisterAXServer(srv, ax)
+	go func() { _ = srv.Serve(lis) }()
+	t.Cleanup(srv.Stop)
+	conn, err := grpc.NewClient("passthrough:///bufnet",
+		grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return lis.Dial() }),
+		grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	return ax, conn
 }
 
 // Ensure creates the task from the template — only its name and atespace
@@ -304,6 +316,17 @@ func TestTemplatesAreValidated(t *testing.T) {
 		"no spec":       {"kind: Task\n", "spec is required"},
 		"another kind":  {"kind: Workspace\nspec:\n  image: x\n", "want Task"},
 		"unknown field": {"kind: Task\nspec:\n  image: x\n  http:\n    port: 1\n  imagee: y\n", "imagee"},
+		// ax's validateTaskHTTP and validateTaskIdle at substrate-v1-12dbe16.
+		"the runner's port":     {"kind: Task\nspec:\n  http:\n    port: 80\n", "runner's own ports"},
+		"the metadata port":     {"kind: Task\nspec:\n  http:\n    port: 8099\n", "runner's own ports"},
+		"a port out of range":   {"kind: Task\nspec:\n  http:\n    port: 65536\n", "not a valid port"},
+		"a negative port":       {"kind: Task\nspec:\n  http:\n    port: -1\n", "not a valid port"},
+		"a short suspendAfter":  {"kind: Task\nspec:\n  http:\n    port: 1\n  idle:\n    suspendAfter: 9s\n", "shorter than"},
+		"no suspendAfter":       {"kind: Task\nspec:\n  http:\n    port: 1\n  idle:\n    busyPath: /busy\n", "suspendAfter: is required"},
+		"a relative busyPath":   {"kind: Task\nspec:\n  http:\n    port: 1\n  idle:\n    suspendAfter: 10s\n    busyPath: busy\n", "must start with /"},
+		"an unknown completion": {"kind: Task\nspec:\n  http:\n    port: 1\n  onCompletion: Delete\n", "spec.onCompletion"},
+		// The rebased fork binds one workspace (upstream #485).
+		"workspaces, plural": {"kind: Task\nspec:\n  http:\n    port: 1\n  workspaces:\n    - name: w\n", "workspaces"},
 	} {
 		if _, err := LoadTemplate(writeTemplate(t, tc.body)); err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("%s: err = %v, want %q", name, err, tc.want)
@@ -312,6 +335,17 @@ func TestTemplatesAreValidated(t *testing.T) {
 	tmpl, err := LoadTemplate(writeTemplate(t, "kind: Task\nspec:\n  http:\n    port: 1\n"))
 	if err != nil || tmpl.Idle {
 		t.Errorf("a template without idle: %+v, %v; want loaded, Idle false", tmpl, err)
+	}
+	for name, body := range map[string]string{
+		"the shortest suspendAfter": "kind: Task\nspec:\n  http:\n    port: 65535\n  idle:\n    suspendAfter: 10s\n",
+		"onCompletion Suspend":      "kind: Task\nspec:\n  http:\n    port: 1\n  onCompletion: Suspend\n",
+		"onCompletion Keep":         "kind: Task\nspec:\n  http:\n    port: 1\n  onCompletion: Keep\n",
+		"one workspace":             "kind: Task\nspec:\n  http:\n    port: 1\n  workspace:\n    name: w\n    path: /workspace/w\n",
+		"a config":                  "kind: Task\nspec:\n  http:\n    port: 1\n  config:\n    model: gemini\n",
+	} {
+		if _, err := LoadTemplate(writeTemplate(t, body)); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
 	}
 }
 
@@ -388,6 +422,47 @@ func TestEnsureLeavesATerminatingTaskAlone(t *testing.T) {
 	}
 	if len(ax.resumes) != 0 {
 		t.Errorf("resumed a terminating task: %v", ax.resumes)
+	}
+}
+
+// A task ax reports as Unknown is one whose status it could not read from
+// Substrate. Ensure says so rather than resuming it, which needs Substrate
+// too and would fail with less to go on.
+func TestEnsureReportsSubstrateUnavailable(t *testing.T) {
+	c, ax, router := fixture(t)
+	ax.tasks["agents/sb-x-0123456789abcdef"] = &axapi.Task{
+		Metadata: &axapi.ObjectMeta{Name: "sb-x-0123456789abcdef"},
+		Status: &axapi.TaskStatus{Phase: "Unknown", Conditions: []*axapi.Condition{
+			{Type: "Ready", Status: "Unknown", Reason: "SubstrateUnavailable", Message: "connection refused"},
+		}},
+	}
+	_, err := c.Ensure(context.Background(), "sb-x-0123456789abcdef")
+	if !errors.Is(err, ErrSubstrateUnavailable) || !strings.Contains(err.Error(), "SubstrateUnavailable: connection refused") {
+		t.Errorf("err = %v, want ErrSubstrateUnavailable with ax's reason", err)
+	}
+	if len(ax.resumes) != 0 {
+		t.Errorf("resumed: %v", ax.resumes)
+	}
+	if len(router.actors) != 0 {
+		t.Errorf("polled the router: %v", router.actors)
+	}
+}
+
+// Unknown for another reason is an actor in a state ax doesn't recognise, with
+// Substrate reachable: Ensure resumes it as it would a suspended task.
+func TestEnsureResumesATaskInAnUnrecognisedState(t *testing.T) {
+	c, ax, _ := fixture(t)
+	ax.tasks["agents/sb-x-0123456789abcdef"] = &axapi.Task{
+		Metadata: &axapi.ObjectMeta{Name: "sb-x-0123456789abcdef"},
+		Status: &axapi.TaskStatus{Phase: "Unknown", Conditions: []*axapi.Condition{
+			{Type: "Ready", Status: "Unknown", Reason: "Unknown", Message: "Actor is in state ACTOR_STATE_UNSPECIFIED"},
+		}},
+	}
+	if _, err := c.Ensure(context.Background(), "sb-x-0123456789abcdef"); err != nil {
+		t.Fatal(err)
+	}
+	if len(ax.resumes) != 1 {
+		t.Errorf("resumes = %v, want one", ax.resumes)
 	}
 }
 

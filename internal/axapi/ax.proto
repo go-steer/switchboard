@@ -1,8 +1,9 @@
-// Copied from github.com/mastersingh24/ax at 685b160 (pkg/apis/v1alpha1/ax.proto),
-// the ax-server shipmind runs: a fork of github.com/google/ax adding
-// TaskSpec.egress, TaskSpec.http and TaskSpec.idle. Re-copy and regenerate
-// (go generate ./internal/axapi) when the pin moves. Only go_package differs
-// from the original.
+// Copied from github.com/mastersingh24/ax at substrate-v1-12dbe16 (12dbe16,
+// pkg/apis/v1alpha1/ax.proto): a fork of github.com/google/ax (on upstream
+// f0228f1) adding TaskSpec.egress, http, idle and on_completion, numbered
+// from 100 so upstream's own fields never collide with them. Re-copy and
+// regenerate (go generate ./internal/axapi) when the pin moves. Only
+// go_package differs from the original.
 
 // Copyright 2026 Google LLC
 //
@@ -39,7 +40,6 @@ service AX {
   rpc DeleteTask(DeleteTaskRequest) returns (DeleteTaskResponse);
   rpc SuspendTask(SuspendTaskRequest) returns (Task);
   rpc ResumeTask(ResumeTaskRequest) returns (Task);
-  rpc WatchTask(WatchTaskRequest) returns (stream WatchTaskResponse);
 
 
   // Workspaces
@@ -78,29 +78,42 @@ message TaskSpec {
   repeated string command = 2;
   repeated EnvVar env = 3;
   ResourcesSpec resources = 4;
-  // workspaces binds one or more Workspaces, each mounted at its own path
-  // under /workspace. The first entry is the task command's working directory.
-  repeated WorkspaceRef workspaces = 5;
+  // workspace binds the Workspace the task works in. It is mounted at
+  // /workspace unless the binding sets a path, and that path is the task
+  // command's working directory. A task without a workspace gets an empty
+  // working directory at /workspace.
+  WorkspaceRef workspace = 5;
   // debug enables the in-container guest services (process execution and file
   // access) that back `ax ssh`. Off by default.
   bool debug = 6;
+  // config is free-form, runner-defined configuration. AX stores it and
+  // hands it to the runner as-is, as part of the Task in AX_TASK_YAML and
+  // the task metadata endpoint. The control plane only checks that it is an
+  // object within MaxTaskConfigSize; it does not validate or interpret it.
+  // It is stored in plain text and shown by `ax get task`, so it must not
+  // hold secrets.
+  google.protobuf.Struct config = 7;
+  // Fields 100 and up are this fork's own (mastersingh24/ax, see FORK.md).
+  // Upstream numbers TaskSpec fields from 1 upward, so the fork starts at 100
+  // and an upstream addition can never take one of its numbers again.
+
   // egress lists the outbound destinations the task may reach. Agent Substrate
   // denies an actor's outbound traffic unless its egress policy allows it, so a
   // task without egress rules has no network beyond DNS.
-  repeated EgressRule egress = 7;
+  repeated EgressRule egress = 100;
   // http forwards requests that reach the task through Agent Substrate's
   // router to a server inside the task. The router only reaches the runner's
   // port, so this is how a task serves its own API (an agent's session API,
   // A2A, MCP, a webhook) to callers outside the sandbox.
-  TaskHTTP http = 8;
+  TaskHTTP http = 101;
   // idle suspends the task automatically once it has been idle for a while,
   // so a request-driven agent gives its worker back between requests. Agent
   // Substrate's router resumes a suspended task on its next request.
-  TaskIdle idle = 9;
+  TaskIdle idle = 102;
   // on_completion says what happens when spec.command exits: "Keep" (the
   // default) leaves the task running so it stays inspectable, "Suspend"
   // suspends it.
-  string on_completion = 10;
+  string on_completion = 103;
 }
 
 // TaskIdle configures automatic suspension of an idle task. A task is idle
@@ -169,8 +182,6 @@ message ResourceList {
 message WorkspaceRef {
   string name = 1;
   string path = 2;
-  // TODO(jbd): Consider removing goal.
-  string goal = 3;
 }
 
 message TaskStatus {
@@ -309,16 +320,6 @@ message SuspendTaskRequest {
 message ResumeTaskRequest {
   string atespace = 1;
   string name = 2;
-}
-
-message WatchTaskRequest {
-  string atespace = 1;
-  string name = 2;
-}
-
-message WatchTaskResponse {
-  Task task = 1;
-  string action = 2;
 }
 
 // Workspaces

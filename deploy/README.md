@@ -182,6 +182,37 @@ in), mounts it at `/var/lib/switchboard`, and sets
 file because it is where the component mounts the volume, not a choice to
 edit; a `state_dir` in `config.json` would be outranked by it.
 
+## ax agents
+
+Agents of `kind: "ax"` (the top-level `README.md`, "ax agents") reach their
+tasks through Agent Substrate's router, which from v1.0 takes mTLS only. The
+`ax-router-mtls` component gives the pod what that needs:
+
+```yaml
+components:
+  - ../../components/ax-router-mtls
+```
+
+It mounts two projected volumes where ax agents look by default:
+- **The pod's certificate:** a `podCertificate` from Substrate's
+  `podidentity.podcert.ate.dev/identity` signer, at
+  `/run/podidentity.podcert.ate.dev/credential-bundle.pem`.
+- **The router's trust bundle:** a `clusterTrustBundle` of the
+  `servicedns.podcert.ate.dev/identity` signer, at
+  `/run/servicedns-ca/trust-bundle.pem`.
+
+The router admits only identities on its allowlist. Add the pod's SPIFFE ID,
+`spiffe://cluster.local/ns/<namespace>/sa/switchboard` for these manifests'
+ServiceAccount, to ate-setup's `--ingress-allowed-spiffe-ids`
+(`ATE_INGRESS_ALLOWED_SPIFFE_IDS`) and re-run it. Until then every task start
+fails with the router's TLS refusal, and the thread says the agent could not
+be started.
+
+Egress in the base is unrestricted. If you lock it down, remember that a
+NetworkPolicy matches the pod's port after the Service translates it: admit
+the `atenet-router` pods in `ate-system` on TCP 8443 (the Service's 443, named
+port `https`), the `ax-server` pods in `ax-system` on TCP 8080, and kube-dns.
+
 ## Notes
 
 - **One replica.** A conversation maps to one core-agent session, held in

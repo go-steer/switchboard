@@ -148,13 +148,21 @@ type axRouter struct {
 	calls    []string // "actor METHOD path"
 	bearer   []string
 	notReady atomic.Int64
+	conns    atomic.Int64 // connections opened, where the server counts them
 	srv      *httptest.Server
 }
 
 func newAXRouter(t *testing.T) *axRouter {
 	t.Helper()
 	r := &axRouter{}
-	r.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+	r.srv = httptest.NewServer(r.handler())
+	t.Cleanup(r.srv.Close)
+	return r
+}
+
+// handler serves readiness and the session contract for every actor.
+func (r *axRouter) handler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		actor := req.Header.Get(ax.ActorHeader)
 		r.mu.Lock()
 		r.calls = append(r.calls, actor+" "+req.Method+" "+req.URL.Path)
@@ -182,9 +190,7 @@ func newAXRouter(t *testing.T) *axRouter {
 		default:
 			http.NotFound(w, req)
 		}
-	}))
-	t.Cleanup(r.srv.Close)
-	return r
+	})
 }
 
 func (r *axRouter) callsMatching(sub string) []string {

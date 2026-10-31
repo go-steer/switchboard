@@ -24,19 +24,22 @@ shape where it can.
 ## What ax and mast provide
 
 These are the facts the design rests on, measured at shipmind's pins
-(ax-server `685b160`, ax-runner `e8bc98d`, mast `922e549`).
+(ax-server `685b160`, ax-runner `e8bc98d`, mast `922e549`). _Since #182:_
+`internal/axapi` is the fork rebased onto upstream ax for Agent Substrate
+v1.0 (`substrate-v1-12dbe16`); what changed is in "The rebased fork" below.
 
 **ax-server** is gRPC only (h2c on `:8080`; `pkg/apis/v1alpha1/ax.proto`):
 `CreateTask`, `GetTask`, `ListTasks`, `DeleteTask`, `SuspendTask`,
-`ResumeTask`, `WatchTasks`.
+`ResumeTask` (and `WatchTask`, gone after the rebase).
 - **Immutable tasks.** Re-creating a name returns `FailedPrecondition`. There
   is no update.
 - **No labels, annotations or owner** on a task. Names are RFC 1123 labels
   of at most 63 characters. The mapping to a thread has to live in the name
   or in switchboard's state.
 - **No template or prompt field.** A task is `image`, `command`, `env`,
-  `workspaces`, `egress`, `http`, `idle`. Instructions travel as flags, env or
-  workspace files.
+  `workspace` (one, since the rebase; `workspaces` before), `config` (a
+  free-form object the runner reads), `egress`, `http`, `idle`. Instructions
+  travel as flags, env, `config` or workspace files.
 - **Nothing expires.** A task lives until it is deleted.
 - **No authentication.** No interceptors on the server, and the CLI dials
   insecure. Protection is the network.
@@ -49,10 +52,13 @@ carry it).
 - **Readiness:** `/readyz` holds at 503 until that server listens (b52d147),
   so a request that wakes a task waits instead of failing.
 
-**The atenet router** (`atenet-router.ate-system:80`):
+**The atenet router** (`atenet-router.ate-system`, `:80` before Agent
+Substrate v1.0, TLS on `:443` since):
 - **Routing:** it routes on one header, `ate-target-actor: <atespace>/<task>`.
 - **Waking:** it resumes a suspended actor before proxying.
-- **Plaintext, no auth** in shipmind's deployment.
+- **Plaintext, no auth** in shipmind's deployment. _Since Agent Substrate
+  v1.0 (#181):_ TLS only on 443, admitting a podidentity pod certificate whose
+  SPIFFE ID is allowlisted; see "Identity" below.
 - **Route timeout:** 5 minutes, which also cuts an SSE stream.
 - **Parking budget:** 5s by default for a waking request; shipmind raises it
   to 60s.
@@ -70,6 +76,38 @@ carry it).
 - **Single-user:** no owner, no ACL, and `X-Asserted-Caller` is not
   honoured with token auth.
 
+### The rebased fork (#182)
+
+The fork was rebased onto upstream ax (`f0228f1`) for Agent Substrate v1.0.
+switchboard carries the proto at `substrate-v1-12dbe16`:
+
+- **Field numbers.** The fork's own TaskSpec fields moved to 100 and up:
+  `egress` 100, `http` 101, `idle` 102, `on_completion` 103. Upstream took 7
+  for `config`, where the fork had `egress`. A client with the old copy would
+  send `http` under a number the server reads as something else, so the copy
+  and the server move together. The YAML keys didn't change.
+  `pkg/ax/wire_test.go` pins the numbers.
+- **One workspace.** `spec.workspaces` (a list) became `spec.workspace` (one
+  binding, the same field number). A template still using `workspaces:` is
+  refused at startup.
+- **Status is read live from Substrate.** Phase `Unknown` with Ready reason
+  `SubstrateUnavailable` means ax couldn't reach Substrate. `Ensure` then
+  fails with `ax.ErrSubstrateUnavailable` and ax's message rather than
+  attempting a resume, which needs Substrate too. `Unknown` with any other
+  reason is an actor in a state ax doesn't recognise, with Substrate
+  reachable, and `Ensure` resumes it as it would a suspended task. `Failed`
+  with `ActorNotFound` means the task's actor is gone; `Ensure` resumes it,
+  which re-creates the actor.
+- **Idle suspension** is recorded in an ax-owned `AutoSuspended` condition
+  (`IdleSuspended`, `CompletedSuspended`; `False` with `ResumedByRequest`
+  after a wake), not in a Ready reason. switchboard reads neither: it knows a
+  task idles from its template.
+- **Validation.** `checkSpec` mirrors the fork's `validateTaskHTTP` and
+  `validateTaskIdle`: a port in 1–65535 that is neither the runner's (80) nor
+  its metadata port (8099), `suspendAfter` of at least 10s, a `busyPath`
+  starting with `/`, and `onCompletion` of `Keep` or `Suspend`. It also
+  requires `spec.http.port`, which ax doesn't.
+
 ## The decision
 
 **An ax agent is a task template, not a daemon. Each conversation's task is
@@ -86,7 +124,7 @@ An agent declares `kind: "ax"` and an `ax` block instead of a `daemon_url`:
    "token_env": "SWITCHBOARD_AGENT_TOKEN_TRIAGE",
    "ax": {
      "server": "ax-server.ax-system.svc.cluster.local:8080",
-     "router": "http://atenet-router.ate-system.svc.cluster.local",
+     "router": "https://atenet-router.ate-system.svc.cluster.local",
      "atespace": "default",
      "task_template_file": "/etc/switchboard/ax/triage.yaml",
      "scope": "thread"
@@ -200,13 +238,45 @@ and history.
 - **`X-Asserted-Caller` is still sent,** for mast's audit and for the day it
   honours a proxy. The owner of an `owner`-scope task is in its name, and
   switchboard's audit records both.
-- **ax-server and the router are unauthenticated.** switchboard reaches both
-  in-cluster in plaintext, as lookout does; a NetworkPolicy is the
-  protection.
-  - The purser identity of `docs/agent-identity.md` cannot apply until ax and
-    Substrate accept mTLS. Substrate's `static-mtls` ingress mode currently
-    breaks ax-server's own path.
-  - When they do, an ax agent gains an `auth` block like any other.
+- **ax-server is unauthenticated.** switchboard reaches it in-cluster in
+  plaintext, as lookout does; a NetworkPolicy is the protection.
+- **The router takes mTLS only** from Agent Substrate v1.0, which removed its
+  plaintext listener. _As built (#181):_
+  - **Client:** switchboard presents its pod certificate, from a
+    `podCertificate` projection (signer `podidentity.podcert.ate.dev/identity`,
+    `credentialBundlePath`: a PKCS#8 key, then the chain). Its identity is
+    `spiffe://cluster.local/ns/<namespace>/sa/<serviceaccount>`, which has to
+    be on ate-setup's `--ingress-allowed-spiffe-ids`; the router serves nothing
+    to an identity not listed.
+  - **Server:** the router's certificate comes from the servicedns signer and
+    carries only `atenet-router.ate-system.svc`. switchboard verifies it
+    against a `clusterTrustBundle` projection of that signer
+    (`podcert.ate.dev/canarying: live`) and that name, whatever address it
+    dials. The servicedns CA certifies every Service-selected pod for its own
+    name, so the name check is what pins the router.
+  - **Rotation:** purser v0.5.0's PKI client profile does both halves.
+    `mtls.CertificateFileSource` re-reads the bundle, and
+    `mtls.CertPoolFileSource` re-reads the trust bundle, consulted per
+    handshake (`RootCAsSource`). A pod certificate lives 24h at most and a
+    restart is never needed.
+  - **Settings:** `ax.router` (default the https in-cluster address),
+    `ax.router_credential_bundle_file`, `ax.router_trust_bundle_file` and
+    `ax.router_server_name`, each defaulting to what
+    `deploy/components/ax-router-mtls` mounts. One client per set of files
+    serves every agent, so they share connections.
+  - **A certificate failure is reported at once.** A handshake the router
+    refuses (an identity not on its allowlist) or that fails verification
+    ends the readiness wait with the TLS error, instead of being retried
+    for `ready_timeout`.
+  - **Runtime agents** (the admin API) take the default files and server
+    name only: the gateway reads the files, and another server name would
+    send the pod's certificate and the agent's bearer to whichever Service
+    the servicedns CA certified under it.
+  - **An `http://` router** is still reached in plaintext, for development
+    and tests.
+  - **Not `auth`:** an agent's `auth` block (`docs/agent-identity.md`) names
+    how switchboard reaches a *daemon*. The router authenticates the pod, not
+    the gateway's configured identity, so it has settings of its own.
 
 ### Lifecycle
 

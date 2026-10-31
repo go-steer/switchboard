@@ -4,7 +4,7 @@ go 1.26.10
 
 require (
 	cloud.google.com/go/pubsub v1.51.0
-	github.com/go-steer/purser v0.1.0
+	github.com/go-steer/purser v0.5.0
 	github.com/prometheus/client_golang v1.24.1
 	github.com/slack-go/slack v0.27.0
 	github.com/spiffe/go-spiffe/v2 v2.7.0

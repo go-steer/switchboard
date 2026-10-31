@@ -1,8 +1,9 @@
-// Copied from github.com/mastersingh24/ax at 685b160 (pkg/apis/v1alpha1/ax.proto),
-// the ax-server shipmind runs: a fork of github.com/google/ax adding
-// TaskSpec.egress, TaskSpec.http and TaskSpec.idle. Re-copy and regenerate
-// (go generate ./internal/axapi) when the pin moves. Only go_package differs
-// from the original.
+// Copied from github.com/mastersingh24/ax at substrate-v1-12dbe16 (12dbe16,
+// pkg/apis/v1alpha1/ax.proto): a fork of github.com/google/ax (on upstream
+// f0228f1) adding TaskSpec.egress, http, idle and on_completion, numbered
+// from 100 so upstream's own fields never collide with them. Re-copy and
+// regenerate (go generate ./internal/axapi) when the pin moves. Only
+// go_package differs from the original.
 
 // Copyright 2026 Google LLC
 //
@@ -186,29 +187,38 @@ type TaskSpec struct {
 	Command   []string               `protobuf:"bytes,2,rep,name=command,proto3" json:"command,omitempty"`
 	Env       []*EnvVar              `protobuf:"bytes,3,rep,name=env,proto3" json:"env,omitempty"`
 	Resources *ResourcesSpec         `protobuf:"bytes,4,opt,name=resources,proto3" json:"resources,omitempty"`
-	// workspaces binds one or more Workspaces, each mounted at its own path
-	// under /workspace. The first entry is the task command's working directory.
-	Workspaces []*WorkspaceRef `protobuf:"bytes,5,rep,name=workspaces,proto3" json:"workspaces,omitempty"`
+	// workspace binds the Workspace the task works in. It is mounted at
+	// /workspace unless the binding sets a path, and that path is the task
+	// command's working directory. A task without a workspace gets an empty
+	// working directory at /workspace.
+	Workspace *WorkspaceRef `protobuf:"bytes,5,opt,name=workspace,proto3" json:"workspace,omitempty"`
 	// debug enables the in-container guest services (process execution and file
 	// access) that back `ax ssh`. Off by default.
 	Debug bool `protobuf:"varint,6,opt,name=debug,proto3" json:"debug,omitempty"`
+	// config is free-form, runner-defined configuration. AX stores it and
+	// hands it to the runner as-is, as part of the Task in AX_TASK_YAML and
+	// the task metadata endpoint. The control plane only checks that it is an
+	// object within MaxTaskConfigSize; it does not validate or interpret it.
+	// It is stored in plain text and shown by `ax get task`, so it must not
+	// hold secrets.
+	Config *structpb.Struct `protobuf:"bytes,7,opt,name=config,proto3" json:"config,omitempty"`
 	// egress lists the outbound destinations the task may reach. Agent Substrate
 	// denies an actor's outbound traffic unless its egress policy allows it, so a
 	// task without egress rules has no network beyond DNS.
-	Egress []*EgressRule `protobuf:"bytes,7,rep,name=egress,proto3" json:"egress,omitempty"`
+	Egress []*EgressRule `protobuf:"bytes,100,rep,name=egress,proto3" json:"egress,omitempty"`
 	// http forwards requests that reach the task through Agent Substrate's
 	// router to a server inside the task. The router only reaches the runner's
 	// port, so this is how a task serves its own API (an agent's session API,
 	// A2A, MCP, a webhook) to callers outside the sandbox.
-	Http *TaskHTTP `protobuf:"bytes,8,opt,name=http,proto3" json:"http,omitempty"`
+	Http *TaskHTTP `protobuf:"bytes,101,opt,name=http,proto3" json:"http,omitempty"`
 	// idle suspends the task automatically once it has been idle for a while,
 	// so a request-driven agent gives its worker back between requests. Agent
 	// Substrate's router resumes a suspended task on its next request.
-	Idle *TaskIdle `protobuf:"bytes,9,opt,name=idle,proto3" json:"idle,omitempty"`
+	Idle *TaskIdle `protobuf:"bytes,102,opt,name=idle,proto3" json:"idle,omitempty"`
 	// on_completion says what happens when spec.command exits: "Keep" (the
 	// default) leaves the task running so it stays inspectable, "Suspend"
 	// suspends it.
-	OnCompletion  string `protobuf:"bytes,10,opt,name=on_completion,json=onCompletion,proto3" json:"on_completion,omitempty"`
+	OnCompletion  string `protobuf:"bytes,103,opt,name=on_completion,json=onCompletion,proto3" json:"on_completion,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -271,9 +281,9 @@ func (x *TaskSpec) GetResources() *ResourcesSpec {
 	return nil
 }
 
-func (x *TaskSpec) GetWorkspaces() []*WorkspaceRef {
+func (x *TaskSpec) GetWorkspace() *WorkspaceRef {
 	if x != nil {
-		return x.Workspaces
+		return x.Workspace
 	}
 	return nil
 }
@@ -283,6 +293,13 @@ func (x *TaskSpec) GetDebug() bool {
 		return x.Debug
 	}
 	return false
+}
+
+func (x *TaskSpec) GetConfig() *structpb.Struct {
+	if x != nil {
+		return x.Config
+	}
+	return nil
 }
 
 func (x *TaskSpec) GetEgress() []*EgressRule {
@@ -713,11 +730,9 @@ func (x *ResourceList) GetMemory() string {
 }
 
 type WorkspaceRef struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	Name  string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
-	Path  string                 `protobuf:"bytes,2,opt,name=path,proto3" json:"path,omitempty"`
-	// TODO(jbd): Consider removing goal.
-	Goal          string `protobuf:"bytes,3,opt,name=goal,proto3" json:"goal,omitempty"`
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	Path          string                 `protobuf:"bytes,2,opt,name=path,proto3" json:"path,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -762,13 +777,6 @@ func (x *WorkspaceRef) GetName() string {
 func (x *WorkspaceRef) GetPath() string {
 	if x != nil {
 		return x.Path
-	}
-	return ""
-}
-
-func (x *WorkspaceRef) GetGoal() string {
-	if x != nil {
-		return x.Goal
 	}
 	return ""
 }
@@ -2073,110 +2081,6 @@ func (x *ResumeTaskRequest) GetName() string {
 	return ""
 }
 
-type WatchTaskRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Atespace      string                 `protobuf:"bytes,1,opt,name=atespace,proto3" json:"atespace,omitempty"`
-	Name          string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *WatchTaskRequest) Reset() {
-	*x = WatchTaskRequest{}
-	mi := &file_ax_proto_msgTypes[33]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *WatchTaskRequest) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*WatchTaskRequest) ProtoMessage() {}
-
-func (x *WatchTaskRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_ax_proto_msgTypes[33]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use WatchTaskRequest.ProtoReflect.Descriptor instead.
-func (*WatchTaskRequest) Descriptor() ([]byte, []int) {
-	return file_ax_proto_rawDescGZIP(), []int{33}
-}
-
-func (x *WatchTaskRequest) GetAtespace() string {
-	if x != nil {
-		return x.Atespace
-	}
-	return ""
-}
-
-func (x *WatchTaskRequest) GetName() string {
-	if x != nil {
-		return x.Name
-	}
-	return ""
-}
-
-type WatchTaskResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Task          *Task                  `protobuf:"bytes,1,opt,name=task,proto3" json:"task,omitempty"`
-	Action        string                 `protobuf:"bytes,2,opt,name=action,proto3" json:"action,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *WatchTaskResponse) Reset() {
-	*x = WatchTaskResponse{}
-	mi := &file_ax_proto_msgTypes[34]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *WatchTaskResponse) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*WatchTaskResponse) ProtoMessage() {}
-
-func (x *WatchTaskResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_ax_proto_msgTypes[34]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use WatchTaskResponse.ProtoReflect.Descriptor instead.
-func (*WatchTaskResponse) Descriptor() ([]byte, []int) {
-	return file_ax_proto_rawDescGZIP(), []int{34}
-}
-
-func (x *WatchTaskResponse) GetTask() *Task {
-	if x != nil {
-		return x.Task
-	}
-	return nil
-}
-
-func (x *WatchTaskResponse) GetAction() string {
-	if x != nil {
-		return x.Action
-	}
-	return ""
-}
-
 // Workspaces
 type GetWorkspaceRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -2188,7 +2092,7 @@ type GetWorkspaceRequest struct {
 
 func (x *GetWorkspaceRequest) Reset() {
 	*x = GetWorkspaceRequest{}
-	mi := &file_ax_proto_msgTypes[35]
+	mi := &file_ax_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2200,7 +2104,7 @@ func (x *GetWorkspaceRequest) String() string {
 func (*GetWorkspaceRequest) ProtoMessage() {}
 
 func (x *GetWorkspaceRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_ax_proto_msgTypes[35]
+	mi := &file_ax_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2213,7 +2117,7 @@ func (x *GetWorkspaceRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetWorkspaceRequest.ProtoReflect.Descriptor instead.
 func (*GetWorkspaceRequest) Descriptor() ([]byte, []int) {
-	return file_ax_proto_rawDescGZIP(), []int{35}
+	return file_ax_proto_rawDescGZIP(), []int{33}
 }
 
 func (x *GetWorkspaceRequest) GetAtespace() string {
@@ -2239,7 +2143,7 @@ type ListWorkspacesRequest struct {
 
 func (x *ListWorkspacesRequest) Reset() {
 	*x = ListWorkspacesRequest{}
-	mi := &file_ax_proto_msgTypes[36]
+	mi := &file_ax_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2251,7 +2155,7 @@ func (x *ListWorkspacesRequest) String() string {
 func (*ListWorkspacesRequest) ProtoMessage() {}
 
 func (x *ListWorkspacesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_ax_proto_msgTypes[36]
+	mi := &file_ax_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2264,7 +2168,7 @@ func (x *ListWorkspacesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListWorkspacesRequest.ProtoReflect.Descriptor instead.
 func (*ListWorkspacesRequest) Descriptor() ([]byte, []int) {
-	return file_ax_proto_rawDescGZIP(), []int{36}
+	return file_ax_proto_rawDescGZIP(), []int{34}
 }
 
 func (x *ListWorkspacesRequest) GetAtespace() string {
@@ -2283,7 +2187,7 @@ type ListWorkspacesResponse struct {
 
 func (x *ListWorkspacesResponse) Reset() {
 	*x = ListWorkspacesResponse{}
-	mi := &file_ax_proto_msgTypes[37]
+	mi := &file_ax_proto_msgTypes[35]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2295,7 +2199,7 @@ func (x *ListWorkspacesResponse) String() string {
 func (*ListWorkspacesResponse) ProtoMessage() {}
 
 func (x *ListWorkspacesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_ax_proto_msgTypes[37]
+	mi := &file_ax_proto_msgTypes[35]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2308,7 +2212,7 @@ func (x *ListWorkspacesResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListWorkspacesResponse.ProtoReflect.Descriptor instead.
 func (*ListWorkspacesResponse) Descriptor() ([]byte, []int) {
-	return file_ax_proto_rawDescGZIP(), []int{37}
+	return file_ax_proto_rawDescGZIP(), []int{35}
 }
 
 func (x *ListWorkspacesResponse) GetWorkspaces() []*Workspace {
@@ -2327,7 +2231,7 @@ type UpdateWorkspaceRequest struct {
 
 func (x *UpdateWorkspaceRequest) Reset() {
 	*x = UpdateWorkspaceRequest{}
-	mi := &file_ax_proto_msgTypes[38]
+	mi := &file_ax_proto_msgTypes[36]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2339,7 +2243,7 @@ func (x *UpdateWorkspaceRequest) String() string {
 func (*UpdateWorkspaceRequest) ProtoMessage() {}
 
 func (x *UpdateWorkspaceRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_ax_proto_msgTypes[38]
+	mi := &file_ax_proto_msgTypes[36]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2352,7 +2256,7 @@ func (x *UpdateWorkspaceRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdateWorkspaceRequest.ProtoReflect.Descriptor instead.
 func (*UpdateWorkspaceRequest) Descriptor() ([]byte, []int) {
-	return file_ax_proto_rawDescGZIP(), []int{38}
+	return file_ax_proto_rawDescGZIP(), []int{36}
 }
 
 func (x *UpdateWorkspaceRequest) GetWorkspace() *Workspace {
@@ -2372,7 +2276,7 @@ type DeleteWorkspaceRequest struct {
 
 func (x *DeleteWorkspaceRequest) Reset() {
 	*x = DeleteWorkspaceRequest{}
-	mi := &file_ax_proto_msgTypes[39]
+	mi := &file_ax_proto_msgTypes[37]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2384,7 +2288,7 @@ func (x *DeleteWorkspaceRequest) String() string {
 func (*DeleteWorkspaceRequest) ProtoMessage() {}
 
 func (x *DeleteWorkspaceRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_ax_proto_msgTypes[39]
+	mi := &file_ax_proto_msgTypes[37]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2397,7 +2301,7 @@ func (x *DeleteWorkspaceRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteWorkspaceRequest.ProtoReflect.Descriptor instead.
 func (*DeleteWorkspaceRequest) Descriptor() ([]byte, []int) {
-	return file_ax_proto_rawDescGZIP(), []int{39}
+	return file_ax_proto_rawDescGZIP(), []int{37}
 }
 
 func (x *DeleteWorkspaceRequest) GetAtespace() string {
@@ -2422,7 +2326,7 @@ type DeleteWorkspaceResponse struct {
 
 func (x *DeleteWorkspaceResponse) Reset() {
 	*x = DeleteWorkspaceResponse{}
-	mi := &file_ax_proto_msgTypes[40]
+	mi := &file_ax_proto_msgTypes[38]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2434,7 +2338,7 @@ func (x *DeleteWorkspaceResponse) String() string {
 func (*DeleteWorkspaceResponse) ProtoMessage() {}
 
 func (x *DeleteWorkspaceResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_ax_proto_msgTypes[40]
+	mi := &file_ax_proto_msgTypes[38]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2447,7 +2351,7 @@ func (x *DeleteWorkspaceResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteWorkspaceResponse.ProtoReflect.Descriptor instead.
 func (*DeleteWorkspaceResponse) Descriptor() ([]byte, []int) {
-	return file_ax_proto_rawDescGZIP(), []int{40}
+	return file_ax_proto_rawDescGZIP(), []int{38}
 }
 
 // Models
@@ -2461,7 +2365,7 @@ type GetModelRequest struct {
 
 func (x *GetModelRequest) Reset() {
 	*x = GetModelRequest{}
-	mi := &file_ax_proto_msgTypes[41]
+	mi := &file_ax_proto_msgTypes[39]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2473,7 +2377,7 @@ func (x *GetModelRequest) String() string {
 func (*GetModelRequest) ProtoMessage() {}
 
 func (x *GetModelRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_ax_proto_msgTypes[41]
+	mi := &file_ax_proto_msgTypes[39]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2486,7 +2390,7 @@ func (x *GetModelRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetModelRequest.ProtoReflect.Descriptor instead.
 func (*GetModelRequest) Descriptor() ([]byte, []int) {
-	return file_ax_proto_rawDescGZIP(), []int{41}
+	return file_ax_proto_rawDescGZIP(), []int{39}
 }
 
 func (x *GetModelRequest) GetAtespace() string {
@@ -2512,7 +2416,7 @@ type ListModelsRequest struct {
 
 func (x *ListModelsRequest) Reset() {
 	*x = ListModelsRequest{}
-	mi := &file_ax_proto_msgTypes[42]
+	mi := &file_ax_proto_msgTypes[40]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2524,7 +2428,7 @@ func (x *ListModelsRequest) String() string {
 func (*ListModelsRequest) ProtoMessage() {}
 
 func (x *ListModelsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_ax_proto_msgTypes[42]
+	mi := &file_ax_proto_msgTypes[40]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2537,7 +2441,7 @@ func (x *ListModelsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListModelsRequest.ProtoReflect.Descriptor instead.
 func (*ListModelsRequest) Descriptor() ([]byte, []int) {
-	return file_ax_proto_rawDescGZIP(), []int{42}
+	return file_ax_proto_rawDescGZIP(), []int{40}
 }
 
 func (x *ListModelsRequest) GetAtespace() string {
@@ -2556,7 +2460,7 @@ type ListModelsResponse struct {
 
 func (x *ListModelsResponse) Reset() {
 	*x = ListModelsResponse{}
-	mi := &file_ax_proto_msgTypes[43]
+	mi := &file_ax_proto_msgTypes[41]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2568,7 +2472,7 @@ func (x *ListModelsResponse) String() string {
 func (*ListModelsResponse) ProtoMessage() {}
 
 func (x *ListModelsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_ax_proto_msgTypes[43]
+	mi := &file_ax_proto_msgTypes[41]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2581,7 +2485,7 @@ func (x *ListModelsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListModelsResponse.ProtoReflect.Descriptor instead.
 func (*ListModelsResponse) Descriptor() ([]byte, []int) {
-	return file_ax_proto_rawDescGZIP(), []int{43}
+	return file_ax_proto_rawDescGZIP(), []int{41}
 }
 
 func (x *ListModelsResponse) GetModels() []*Model {
@@ -2600,7 +2504,7 @@ type UpdateModelRequest struct {
 
 func (x *UpdateModelRequest) Reset() {
 	*x = UpdateModelRequest{}
-	mi := &file_ax_proto_msgTypes[44]
+	mi := &file_ax_proto_msgTypes[42]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2612,7 +2516,7 @@ func (x *UpdateModelRequest) String() string {
 func (*UpdateModelRequest) ProtoMessage() {}
 
 func (x *UpdateModelRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_ax_proto_msgTypes[44]
+	mi := &file_ax_proto_msgTypes[42]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2625,7 +2529,7 @@ func (x *UpdateModelRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdateModelRequest.ProtoReflect.Descriptor instead.
 func (*UpdateModelRequest) Descriptor() ([]byte, []int) {
-	return file_ax_proto_rawDescGZIP(), []int{44}
+	return file_ax_proto_rawDescGZIP(), []int{42}
 }
 
 func (x *UpdateModelRequest) GetModel() *Model {
@@ -2645,7 +2549,7 @@ type DeleteModelRequest struct {
 
 func (x *DeleteModelRequest) Reset() {
 	*x = DeleteModelRequest{}
-	mi := &file_ax_proto_msgTypes[45]
+	mi := &file_ax_proto_msgTypes[43]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2657,7 +2561,7 @@ func (x *DeleteModelRequest) String() string {
 func (*DeleteModelRequest) ProtoMessage() {}
 
 func (x *DeleteModelRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_ax_proto_msgTypes[45]
+	mi := &file_ax_proto_msgTypes[43]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2670,7 +2574,7 @@ func (x *DeleteModelRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteModelRequest.ProtoReflect.Descriptor instead.
 func (*DeleteModelRequest) Descriptor() ([]byte, []int) {
-	return file_ax_proto_rawDescGZIP(), []int{45}
+	return file_ax_proto_rawDescGZIP(), []int{43}
 }
 
 func (x *DeleteModelRequest) GetAtespace() string {
@@ -2695,7 +2599,7 @@ type DeleteModelResponse struct {
 
 func (x *DeleteModelResponse) Reset() {
 	*x = DeleteModelResponse{}
-	mi := &file_ax_proto_msgTypes[46]
+	mi := &file_ax_proto_msgTypes[44]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2707,7 +2611,7 @@ func (x *DeleteModelResponse) String() string {
 func (*DeleteModelResponse) ProtoMessage() {}
 
 func (x *DeleteModelResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_ax_proto_msgTypes[46]
+	mi := &file_ax_proto_msgTypes[44]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2720,7 +2624,7 @@ func (x *DeleteModelResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteModelResponse.ProtoReflect.Descriptor instead.
 func (*DeleteModelResponse) Descriptor() ([]byte, []int) {
-	return file_ax_proto_rawDescGZIP(), []int{46}
+	return file_ax_proto_rawDescGZIP(), []int{44}
 }
 
 var File_ax_proto protoreflect.FileDescriptor
@@ -2740,21 +2644,19 @@ const file_ax_proto_rawDesc = "" +
 	"\x04kind\x18\x02 \x01(\tR\x04kind\x123\n" +
 	"\bmetadata\x18\x03 \x01(\v2\x17.ax.v1alpha1.ObjectMetaR\bmetadata\x12)\n" +
 	"\x04spec\x18\x04 \x01(\v2\x15.ax.v1alpha1.TaskSpecR\x04spec\x12/\n" +
-	"\x06status\x18\x05 \x01(\v2\x17.ax.v1alpha1.TaskStatusR\x06status\"\x98\x03\n" +
+	"\x06status\x18\x05 \x01(\v2\x17.ax.v1alpha1.TaskStatusR\x06status\"\xc7\x03\n" +
 	"\bTaskSpec\x12\x14\n" +
 	"\x05image\x18\x01 \x01(\tR\x05image\x12\x18\n" +
 	"\acommand\x18\x02 \x03(\tR\acommand\x12%\n" +
 	"\x03env\x18\x03 \x03(\v2\x13.ax.v1alpha1.EnvVarR\x03env\x128\n" +
-	"\tresources\x18\x04 \x01(\v2\x1a.ax.v1alpha1.ResourcesSpecR\tresources\x129\n" +
-	"\n" +
-	"workspaces\x18\x05 \x03(\v2\x19.ax.v1alpha1.WorkspaceRefR\n" +
-	"workspaces\x12\x14\n" +
+	"\tresources\x18\x04 \x01(\v2\x1a.ax.v1alpha1.ResourcesSpecR\tresources\x127\n" +
+	"\tworkspace\x18\x05 \x01(\v2\x19.ax.v1alpha1.WorkspaceRefR\tworkspace\x12\x14\n" +
 	"\x05debug\x18\x06 \x01(\bR\x05debug\x12/\n" +
-	"\x06egress\x18\a \x03(\v2\x17.ax.v1alpha1.EgressRuleR\x06egress\x12)\n" +
-	"\x04http\x18\b \x01(\v2\x15.ax.v1alpha1.TaskHTTPR\x04http\x12)\n" +
-	"\x04idle\x18\t \x01(\v2\x15.ax.v1alpha1.TaskIdleR\x04idle\x12#\n" +
-	"\ron_completion\x18\n" +
-	" \x01(\tR\fonCompletion\"L\n" +
+	"\x06config\x18\a \x01(\v2\x17.google.protobuf.StructR\x06config\x12/\n" +
+	"\x06egress\x18d \x03(\v2\x17.ax.v1alpha1.EgressRuleR\x06egress\x12)\n" +
+	"\x04http\x18e \x01(\v2\x15.ax.v1alpha1.TaskHTTPR\x04http\x12)\n" +
+	"\x04idle\x18f \x01(\v2\x15.ax.v1alpha1.TaskIdleR\x04idle\x12#\n" +
+	"\ron_completion\x18g \x01(\tR\fonCompletion\"L\n" +
 	"\bTaskIdle\x12#\n" +
 	"\rsuspend_after\x18\x01 \x01(\tR\fsuspendAfter\x12\x1b\n" +
 	"\tbusy_path\x18\x02 \x01(\tR\bbusyPath\"\x1e\n" +
@@ -2777,11 +2679,10 @@ const file_ax_proto_rawDesc = "" +
 	"\x06limits\x18\x02 \x01(\v2\x19.ax.v1alpha1.ResourceListR\x06limits\"8\n" +
 	"\fResourceList\x12\x10\n" +
 	"\x03cpu\x18\x01 \x01(\tR\x03cpu\x12\x16\n" +
-	"\x06memory\x18\x02 \x01(\tR\x06memory\"J\n" +
+	"\x06memory\x18\x02 \x01(\tR\x06memory\"6\n" +
 	"\fWorkspaceRef\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x12\n" +
-	"\x04path\x18\x02 \x01(\tR\x04path\x12\x12\n" +
-	"\x04goal\x18\x03 \x01(\tR\x04goal\"\x9d\x01\n" +
+	"\x04path\x18\x02 \x01(\tR\x04path\"\x9d\x01\n" +
 	"\n" +
 	"TaskStatus\x12\x14\n" +
 	"\x05phase\x18\x01 \x01(\tR\x05phase\x12\x0e\n" +
@@ -2879,13 +2780,7 @@ const file_ax_proto_rawDesc = "" +
 	"\x04name\x18\x02 \x01(\tR\x04name\"C\n" +
 	"\x11ResumeTaskRequest\x12\x1a\n" +
 	"\batespace\x18\x01 \x01(\tR\batespace\x12\x12\n" +
-	"\x04name\x18\x02 \x01(\tR\x04name\"B\n" +
-	"\x10WatchTaskRequest\x12\x1a\n" +
-	"\batespace\x18\x01 \x01(\tR\batespace\x12\x12\n" +
-	"\x04name\x18\x02 \x01(\tR\x04name\"R\n" +
-	"\x11WatchTaskResponse\x12%\n" +
-	"\x04task\x18\x01 \x01(\v2\x11.ax.v1alpha1.TaskR\x04task\x12\x16\n" +
-	"\x06action\x18\x02 \x01(\tR\x06action\"E\n" +
+	"\x04name\x18\x02 \x01(\tR\x04name\"E\n" +
 	"\x13GetWorkspaceRequest\x12\x1a\n" +
 	"\batespace\x18\x01 \x01(\tR\batespace\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\"3\n" +
@@ -2913,7 +2808,7 @@ const file_ax_proto_rawDesc = "" +
 	"\x12DeleteModelRequest\x12\x1a\n" +
 	"\batespace\x18\x01 \x01(\tR\batespace\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\"\x15\n" +
-	"\x13DeleteModelResponse2\xe3\b\n" +
+	"\x13DeleteModelResponse2\x95\b\n" +
 	"\x02AX\x129\n" +
 	"\aGetTask\x12\x1b.ax.v1alpha1.GetTaskRequest\x1a\x11.ax.v1alpha1.Task\x12J\n" +
 	"\tListTasks\x12\x1d.ax.v1alpha1.ListTasksRequest\x1a\x1e.ax.v1alpha1.ListTasksResponse\x12?\n" +
@@ -2923,8 +2818,7 @@ const file_ax_proto_rawDesc = "" +
 	"DeleteTask\x12\x1e.ax.v1alpha1.DeleteTaskRequest\x1a\x1f.ax.v1alpha1.DeleteTaskResponse\x12A\n" +
 	"\vSuspendTask\x12\x1f.ax.v1alpha1.SuspendTaskRequest\x1a\x11.ax.v1alpha1.Task\x12?\n" +
 	"\n" +
-	"ResumeTask\x12\x1e.ax.v1alpha1.ResumeTaskRequest\x1a\x11.ax.v1alpha1.Task\x12L\n" +
-	"\tWatchTask\x12\x1d.ax.v1alpha1.WatchTaskRequest\x1a\x1e.ax.v1alpha1.WatchTaskResponse0\x01\x12H\n" +
+	"ResumeTask\x12\x1e.ax.v1alpha1.ResumeTaskRequest\x1a\x11.ax.v1alpha1.Task\x12H\n" +
 	"\fGetWorkspace\x12 .ax.v1alpha1.GetWorkspaceRequest\x1a\x16.ax.v1alpha1.Workspace\x12Y\n" +
 	"\x0eListWorkspaces\x12\".ax.v1alpha1.ListWorkspacesRequest\x1a#.ax.v1alpha1.ListWorkspacesResponse\x12N\n" +
 	"\x0fUpdateWorkspace\x12#.ax.v1alpha1.UpdateWorkspaceRequest\x1a\x16.ax.v1alpha1.Workspace\x12\\\n" +
@@ -2947,7 +2841,7 @@ func file_ax_proto_rawDescGZIP() []byte {
 	return file_ax_proto_rawDescData
 }
 
-var file_ax_proto_msgTypes = make([]protoimpl.MessageInfo, 47)
+var file_ax_proto_msgTypes = make([]protoimpl.MessageInfo, 45)
 var file_ax_proto_goTypes = []any{
 	(*ObjectMeta)(nil),              // 0: ax.v1alpha1.ObjectMeta
 	(*Task)(nil),                    // 1: ax.v1alpha1.Task
@@ -2982,56 +2876,54 @@ var file_ax_proto_goTypes = []any{
 	(*DeleteTaskResponse)(nil),      // 30: ax.v1alpha1.DeleteTaskResponse
 	(*SuspendTaskRequest)(nil),      // 31: ax.v1alpha1.SuspendTaskRequest
 	(*ResumeTaskRequest)(nil),       // 32: ax.v1alpha1.ResumeTaskRequest
-	(*WatchTaskRequest)(nil),        // 33: ax.v1alpha1.WatchTaskRequest
-	(*WatchTaskResponse)(nil),       // 34: ax.v1alpha1.WatchTaskResponse
-	(*GetWorkspaceRequest)(nil),     // 35: ax.v1alpha1.GetWorkspaceRequest
-	(*ListWorkspacesRequest)(nil),   // 36: ax.v1alpha1.ListWorkspacesRequest
-	(*ListWorkspacesResponse)(nil),  // 37: ax.v1alpha1.ListWorkspacesResponse
-	(*UpdateWorkspaceRequest)(nil),  // 38: ax.v1alpha1.UpdateWorkspaceRequest
-	(*DeleteWorkspaceRequest)(nil),  // 39: ax.v1alpha1.DeleteWorkspaceRequest
-	(*DeleteWorkspaceResponse)(nil), // 40: ax.v1alpha1.DeleteWorkspaceResponse
-	(*GetModelRequest)(nil),         // 41: ax.v1alpha1.GetModelRequest
-	(*ListModelsRequest)(nil),       // 42: ax.v1alpha1.ListModelsRequest
-	(*ListModelsResponse)(nil),      // 43: ax.v1alpha1.ListModelsResponse
-	(*UpdateModelRequest)(nil),      // 44: ax.v1alpha1.UpdateModelRequest
-	(*DeleteModelRequest)(nil),      // 45: ax.v1alpha1.DeleteModelRequest
-	(*DeleteModelResponse)(nil),     // 46: ax.v1alpha1.DeleteModelResponse
-	(*timestamppb.Timestamp)(nil),   // 47: google.protobuf.Timestamp
-	(*structpb.Struct)(nil),         // 48: google.protobuf.Struct
+	(*GetWorkspaceRequest)(nil),     // 33: ax.v1alpha1.GetWorkspaceRequest
+	(*ListWorkspacesRequest)(nil),   // 34: ax.v1alpha1.ListWorkspacesRequest
+	(*ListWorkspacesResponse)(nil),  // 35: ax.v1alpha1.ListWorkspacesResponse
+	(*UpdateWorkspaceRequest)(nil),  // 36: ax.v1alpha1.UpdateWorkspaceRequest
+	(*DeleteWorkspaceRequest)(nil),  // 37: ax.v1alpha1.DeleteWorkspaceRequest
+	(*DeleteWorkspaceResponse)(nil), // 38: ax.v1alpha1.DeleteWorkspaceResponse
+	(*GetModelRequest)(nil),         // 39: ax.v1alpha1.GetModelRequest
+	(*ListModelsRequest)(nil),       // 40: ax.v1alpha1.ListModelsRequest
+	(*ListModelsResponse)(nil),      // 41: ax.v1alpha1.ListModelsResponse
+	(*UpdateModelRequest)(nil),      // 42: ax.v1alpha1.UpdateModelRequest
+	(*DeleteModelRequest)(nil),      // 43: ax.v1alpha1.DeleteModelRequest
+	(*DeleteModelResponse)(nil),     // 44: ax.v1alpha1.DeleteModelResponse
+	(*timestamppb.Timestamp)(nil),   // 45: google.protobuf.Timestamp
+	(*structpb.Struct)(nil),         // 46: google.protobuf.Struct
 }
 var file_ax_proto_depIdxs = []int32{
-	47, // 0: ax.v1alpha1.ObjectMeta.create_time:type_name -> google.protobuf.Timestamp
+	45, // 0: ax.v1alpha1.ObjectMeta.create_time:type_name -> google.protobuf.Timestamp
 	0,  // 1: ax.v1alpha1.Task.metadata:type_name -> ax.v1alpha1.ObjectMeta
 	2,  // 2: ax.v1alpha1.Task.spec:type_name -> ax.v1alpha1.TaskSpec
 	11, // 3: ax.v1alpha1.Task.status:type_name -> ax.v1alpha1.TaskStatus
 	7,  // 4: ax.v1alpha1.TaskSpec.env:type_name -> ax.v1alpha1.EnvVar
 	8,  // 5: ax.v1alpha1.TaskSpec.resources:type_name -> ax.v1alpha1.ResourcesSpec
-	10, // 6: ax.v1alpha1.TaskSpec.workspaces:type_name -> ax.v1alpha1.WorkspaceRef
-	5,  // 7: ax.v1alpha1.TaskSpec.egress:type_name -> ax.v1alpha1.EgressRule
-	4,  // 8: ax.v1alpha1.TaskSpec.http:type_name -> ax.v1alpha1.TaskHTTP
-	3,  // 9: ax.v1alpha1.TaskSpec.idle:type_name -> ax.v1alpha1.TaskIdle
-	6,  // 10: ax.v1alpha1.EgressRule.credentials:type_name -> ax.v1alpha1.CredentialInjection
-	9,  // 11: ax.v1alpha1.ResourcesSpec.requests:type_name -> ax.v1alpha1.ResourceList
-	9,  // 12: ax.v1alpha1.ResourcesSpec.limits:type_name -> ax.v1alpha1.ResourceList
-	12, // 13: ax.v1alpha1.TaskStatus.conditions:type_name -> ax.v1alpha1.Condition
-	47, // 14: ax.v1alpha1.Condition.update_time:type_name -> google.protobuf.Timestamp
-	0,  // 15: ax.v1alpha1.Workspace.metadata:type_name -> ax.v1alpha1.ObjectMeta
-	14, // 16: ax.v1alpha1.Workspace.spec:type_name -> ax.v1alpha1.WorkspaceSpec
-	15, // 17: ax.v1alpha1.WorkspaceSpec.git:type_name -> ax.v1alpha1.GitRepo
-	16, // 18: ax.v1alpha1.WorkspaceSpec.files:type_name -> ax.v1alpha1.File
-	17, // 19: ax.v1alpha1.WorkspaceSpec.mcp:type_name -> ax.v1alpha1.MCPConfig
-	20, // 20: ax.v1alpha1.WorkspaceSpec.skills:type_name -> ax.v1alpha1.SkillsConfig
-	18, // 21: ax.v1alpha1.MCPConfig.registries:type_name -> ax.v1alpha1.MCPRegistry
-	19, // 22: ax.v1alpha1.MCPConfig.servers:type_name -> ax.v1alpha1.MCPServer
-	19, // 23: ax.v1alpha1.MCPRegistry.servers:type_name -> ax.v1alpha1.MCPServer
-	21, // 24: ax.v1alpha1.SkillsConfig.registries:type_name -> ax.v1alpha1.SkillRegistry
-	0,  // 25: ax.v1alpha1.Model.metadata:type_name -> ax.v1alpha1.ObjectMeta
-	23, // 26: ax.v1alpha1.Model.spec:type_name -> ax.v1alpha1.ModelSpec
-	24, // 27: ax.v1alpha1.ModelSpec.secret_key:type_name -> ax.v1alpha1.SecretKeyRef
-	48, // 28: ax.v1alpha1.ModelSpec.parameters:type_name -> google.protobuf.Struct
-	1,  // 29: ax.v1alpha1.ListTasksResponse.tasks:type_name -> ax.v1alpha1.Task
-	1,  // 30: ax.v1alpha1.CreateTaskRequest.task:type_name -> ax.v1alpha1.Task
-	1,  // 31: ax.v1alpha1.WatchTaskResponse.task:type_name -> ax.v1alpha1.Task
+	10, // 6: ax.v1alpha1.TaskSpec.workspace:type_name -> ax.v1alpha1.WorkspaceRef
+	46, // 7: ax.v1alpha1.TaskSpec.config:type_name -> google.protobuf.Struct
+	5,  // 8: ax.v1alpha1.TaskSpec.egress:type_name -> ax.v1alpha1.EgressRule
+	4,  // 9: ax.v1alpha1.TaskSpec.http:type_name -> ax.v1alpha1.TaskHTTP
+	3,  // 10: ax.v1alpha1.TaskSpec.idle:type_name -> ax.v1alpha1.TaskIdle
+	6,  // 11: ax.v1alpha1.EgressRule.credentials:type_name -> ax.v1alpha1.CredentialInjection
+	9,  // 12: ax.v1alpha1.ResourcesSpec.requests:type_name -> ax.v1alpha1.ResourceList
+	9,  // 13: ax.v1alpha1.ResourcesSpec.limits:type_name -> ax.v1alpha1.ResourceList
+	12, // 14: ax.v1alpha1.TaskStatus.conditions:type_name -> ax.v1alpha1.Condition
+	45, // 15: ax.v1alpha1.Condition.update_time:type_name -> google.protobuf.Timestamp
+	0,  // 16: ax.v1alpha1.Workspace.metadata:type_name -> ax.v1alpha1.ObjectMeta
+	14, // 17: ax.v1alpha1.Workspace.spec:type_name -> ax.v1alpha1.WorkspaceSpec
+	15, // 18: ax.v1alpha1.WorkspaceSpec.git:type_name -> ax.v1alpha1.GitRepo
+	16, // 19: ax.v1alpha1.WorkspaceSpec.files:type_name -> ax.v1alpha1.File
+	17, // 20: ax.v1alpha1.WorkspaceSpec.mcp:type_name -> ax.v1alpha1.MCPConfig
+	20, // 21: ax.v1alpha1.WorkspaceSpec.skills:type_name -> ax.v1alpha1.SkillsConfig
+	18, // 22: ax.v1alpha1.MCPConfig.registries:type_name -> ax.v1alpha1.MCPRegistry
+	19, // 23: ax.v1alpha1.MCPConfig.servers:type_name -> ax.v1alpha1.MCPServer
+	19, // 24: ax.v1alpha1.MCPRegistry.servers:type_name -> ax.v1alpha1.MCPServer
+	21, // 25: ax.v1alpha1.SkillsConfig.registries:type_name -> ax.v1alpha1.SkillRegistry
+	0,  // 26: ax.v1alpha1.Model.metadata:type_name -> ax.v1alpha1.ObjectMeta
+	23, // 27: ax.v1alpha1.Model.spec:type_name -> ax.v1alpha1.ModelSpec
+	24, // 28: ax.v1alpha1.ModelSpec.secret_key:type_name -> ax.v1alpha1.SecretKeyRef
+	46, // 29: ax.v1alpha1.ModelSpec.parameters:type_name -> google.protobuf.Struct
+	1,  // 30: ax.v1alpha1.ListTasksResponse.tasks:type_name -> ax.v1alpha1.Task
+	1,  // 31: ax.v1alpha1.CreateTaskRequest.task:type_name -> ax.v1alpha1.Task
 	13, // 32: ax.v1alpha1.ListWorkspacesResponse.workspaces:type_name -> ax.v1alpha1.Workspace
 	13, // 33: ax.v1alpha1.UpdateWorkspaceRequest.workspace:type_name -> ax.v1alpha1.Workspace
 	22, // 34: ax.v1alpha1.ListModelsResponse.models:type_name -> ax.v1alpha1.Model
@@ -3042,32 +2934,30 @@ var file_ax_proto_depIdxs = []int32{
 	29, // 39: ax.v1alpha1.AX.DeleteTask:input_type -> ax.v1alpha1.DeleteTaskRequest
 	31, // 40: ax.v1alpha1.AX.SuspendTask:input_type -> ax.v1alpha1.SuspendTaskRequest
 	32, // 41: ax.v1alpha1.AX.ResumeTask:input_type -> ax.v1alpha1.ResumeTaskRequest
-	33, // 42: ax.v1alpha1.AX.WatchTask:input_type -> ax.v1alpha1.WatchTaskRequest
-	35, // 43: ax.v1alpha1.AX.GetWorkspace:input_type -> ax.v1alpha1.GetWorkspaceRequest
-	36, // 44: ax.v1alpha1.AX.ListWorkspaces:input_type -> ax.v1alpha1.ListWorkspacesRequest
-	38, // 45: ax.v1alpha1.AX.UpdateWorkspace:input_type -> ax.v1alpha1.UpdateWorkspaceRequest
-	39, // 46: ax.v1alpha1.AX.DeleteWorkspace:input_type -> ax.v1alpha1.DeleteWorkspaceRequest
-	41, // 47: ax.v1alpha1.AX.GetModel:input_type -> ax.v1alpha1.GetModelRequest
-	42, // 48: ax.v1alpha1.AX.ListModels:input_type -> ax.v1alpha1.ListModelsRequest
-	44, // 49: ax.v1alpha1.AX.UpdateModel:input_type -> ax.v1alpha1.UpdateModelRequest
-	45, // 50: ax.v1alpha1.AX.DeleteModel:input_type -> ax.v1alpha1.DeleteModelRequest
-	1,  // 51: ax.v1alpha1.AX.GetTask:output_type -> ax.v1alpha1.Task
-	27, // 52: ax.v1alpha1.AX.ListTasks:output_type -> ax.v1alpha1.ListTasksResponse
-	1,  // 53: ax.v1alpha1.AX.CreateTask:output_type -> ax.v1alpha1.Task
-	30, // 54: ax.v1alpha1.AX.DeleteTask:output_type -> ax.v1alpha1.DeleteTaskResponse
-	1,  // 55: ax.v1alpha1.AX.SuspendTask:output_type -> ax.v1alpha1.Task
-	1,  // 56: ax.v1alpha1.AX.ResumeTask:output_type -> ax.v1alpha1.Task
-	34, // 57: ax.v1alpha1.AX.WatchTask:output_type -> ax.v1alpha1.WatchTaskResponse
-	13, // 58: ax.v1alpha1.AX.GetWorkspace:output_type -> ax.v1alpha1.Workspace
-	37, // 59: ax.v1alpha1.AX.ListWorkspaces:output_type -> ax.v1alpha1.ListWorkspacesResponse
-	13, // 60: ax.v1alpha1.AX.UpdateWorkspace:output_type -> ax.v1alpha1.Workspace
-	40, // 61: ax.v1alpha1.AX.DeleteWorkspace:output_type -> ax.v1alpha1.DeleteWorkspaceResponse
-	22, // 62: ax.v1alpha1.AX.GetModel:output_type -> ax.v1alpha1.Model
-	43, // 63: ax.v1alpha1.AX.ListModels:output_type -> ax.v1alpha1.ListModelsResponse
-	22, // 64: ax.v1alpha1.AX.UpdateModel:output_type -> ax.v1alpha1.Model
-	46, // 65: ax.v1alpha1.AX.DeleteModel:output_type -> ax.v1alpha1.DeleteModelResponse
-	51, // [51:66] is the sub-list for method output_type
-	36, // [36:51] is the sub-list for method input_type
+	33, // 42: ax.v1alpha1.AX.GetWorkspace:input_type -> ax.v1alpha1.GetWorkspaceRequest
+	34, // 43: ax.v1alpha1.AX.ListWorkspaces:input_type -> ax.v1alpha1.ListWorkspacesRequest
+	36, // 44: ax.v1alpha1.AX.UpdateWorkspace:input_type -> ax.v1alpha1.UpdateWorkspaceRequest
+	37, // 45: ax.v1alpha1.AX.DeleteWorkspace:input_type -> ax.v1alpha1.DeleteWorkspaceRequest
+	39, // 46: ax.v1alpha1.AX.GetModel:input_type -> ax.v1alpha1.GetModelRequest
+	40, // 47: ax.v1alpha1.AX.ListModels:input_type -> ax.v1alpha1.ListModelsRequest
+	42, // 48: ax.v1alpha1.AX.UpdateModel:input_type -> ax.v1alpha1.UpdateModelRequest
+	43, // 49: ax.v1alpha1.AX.DeleteModel:input_type -> ax.v1alpha1.DeleteModelRequest
+	1,  // 50: ax.v1alpha1.AX.GetTask:output_type -> ax.v1alpha1.Task
+	27, // 51: ax.v1alpha1.AX.ListTasks:output_type -> ax.v1alpha1.ListTasksResponse
+	1,  // 52: ax.v1alpha1.AX.CreateTask:output_type -> ax.v1alpha1.Task
+	30, // 53: ax.v1alpha1.AX.DeleteTask:output_type -> ax.v1alpha1.DeleteTaskResponse
+	1,  // 54: ax.v1alpha1.AX.SuspendTask:output_type -> ax.v1alpha1.Task
+	1,  // 55: ax.v1alpha1.AX.ResumeTask:output_type -> ax.v1alpha1.Task
+	13, // 56: ax.v1alpha1.AX.GetWorkspace:output_type -> ax.v1alpha1.Workspace
+	35, // 57: ax.v1alpha1.AX.ListWorkspaces:output_type -> ax.v1alpha1.ListWorkspacesResponse
+	13, // 58: ax.v1alpha1.AX.UpdateWorkspace:output_type -> ax.v1alpha1.Workspace
+	38, // 59: ax.v1alpha1.AX.DeleteWorkspace:output_type -> ax.v1alpha1.DeleteWorkspaceResponse
+	22, // 60: ax.v1alpha1.AX.GetModel:output_type -> ax.v1alpha1.Model
+	41, // 61: ax.v1alpha1.AX.ListModels:output_type -> ax.v1alpha1.ListModelsResponse
+	22, // 62: ax.v1alpha1.AX.UpdateModel:output_type -> ax.v1alpha1.Model
+	44, // 63: ax.v1alpha1.AX.DeleteModel:output_type -> ax.v1alpha1.DeleteModelResponse
+	50, // [50:64] is the sub-list for method output_type
+	36, // [36:50] is the sub-list for method input_type
 	36, // [36:36] is the sub-list for extension type_name
 	36, // [36:36] is the sub-list for extension extendee
 	0,  // [0:36] is the sub-list for field type_name
@@ -3084,7 +2974,7 @@ func file_ax_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_ax_proto_rawDesc), len(file_ax_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   47,
+			NumMessages:   45,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

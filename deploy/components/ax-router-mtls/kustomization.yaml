@@ -1,0 +1,38 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# ax agents behind Agent Substrate v1.0's router (#181). The router serves
+# TLS only and admits a client certificate from Substrate's podidentity
+# signer, so the pod mounts two projected volumes: its own pod certificate,
+# and the servicedns trust bundle the router's certificate chains to. They
+# are mounted where kind "ax" agents look by default
+# (ax.router_credential_bundle_file, ax.router_trust_bundle_file), so an
+# agent entry needs no paths. Add it to an overlay that runs ax agents:
+#
+#   components:
+#     - ../../components/ax-router-mtls
+#
+# The router also has to admit the pod's identity: add
+# spiffe://cluster.local/ns/<namespace>/sa/switchboard to ate-setup's
+# --ingress-allowed-spiffe-ids (ATE_INGRESS_ALLOWED_SPIFFE_IDS). Until it is
+# listed the router refuses every request, and the thread says the agent
+# could not be started. See deploy/README.md, "ax agents".
+#
+# Needs the PodCertificate and ClusterTrustBundle APIs and Substrate's
+# podcert controller, all of which Substrate's own install already relies on.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+patches:
+  - path: patch-deployment.yaml

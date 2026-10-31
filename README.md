@@ -479,7 +479,6 @@ template, and each conversation gets a task of its own.
 {"name": "triage", "display_name": "SRE triage", "kind": "ax",
  "token_env": "SWITCHBOARD_AGENT_TOKEN_TRIAGE",
  "ax": {"server": "ax-server.ax-system.svc.cluster.local:8080",
-        "router": "http://atenet-router.ate-system.svc.cluster.local",
         "atespace": "default",
         "task_template_file": "/etc/switchboard/ax/triage.yaml"}}
 ```
@@ -494,6 +493,15 @@ template, and each conversation gets a task of its own.
   task, or reuses it if it exists. It resumes the task and waits for it to
   answer (`ax.ready_timeout`, default `2m`). A start that takes more than a
   couple of seconds shows "⏳ Starting …" in the thread.
+  - When ax reports the task's phase `Unknown` because it couldn't reach
+    Agent Substrate (Ready reason `SubstrateUnavailable`), the thread is told
+    the agent couldn't be started because Substrate is unavailable, and no
+    resume is tried.
+- **ax version:** switchboard speaks the ax fork rebased for Agent Substrate
+  v1.0 (`mastersingh24/ax` `substrate-v1-12dbe16`), whose own Task fields
+  were renumbered. Run it against that ax-server or a later one; an older
+  server misreads `http` and `idle`. Templates bind one `workspace:`, not a
+  `workspaces:` list.
 - **Every request** then goes through the atenet router to that task. The
   task's name is deterministic and recorded with the conversation, so a
   restart goes back to the same task. That happens on the conversation's next
@@ -502,8 +510,38 @@ template, and each conversation gets a task of its own.
   gateways in one cluster never share a task. Keep it stable. A conversation
   already recorded keeps its task, but one that starts over after a change
   gets a task under the new name, and the old one stays until deleted.
-- **ax-server and the router take no credentials,** so switchboard reaches
-  both in plaintext, inside the cluster. Protect them with a NetworkPolicy.
+- **The router takes mTLS only** (Agent Substrate v1.0, #181).
+  `ax.router` defaults to
+  `https://atenet-router.ate-system.svc.cluster.local`. switchboard presents
+  its pod certificate and verifies the router's against the servicedns trust
+  bundle, re-reading both files as they rotate.
+  - **The files** come from two projected volumes, a `podCertificate`
+    (signer `podidentity.podcert.ate.dev/identity`) and a `clusterTrustBundle`
+    (signer `servicedns.podcert.ate.dev/identity`). The
+    `deploy/components/ax-router-mtls` component mounts them where switchboard
+    looks by default:
+    - `ax.router_credential_bundle_file`, default
+      `/run/podidentity.podcert.ate.dev/credential-bundle.pem`;
+    - `ax.router_trust_bundle_file`, default
+      `/run/servicedns-ca/trust-bundle.pem`.
+  - **`ax.router_server_name`** (default `atenet-router.ate-system.svc`) is
+    the name verified on the router's certificate. That certificate carries
+    only its Service's `.svc` name, and the same CA certifies every
+    Service-selected pod for its own name, so the name is what identifies the
+    router.
+  - **Allowlist the gateway.** The router admits only the SPIFFE IDs on
+    ate-setup's `--ingress-allowed-spiffe-ids` (`ATE_INGRESS_ALLOWED_SPIFFE_IDS`).
+    switchboard's is `spiffe://cluster.local/ns/<namespace>/sa/<serviceaccount>`
+    of its pod, `spiffe://cluster.local/ns/switchboard/sa/switchboard` with the
+    deploy manifests in a `switchboard` namespace. Until it's listed, every
+    task start fails with the router's TLS refusal, reported at once rather
+    than after `ax.ready_timeout`.
+  - **A missing or malformed file stops startup.** A runtime agent added
+    through the admin API uses the default paths and server name only.
+  - **An `http://` router** is reached in plaintext, as before, for a
+    development router or a test. The `router_*` settings are refused with it.
+- **ax-server takes no credentials,** so switchboard reaches it in plaintext,
+  inside the cluster. Protect it with a NetworkPolicy.
 - **Idle tasks suspend.** An open stream counts as traffic to ax, so a
   conversation lets go of its streams to the task `ax.stream_linger`
   (default `1m`, at least `10s`) after its last traffic. It does so only once
