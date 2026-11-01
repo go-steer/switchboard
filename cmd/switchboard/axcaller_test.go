@@ -355,7 +355,7 @@ func (l *logLines) matching(sub string) []string {
 }
 
 // A kind "mast" daemon agent asserts no caller by default (v0.9.2): mast's
-// attach surface refuses the header under token auth, so the old default
+// attach surface refuses the header, so the old default
 // failed every request. An explicit true still sends it, and is warned
 // about; core-agent and kindless agents assert as before.
 func TestAMastDaemonAssertsNoCallerByDefault(t *testing.T) {
@@ -412,7 +412,7 @@ func TestAssertCallerTrueOnMastIsWarned(t *testing.T) {
 	if got := l.matching("agent infra: assert_caller is true on kind mast"); len(got) != 1 || !strings.HasPrefix(got[0], logging.LevelWarn.String()) {
 		t.Errorf("warnings for infra = %v", got)
 	}
-	for _, n := range []string{"quiet", "platform"} {
+	for _, n := range []string{"quiet", "quiet2", "platform"} {
 		if got := l.matching("agent " + n + ":"); len(got) != 0 {
 			t.Errorf("%s was warned about: %v", n, got)
 		}
@@ -441,5 +441,56 @@ func TestAssertCallerTrueOnMastIsWarned(t *testing.T) {
 	again.restore(admin.snapshotState())
 	if got := sl.matching("agent rt: assert_caller is true on kind mast"); len(got) != 1 {
 		t.Errorf("restore warnings = %v", sl.lines)
+	}
+	// A PUT that changes nothing about it says nothing again.
+	if err := admin.putAgent(AgentConfig{Name: "rt", Kind: "mast", DaemonURL: d.srv.URL, TokenEnv: "TOK_RT", AssertCaller: &yes}); err != nil {
+		t.Fatal(err)
+	}
+	if got := rl.matching("agent rt:"); len(got) != 1 {
+		t.Errorf("a repeated PUT was noted again: %v", got)
+	}
+}
+
+// What is noted is the agent in use: not a duplicate the registry ignores,
+// not an entry that failed to build, and not an entry put again while it
+// still cannot be built (caught in review).
+func TestAssertCallerNotesFollowWhatWasBuilt(t *testing.T) {
+	yes := true
+	d := newPermsDaemon(t)
+	t.Setenv("TOK_RT", "tok")
+	base, err := buildAgents([]AgentConfig{{Name: "a", DaemonURL: d.srv.URL, TokenEnv: "TOK_RT"}}, "a", agentBuilder{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := NewRouter(nil, &fakeSender{replies: make(chan chat.Reply, 4)}, ProgressOff, nil, nil)
+	r.setAgents(base)
+	mk := func() (*registryAdmin, *logLines) {
+		var l logLines
+		return newRegistryAdmin(r, registryConfig{Base: base, TokenPrefix: "TOK_", Logf: l.logf()}), &l
+	}
+	for name, st := range map[string]registryState{
+		"an ignored duplicate": {Version: registryVersion, Agents: []AgentConfig{
+			{Name: "rt", Kind: "mast", DaemonURL: d.srv.URL, TokenEnv: "TOK_RT"},
+			{Name: "rt", Kind: "mast", DaemonURL: d.srv.URL, TokenEnv: "TOK_RT", AssertCaller: &yes},
+		}},
+		"an entry that failed to build": {Version: registryVersion, Agents: []AgentConfig{
+			{Name: "rt", Kind: "mast", DaemonURL: d.srv.URL, TokenEnv: "TOK_MISSING", AssertCaller: &yes},
+			{Name: "rt", Kind: "mast", DaemonURL: d.srv.URL, TokenEnv: "TOK_RT"},
+		}},
+	} {
+		admin, l := mk()
+		admin.restore(st)
+		if got := l.matching("assert_caller is true on kind mast"); len(got) != 0 {
+			t.Errorf("%s: noted %v", name, got)
+		}
+		if a, ok := r.agents().lookup("rt"); !ok || !a.omitCaller {
+			t.Errorf("%s: the agent in use asserts a caller", name)
+		}
+	}
+	admin, l := mk()
+	admin.restore(registryState{Version: registryVersion, Agents: []AgentConfig{{Name: "rt", Kind: "mast", DaemonURL: d.srv.URL, TokenEnv: "TOK_MISSING"}}})
+	_ = admin.putAgent(AgentConfig{Name: "rt", Kind: "mast", DaemonURL: d.srv.URL, TokenEnv: "TOK_MISSING", AssertCaller: &yes})
+	if got := l.matching("assert_caller is true on kind mast"); len(got) != 0 {
+		t.Errorf("an entry that still cannot be built was noted: %v", got)
 	}
 }

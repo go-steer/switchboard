@@ -785,7 +785,7 @@ func (r *Router) HandlePress(ctx context.Context, p chat.Press) error {
 		rec.Outcome = auditStale
 		return r.surfaceNotice(ctx, p.Conversation, noticeStalePress)
 	}
-	// An agent told no caller (assert_caller false: ax agents by default,
+	// An agent told no caller (assert_caller false: ax and mast agents by default,
 	// #186) cannot tell who pressed, so it neither refuses a presser nor
 	// records one. The gates above are then the whole of who may answer.
 	// From the client that answers, so an admin change to the agent between

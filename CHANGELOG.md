@@ -8,7 +8,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 - **`kind: "mast"` daemon agents now default `assert_caller` to false**
-  (#186). mast's attach surface refuses `X-Asserted-Caller` under token auth,
+  (#186). mast's attach surface refuses `X-Asserted-Caller` (it has no
+  proxy-capable authenticator),
   so the old default, true, failed every request to a mast daemon with
   "caller is not permitted to proxy". Defaults are now: `ax` false, `mast`
   false, every other kind true. An explicit value still wins.
@@ -17,7 +18,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     `"assert_caller": true` explicitly only if your mast build accepts proxy
     assertions; none does today.
   - An explicit `true` on a mast agent is warned about at startup, and now
-    also when the admin API adds or restores such an agent. The warning about
+    also when the admin API adds one and when a stored runtime agent is
+    restored at startup. The warning about
     a mast agent asserting by default is gone, since it no longer can.
 
 ## [v0.9.1] — 2026-11-01

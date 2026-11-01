@@ -495,7 +495,7 @@ template, and each conversation gets a task of its own.
   `true` when the task runs core-agent with the gateway's token in its
   `proxy_identities`; the header then goes out on every request, approvals
   included. `kind: "mast"` daemon agents default to `false` too (mast refuses
-  the header under token auth, and startup warns about an explicit `true`);
+  the header, and startup and the admin API warn about an explicit `true`);
   other daemon agents default to `true`, and `false` works there too. Who
   may answer a prompt is still decided by `--approvers` and, for a personal
   agent, its owner, and the audit log names the chat user either way.
