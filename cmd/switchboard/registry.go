@@ -277,6 +277,11 @@ func (a *registryAdmin) restore(st registryState) {
 	}
 	a.problems = problems
 	a.r.reg.Store(reg)
+	for _, ac := range st.Agents {
+		if _, ok := reg.agents.byName[ac.Name]; ok && !a.isPinned(ac.Name) {
+			noteAssertCaller(a.logf, ac)
+		}
+	}
 	if n := len(st.Agents); n > 0 {
 		a.logf.Infof("registry: %d runtime agent(s) restored from %s", n, a.where())
 	}
@@ -554,7 +559,13 @@ func (a *registryAdmin) putAgent(ac AgentConfig) error {
 	} else {
 		st.Agents = append(st.Agents, ac)
 	}
-	return a.apply(st)
+	if err := a.apply(st); err != nil {
+		return err
+	}
+	// Said for a runtime agent as for one in the config file (caught in
+	// review: only the config file's were).
+	noteAssertCaller(a.logf, ac)
+	return nil
 }
 
 // removeAgent removes a runtime agent. Refused while the default or a channel

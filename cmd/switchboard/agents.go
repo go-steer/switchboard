@@ -24,6 +24,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/go-steer/switchboard/internal/logging"
 	"github.com/go-steer/switchboard/pkg/approval"
 	"github.com/go-steer/switchboard/pkg/chat"
 	"github.com/go-steer/switchboard/pkg/daemon"
@@ -105,7 +106,10 @@ type agentBuilder struct {
 
 // agentKinds are the daemon flavours an agent may declare. Informational today
 // — both speak the same contract — and the place a difference would attach.
-var agentKinds = []string{"core-agent", "mast", agentKindAX}
+var agentKinds = []string{"core-agent", agentKindMast, agentKindAX}
+
+// agentKindMast is a mast daemon: no asserted caller by default.
+const agentKindMast = "mast"
 
 // agent is one routable daemon and the clients switchboard holds for it.
 type agent struct {
@@ -128,12 +132,32 @@ type agent struct {
 }
 
 // assertsCaller resolves an entry's assert_caller: its value when given,
-// otherwise false for kind "ax" and true for every other kind.
+// otherwise false for kinds "ax" and "mast" and true for every other kind.
+// mast's attach surface takes one bearer token and refuses X-Asserted-Caller
+// under it, in a task or as a daemon, so asserting to mast can never work
+// (#186; mast's default since v0.9.2).
 func assertsCaller(ac AgentConfig) bool {
 	if ac.AssertCaller != nil {
 		return *ac.AssertCaller
 	}
-	return ac.Kind != agentKindAX
+	return ac.Kind != agentKindAX && ac.Kind != agentKindMast
+}
+
+// noteAssertCaller says at startup, and when the admin API adds an agent,
+// what an entry's assert_caller means where it is likely a mistake.
+func noteAssertCaller(logf logging.Logf, ac AgentConfig) {
+	if logf == nil {
+		return
+	}
+	asserts := assertsCaller(ac)
+	switch {
+	case ac.Kind == agentKindMast && asserts:
+		logf.Warnf("agent %s: assert_caller is true on kind mast, and mast's attach surface refuses X-Asserted-Caller under token auth, so every request to it will fail unless its build accepts proxy assertions (none does today)", ac.Name)
+	case ac.Kind == agentKindAX && asserts:
+		logf.Infof("agent %s: assert_caller is true, so its tasks are told the chat user: right for core-agent with proxy_identities, while mast in a task refuses every request", ac.Name)
+	case ac.Kind != agentKindAX && ac.Kind != agentKindMast && !asserts:
+		logf.Warnf("agent %s: assert_caller is false, so its daemon is not told who is speaking: a daemon that resolves credentials or owners per caller acts as this gateway's own identity for everyone", ac.Name)
+	}
 }
 
 // label is how the agent is named to a person.

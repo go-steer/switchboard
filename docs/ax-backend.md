@@ -246,8 +246,9 @@ and history.
   it, and in `thread` and `owner` scope the task boundary is the isolation;
   in `shared` scope everyone shares one task, which startup warns about.
   - **`assert_caller`** on the agent entry (a bool next to `token_env`)
-    decides it per agent: false by default for `kind: "ax"`, true for every
-    other kind. Which to use depends on what the task runs:
+    decides it per agent: false by default for `kind: "ax"` and (since
+    v0.9.2) `kind: "mast"`, true for every other kind; an explicit value
+    wins. Which to use depends on what the task runs:
     - **mast in the task** (one `MAST_ATTACH_TOKEN`): leave it unset or
       `false`. mast refuses the header.
     - **core-agent in the task**, whose bearer table lists the gateway's token

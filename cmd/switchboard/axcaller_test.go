@@ -16,13 +16,16 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/go-steer/switchboard/internal/logging"
 	"github.com/go-steer/switchboard/pkg/chat"
 )
 
@@ -94,7 +97,9 @@ func TestAssertCallerDefaults(t *testing.T) {
 		{AgentConfig{Kind: agentKindAX}, false},
 		{AgentConfig{Kind: agentKindAX, AssertCaller: &yes}, true},
 		{AgentConfig{}, true},
-		{AgentConfig{Kind: "mast"}, true},
+		{AgentConfig{Kind: "mast"}, false}, // v0.9.2: mast refuses the header
+		{AgentConfig{Kind: "mast", AssertCaller: &yes}, true},
+		{AgentConfig{Kind: "core-agent"}, true},
 		{AgentConfig{Kind: "core-agent", AssertCaller: &no}, false},
 	} {
 		if got := assertsCaller(tc.ac); got != tc.want {
@@ -320,5 +325,121 @@ func TestAssertCallerThroughTheAdminAPI(t *testing.T) {
 	}
 	if got, resp := f.do(t, admin, "PUT", "/v1/agents/c", `{"daemon_url":"`+f.c.url+`","token_env":"TOK_REG","assert_caller":"no"}`); got != http.StatusBadRequest {
 		t.Errorf("a non-boolean assert_caller: %d %s", got, resp)
+	}
+}
+
+// logLines is a logging.Logf that keeps what it was told, by level.
+type logLines struct {
+	mu    sync.Mutex
+	lines []string
+}
+
+func (l *logLines) logf() logging.Logf {
+	return func(lv logging.Level, f string, v ...any) {
+		l.mu.Lock()
+		defer l.mu.Unlock()
+		l.lines = append(l.lines, lv.String()+" "+fmt.Sprintf(f, v...))
+	}
+}
+
+func (l *logLines) matching(sub string) []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var out []string
+	for _, s := range l.lines {
+		if strings.Contains(s, sub) {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// A kind "mast" daemon agent asserts no caller by default (v0.9.2): mast's
+// attach surface refuses the header under token auth, so the old default
+// failed every request. An explicit true still sends it, and is warned
+// about; core-agent and kindless agents assert as before.
+func TestAMastDaemonAssertsNoCallerByDefault(t *testing.T) {
+	d := newPermsDaemon(t)
+	d.rejectAsserted.Store(true) // mast with one bearer token
+	t.Setenv("TOK_M", "tok")
+	yes := true
+	create := func(ac AgentConfig) error {
+		t.Helper()
+		a, err := buildAgent(ac, agentBuilder{approvals: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		sess, err := a.daemon.CreateSession(context.Background(), "u@x.com")
+		if err != nil {
+			return err
+		}
+		if err := a.daemon.Inject(context.Background(), sess, "u@x.com", "hi"); err != nil {
+			return err
+		}
+		_, err = a.approvals.Respond(context.Background(), sess, "u@x.com", "pr1", "allow-once")
+		return err
+	}
+	if err := create(AgentConfig{Name: "infra", Kind: "mast", DaemonURL: d.srv.URL, TokenEnv: "TOK_M"}); err != nil {
+		t.Errorf("a mast agent by default: %v", err)
+	}
+	if got := d.assertedSeen(); len(got) != 0 {
+		t.Errorf("a mast agent asserted by default: %v", got)
+	}
+	for _, ac := range []AgentConfig{
+		{Name: "infra", Kind: "mast", DaemonURL: d.srv.URL, TokenEnv: "TOK_M", AssertCaller: &yes},
+		{Name: "platform", Kind: "core-agent", DaemonURL: d.srv.URL, TokenEnv: "TOK_M"},
+		{Name: "plain", DaemonURL: d.srv.URL, TokenEnv: "TOK_M"},
+	} {
+		before := len(d.assertedSeen())
+		if err := create(ac); err == nil || !strings.Contains(err.Error(), "not permitted to proxy") {
+			t.Errorf("%s (kind %q): err = %v, want the header sent and refused", ac.Name, ac.Kind, err)
+		}
+		if got := d.assertedSeen(); len(got) == before || !strings.HasSuffix(got[len(got)-1], " u@x.com") {
+			t.Errorf("%s: asserted %v", ac.Name, got)
+		}
+	}
+}
+
+// assert_caller true on a mast agent is warned about, in the config file and
+// through the admin API alike; the default is not.
+func TestAssertCallerTrueOnMastIsWarned(t *testing.T) {
+	yes, no := true, false
+	var l logLines
+	noteAssertCaller(l.logf(), AgentConfig{Name: "infra", Kind: "mast", AssertCaller: &yes})
+	noteAssertCaller(l.logf(), AgentConfig{Name: "quiet", Kind: "mast"})
+	noteAssertCaller(l.logf(), AgentConfig{Name: "quiet2", Kind: "mast", AssertCaller: &no})
+	noteAssertCaller(l.logf(), AgentConfig{Name: "platform", Kind: "core-agent"})
+	if got := l.matching("agent infra: assert_caller is true on kind mast"); len(got) != 1 || !strings.HasPrefix(got[0], logging.LevelWarn.String()) {
+		t.Errorf("warnings for infra = %v", got)
+	}
+	for _, n := range []string{"quiet", "platform"} {
+		if got := l.matching("agent " + n + ":"); len(got) != 0 {
+			t.Errorf("%s was warned about: %v", n, got)
+		}
+	}
+
+	// Through the admin API.
+	d := newPermsDaemon(t)
+	t.Setenv("TOK_RT", "tok")
+	base, err := buildAgents([]AgentConfig{{Name: "a", DaemonURL: d.srv.URL, TokenEnv: "TOK_RT"}}, "a", agentBuilder{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := NewRouter(nil, &fakeSender{replies: make(chan chat.Reply, 4)}, ProgressOff, nil, nil)
+	r.setAgents(base)
+	var rl logLines
+	admin := newRegistryAdmin(r, registryConfig{Base: base, TokenPrefix: "TOK_", Logf: rl.logf()})
+	if err := admin.putAgent(AgentConfig{Name: "rt", Kind: "mast", DaemonURL: d.srv.URL, TokenEnv: "TOK_RT", AssertCaller: &yes}); err != nil {
+		t.Fatal(err)
+	}
+	if got := rl.matching("agent rt: assert_caller is true on kind mast"); len(got) != 1 {
+		t.Errorf("runtime warnings = %v", rl.lines)
+	}
+	// And when the store brings it back at startup.
+	var sl logLines
+	again := newRegistryAdmin(r, registryConfig{Base: base, TokenPrefix: "TOK_", Logf: sl.logf()})
+	again.restore(admin.snapshotState())
+	if got := sl.matching("agent rt: assert_caller is true on kind mast"); len(got) != 1 {
+		t.Errorf("restore warnings = %v", sl.lines)
 	}
 }
