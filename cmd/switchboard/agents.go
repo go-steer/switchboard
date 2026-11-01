@@ -62,16 +62,21 @@ const maxIconURL = 1024
 // named, never given: TokenEnv is the variable holding it (see checkNoSecrets),
 // or Auth says switchboard's own certificate authenticates it.
 type AgentConfig struct {
-	Name        string            `json:"name"`
-	DisplayName string            `json:"display_name,omitempty"`
-	Description string            `json:"description,omitempty"`
-	IconURL     string            `json:"icon_url,omitempty"`
-	DaemonURL   string            `json:"daemon_url"`
-	TokenEnv    string            `json:"token_env,omitempty"`
-	Auth        *AgentAuth        `json:"auth,omitempty"`
-	Kind        string            `json:"kind,omitempty"`
-	AX          *AXConfig         `json:"ax,omitempty"` // kind "ax" (#170)
-	Labels      map[string]string `json:"labels,omitempty"`
+	Name        string     `json:"name"`
+	DisplayName string     `json:"display_name,omitempty"`
+	Description string     `json:"description,omitempty"`
+	IconURL     string     `json:"icon_url,omitempty"`
+	DaemonURL   string     `json:"daemon_url"`
+	TokenEnv    string     `json:"token_env,omitempty"`
+	Auth        *AgentAuth `json:"auth,omitempty"`
+	Kind        string     `json:"kind,omitempty"`
+	AX          *AXConfig  `json:"ax,omitempty"` // kind "ax" (#170)
+	// AssertCaller says whether switchboard names the chat user to the
+	// agent in X-Asserted-Caller. Nil is true, except for kind "ax", where
+	// it is false: mast in a task holds one bearer token and refuses the
+	// header rather than ignoring it (#186).
+	AssertCaller *bool             `json:"assert_caller,omitempty"`
+	Labels       map[string]string `json:"labels,omitempty"`
 }
 
 // AgentAuth is how switchboard authenticates to an agent (#158,
@@ -115,6 +120,20 @@ type agent struct {
 	// ax is set for an agent of kind "ax", which has no daemon of its own:
 	// each conversation's task has its clients (axagent.go).
 	ax *axAgent
+	// omitCaller: the agent's clients send no X-Asserted-Caller
+	// (AgentConfig.AssertCaller false), so the daemon cannot tell who pressed
+	// an answer; who may press is switchboard's decision alone. The zero
+	// value asserts, as an agent always did.
+	omitCaller bool
+}
+
+// assertsCaller resolves an entry's assert_caller: its value when given,
+// otherwise false for kind "ax" and true for every other kind.
+func assertsCaller(ac AgentConfig) bool {
+	if ac.AssertCaller != nil {
+		return *ac.AssertCaller
+	}
+	return ac.Kind != agentKindAX
 }
 
 // label is how the agent is named to a person.
@@ -392,7 +411,8 @@ func buildAgent(ac AgentConfig, b agentBuilder) (*agent, error) {
 		if err != nil {
 			return nil, err
 		}
-		return &agent{name: ac.Name, display: ac.DisplayName, desc: strings.TrimSpace(ac.Description), icon: strings.TrimSpace(ac.IconURL), ax: x}, nil
+		return &agent{name: ac.Name, display: ac.DisplayName, desc: strings.TrimSpace(ac.Description), icon: strings.TrimSpace(ac.IconURL), ax: x,
+			omitCaller: x.omitCaller}, nil
 	}
 	if ac.AX != nil {
 		return nil, fmt.Errorf(`.ax is for kind "ax"`)
@@ -409,11 +429,13 @@ func buildAgent(ac AgentConfig, b agentBuilder) (*agent, error) {
 	if err != nil {
 		return nil, err
 	}
+	cfg.OmitAssertedCaller = !assertsCaller(ac)
 	dc, err := daemon.New(cfg)
 	if err != nil {
 		return nil, fmt.Errorf(": %w", err)
 	}
-	a := &agent{name: ac.Name, display: ac.DisplayName, desc: strings.TrimSpace(ac.Description), icon: strings.TrimSpace(ac.IconURL), daemon: dc}
+	a := &agent{name: ac.Name, display: ac.DisplayName, desc: strings.TrimSpace(ac.Description), icon: strings.TrimSpace(ac.IconURL), daemon: dc,
+		omitCaller: cfg.OmitAssertedCaller}
 	if b.approvals {
 		if a.approvals, err = approval.New(cfg); err != nil {
 			return nil, fmt.Errorf(": %w", err)

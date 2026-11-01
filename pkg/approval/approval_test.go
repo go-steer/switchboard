@@ -721,3 +721,30 @@ func TestRespondTakesTheCallersDeadline(t *testing.T) {
 		t.Fatalf("Respond under a turn-length deadline: %v, want it to wait for the turn", err)
 	}
 }
+
+// OmitAssertedCaller keeps the header off the prompt stream and the answer
+// too (#186).
+func TestOmitAssertedCallerSendsNoHeader(t *testing.T) {
+	var callers []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callers = append(callers, r.Header.Get("X-Asserted-Caller"))
+		if strings.HasSuffix(r.URL.Path, "/respond") {
+			fmt.Fprint(w, `{"acknowledged":true,"approver":"mast"}`)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	c, err := New(daemon.Config{BaseURL: srv.URL, BearerToken: "tok", HTTPClient: srv.Client(), OmitAssertedCaller: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = c.Stream(context.Background(), testSession, "alice@example.com", func(Prompt) error { return nil })
+	if _, err := c.Respond(context.Background(), testSession, "alice@example.com", "p1", AllowOnce); err != nil {
+		t.Fatal(err)
+	}
+	if len(callers) != 2 || callers[0] != "" || callers[1] != "" {
+		t.Errorf("asserted callers = %q, want none on either request", callers)
+	}
+}

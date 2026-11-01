@@ -132,6 +132,8 @@ type axAgent struct {
 
 	deleteAfter    time.Duration // thread tasks quiet this long are deleted; 0 keeps
 	replaceDrifted bool          // replace a thread task made from an older template
+
+	omitCaller bool // send no X-Asserted-Caller (assert_caller, false by default here)
 }
 
 // ownsTask reports whether name is one of this agent's tasks, in any scope:
@@ -158,7 +160,7 @@ type taskClients struct {
 // their own (the transport is shared), and a cache would grow with every
 // conversation ever seen (caught in review).
 func (x *axAgent) forTask(task string) (*taskClients, error) {
-	cfg := daemon.Config{BaseURL: x.client.Router(), BearerToken: x.token, HTTPClient: x.client.HTTPClient(task)}
+	cfg := daemon.Config{BaseURL: x.client.Router(), BearerToken: x.token, HTTPClient: x.client.HTTPClient(task), OmitAssertedCaller: x.omitCaller}
 	dc, err := daemon.New(cfg)
 	if err != nil {
 		return nil, err
@@ -361,7 +363,7 @@ func buildAXAgent(ac AgentConfig, b agentBuilder) (*axAgent, error) {
 	// starts when the stream closes), so it is a startup warning, not an
 	// error (caught in review: the check refused valid templates).
 	return &axAgent{client: cl.client, token: token, scope: scope, approvals: b.approvals, idle: cl.idle, idleAfter: cl.idleAfter, linger: linger,
-		deleteAfter: deleteAfter, replaceDrifted: replace}, nil
+		deleteAfter: deleteAfter, replaceDrifted: replace, omitCaller: !assertsCaller(ac)}, nil
 }
 
 // axCache is the builder's client cache, created on first use.

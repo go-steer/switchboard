@@ -38,7 +38,8 @@ The registry is the set of agents switchboard can route to. Each entry has:
 | `icon_url` | optional https image: the agent's avatar on Slack, its card header icon on Chat |
 | `daemon_url` | the agent's attach endpoint |
 | `token` | a **reference** to the daemon credential: an env var name, or a Kubernetes Secret name and key. Never the value. |
-| `kind` | `core-agent` or `mast`. Informational today; it marks where contract differences would hang. |
+| `kind` | `core-agent`, `mast` or `ax` (`docs/ax-backend.md`). It sets `assert_caller`'s default (false for `ax`), and `ax` changes how the agent is reached; otherwise it marks where contract differences would hang. |
+| `assert_caller` | optional bool, next to `token_env`: whether the chat user is sent to the agent in `X-Asserted-Caller` (#186). Omitted, it is `false` for `kind: "ax"` and `true` for every other kind. Set it `false` for a daemon that refuses the header (mast, whose attach surface takes one bearer token: a `kind: "mast"` daemon agent needs it set, and startup warns), `true` for one that honours it (core-agent, whose bearer table lists the gateway in `proxy_identities`). The admin API takes it on a runtime agent and shows it in the agent view when set. |
 | `labels` | free-form, for filtering and allow lists |
 
 **Two sources:**

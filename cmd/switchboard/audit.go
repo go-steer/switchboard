@@ -109,7 +109,10 @@ type auditRecord struct {
 	PromptID string `json:"prompt_id,omitempty"`
 	Decision string `json:"decision,omitempty"`
 	// Approver is who the daemon says it recorded, which can differ from
-	// Caller and is the one to believe.
+	// Caller and is the one to believe — except for an agent told no caller
+	// (assert_caller false, an ax agent by default), where it is the
+	// agent's own token identity, or empty, and Caller is the person this
+	// gateway let answer.
 	Approver string `json:"approver,omitempty"`
 
 	// Admin only. Caller is the identity purser authenticated.

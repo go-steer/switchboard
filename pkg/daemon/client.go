@@ -67,6 +67,15 @@ type Config struct {
 	// certificate.
 	MutualTLS bool
 
+	// OmitAssertedCaller sends no X-Asserted-Caller on any request,
+	// whatever caller the call names. For a daemon that refuses the header
+	// rather than ignoring it: mast's attach surface does, unless its
+	// authenticator is a token table that allows proxying, so a mast in an
+	// ax task, holding one bearer token, rejects every asserted request
+	// (#186). The caller is still switchboard's to record; the daemon then
+	// attributes the request to the bearer or certificate alone.
+	OmitAssertedCaller bool
+
 	// HTTPClient is the client every request goes through: a test's,
 	// pointed at an httptest.Server, or one whose transport presents
 	// switchboard's certificate. Nil uses a plain client.
@@ -1512,7 +1521,7 @@ func (c *Client) newRequest(ctx context.Context, method, path, assertedCaller st
 	if c.cfg.BearerToken != "" { // empty only under MutualTLS
 		req.Header.Set("Authorization", "Bearer "+c.cfg.BearerToken)
 	}
-	if assertedCaller != "" {
+	if assertedCaller != "" && !c.cfg.OmitAssertedCaller {
 		req.Header.Set("X-Asserted-Caller", assertedCaller)
 	}
 	return req, nil

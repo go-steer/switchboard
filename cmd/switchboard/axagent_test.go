@@ -149,6 +149,7 @@ type axRouter struct {
 	bearer   []string
 	notReady atomic.Int64
 	conns    atomic.Int64 // connections opened, where the server counts them
+	asserted []string     // requests that carried X-Asserted-Caller, refused
 	srv      *httptest.Server
 }
 
@@ -164,6 +165,15 @@ func newAXRouter(t *testing.T) *axRouter {
 func (r *axRouter) handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		actor := req.Header.Get(ax.ActorHeader)
+		if c := req.Header.Get("X-Asserted-Caller"); c != "" {
+			// mast in a task holds one bearer token and refuses an asserted
+			// caller rather than ignoring it (#186).
+			r.mu.Lock()
+			r.asserted = append(r.asserted, actor+" "+req.Method+" "+req.URL.Path+" "+c)
+			r.mu.Unlock()
+			http.Error(w, mastProxyRefusal, http.StatusForbidden)
+			return
+		}
 		r.mu.Lock()
 		r.calls = append(r.calls, actor+" "+req.Method+" "+req.URL.Path)
 		if req.URL.Path != "/readyz" {
