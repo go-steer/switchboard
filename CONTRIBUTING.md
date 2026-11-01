@@ -65,8 +65,8 @@ before pushing the tag. An existing release — draft included — is left untou
 by the workflow. Republishing an older tag is the `workflow_dispatch` entrypoint
 with the tag input.
 
-Image tags carry no `v` (`ghcr.io/go-steer/switchboard:0.9.1`); the Go module
-version keeps it (`…/cmd/switchboard@v0.9.1`).
+Image tags carry no `v` (`ghcr.io/go-steer/switchboard:0.9.2`); the Go module
+version keeps it (`…/cmd/switchboard@v0.9.2`).
 
 ## License
 
