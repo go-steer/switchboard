@@ -73,13 +73,14 @@ Substrate v1.0, TLS on `:443` since):
   `spec.http.port: 8484` serves the contract switchboard speaks.
 - **Bearer:** `MAST_ATTACH_TOKEN`, carried in the task's env.
 - **Sessions:** many per process, in a session DB that survives suspend.
-- **Single-user:** no owner and no ACL. With token auth, mast *refuses* a
-  request carrying `X-Asserted-Caller`: its attach surface
+- **Single-user:** no owner and no ACL. mast *refuses* a request carrying
+  `X-Asserted-Caller`: its attach surface
   (`internal/attach/caller_middleware.go`, `resolveProxyAssertion`) returns
   `ErrAssertedCallerForbidden`, "caller is not permitted to proxy", unless
-  its authenticator is a token table that allows proxying, and one
-  `MAST_ATTACH_TOKEN` is not (#186; this doc said "not honoured" until
-  v0.9.1, and v0.9.0 could not open a session).
+  its authenticator allows proxying. The attach surface's never does: it is
+  built with one bearer (`MAST_ATTACH_TOKEN`) and no proxy-capable
+  authenticator (#186; this doc said "not honoured" until v0.9.1, and
+  v0.9.0 could not open a session).
 
 ### The rebased fork (#182)
 
@@ -246,8 +247,9 @@ and history.
   it, and in `thread` and `owner` scope the task boundary is the isolation;
   in `shared` scope everyone shares one task, which startup warns about.
   - **`assert_caller`** on the agent entry (a bool next to `token_env`)
-    decides it per agent: false by default for `kind: "ax"`, true for every
-    other kind. Which to use depends on what the task runs:
+    decides it per agent: false by default for `kind: "ax"` and (since
+    v0.9.2) `kind: "mast"`, true for every other kind; an explicit value
+    wins. Which to use depends on what the task runs:
     - **mast in the task** (one `MAST_ATTACH_TOKEN`): leave it unset or
       `false`. mast refuses the header.
     - **core-agent in the task**, whose bearer table lists the gateway's token

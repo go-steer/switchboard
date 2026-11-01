@@ -277,6 +277,15 @@ func (a *registryAdmin) restore(st registryState) {
 	}
 	a.problems = problems
 	a.r.reg.Store(reg)
+	// From what was built, not what was stored: a duplicate or an entry that
+	// failed to build is not the agent in use (caught in review).
+	if !reg.agents.implicit {
+		for _, n := range reg.agents.order {
+			if !a.isPinned(n) {
+				noteAssertCaller(a.logf, reg.agents.byName[n].entry)
+			}
+		}
+	}
 	if n := len(st.Agents); n > 0 {
 		a.logf.Infof("registry: %d runtime agent(s) restored from %s", n, a.where())
 	}
@@ -549,12 +558,32 @@ func (a *registryAdmin) putAgent(ac AgentConfig) error {
 		return fmt.Errorf("agent %q is %w", ac.Name, errPinned)
 	}
 	st := a.snapshotState()
+	var before *AgentConfig
 	if i := slices.IndexFunc(st.Agents, func(x AgentConfig) bool { return x.Name == ac.Name }); i >= 0 {
+		prev := st.Agents[i]
+		before = &prev
 		st.Agents[i] = ac
 	} else {
 		st.Agents = append(st.Agents, ac)
 	}
-	return a.apply(st)
+	if err := a.apply(st); err != nil {
+		return err
+	}
+	// Said for a runtime agent as for one in the config file, once it is in
+	// use, and not again for a PUT that changes nothing about it (caught in
+	// review: a problem entry put again was noted, and a reconciler's
+	// re-PUTs repeated it).
+	if built, ok := a.r.agents().byName[ac.Name]; ok && !sameAssertCaller(before, ac) {
+		noteAssertCaller(a.logf, built.entry)
+	}
+	return nil
+}
+
+// sameAssertCaller reports whether a previous entry (nil: none) said the
+// same thing about asserting the caller as ac.
+func sameAssertCaller(before *AgentConfig, ac AgentConfig) bool {
+	return before != nil && before.Kind == ac.Kind && assertsCaller(*before) == assertsCaller(ac) &&
+		(before.AssertCaller == nil) == (ac.AssertCaller == nil)
 }
 
 // removeAgent removes a runtime agent. Refused while the default or a channel

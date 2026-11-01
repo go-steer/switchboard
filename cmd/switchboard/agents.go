@@ -24,6 +24,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/go-steer/switchboard/internal/logging"
 	"github.com/go-steer/switchboard/pkg/approval"
 	"github.com/go-steer/switchboard/pkg/chat"
 	"github.com/go-steer/switchboard/pkg/daemon"
@@ -72,9 +73,10 @@ type AgentConfig struct {
 	Kind        string     `json:"kind,omitempty"`
 	AX          *AXConfig  `json:"ax,omitempty"` // kind "ax" (#170)
 	// AssertCaller says whether switchboard names the chat user to the
-	// agent in X-Asserted-Caller. Nil is true, except for kind "ax", where
-	// it is false: mast in a task holds one bearer token and refuses the
-	// header rather than ignoring it (#186).
+	// agent in X-Asserted-Caller. Nil is true, except for kinds "ax" and
+	// "mast", where it is false: mast's attach surface has no
+	// proxy-capable authenticator and refuses the header rather than
+	// ignoring it, in a task or as a daemon (#186).
 	AssertCaller *bool             `json:"assert_caller,omitempty"`
 	Labels       map[string]string `json:"labels,omitempty"`
 }
@@ -103,9 +105,13 @@ type agentBuilder struct {
 	ax        *axClients       // caches ax-server clients across rebuilds
 }
 
-// agentKinds are the daemon flavours an agent may declare. Informational today
-// — both speak the same contract — and the place a difference would attach.
-var agentKinds = []string{"core-agent", "mast", agentKindAX}
+// agentKinds are the daemon flavours an agent may declare. They speak the same
+// contract; kind sets assert_caller's default (assertsCaller), and "ax" is
+// reached through a task rather than a daemon URL.
+var agentKinds = []string{"core-agent", agentKindMast, agentKindAX}
+
+// agentKindMast is a mast daemon: no asserted caller by default.
+const agentKindMast = "mast"
 
 // agent is one routable daemon and the clients switchboard holds for it.
 type agent struct {
@@ -120,6 +126,8 @@ type agent struct {
 	// ax is set for an agent of kind "ax", which has no daemon of its own:
 	// each conversation's task has its clients (axagent.go).
 	ax *axAgent
+	// entry is what the agent was built from, for what is said about it.
+	entry AgentConfig
 	// omitCaller: the agent's clients send no X-Asserted-Caller
 	// (AgentConfig.AssertCaller false), so the daemon cannot tell who pressed
 	// an answer; who may press is switchboard's decision alone. The zero
@@ -128,12 +136,33 @@ type agent struct {
 }
 
 // assertsCaller resolves an entry's assert_caller: its value when given,
-// otherwise false for kind "ax" and true for every other kind.
+// otherwise false for kinds "ax" and "mast" and true for every other kind.
+// mast's attach surface has no proxy-capable authenticator and refuses
+// X-Asserted-Caller, in a task or as a daemon, so asserting to mast can
+// never work (#186; mast's default since v0.9.2).
 func assertsCaller(ac AgentConfig) bool {
 	if ac.AssertCaller != nil {
 		return *ac.AssertCaller
 	}
-	return ac.Kind != agentKindAX
+	return ac.Kind != agentKindAX && ac.Kind != agentKindMast
+}
+
+// noteAssertCaller says what an entry's assert_caller means where it is
+// likely a mistake: at startup for the config file's agents and the runtime
+// agents restored from the store, and when the admin API adds or changes one.
+func noteAssertCaller(logf logging.Logf, ac AgentConfig) {
+	if logf == nil {
+		return
+	}
+	asserts := assertsCaller(ac)
+	switch {
+	case ac.Kind == agentKindMast && asserts:
+		logf.Warnf("agent %s: assert_caller is true on kind mast, and mast's attach surface refuses X-Asserted-Caller (it has no proxy-capable authenticator), so every request to it will fail unless its build accepts proxy assertions (none does today)", ac.Name)
+	case ac.Kind == agentKindAX && asserts:
+		logf.Infof("agent %s: assert_caller is true, so its tasks are told the chat user: right for core-agent with proxy_identities, while mast in a task refuses every request", ac.Name)
+	case ac.Kind != agentKindAX && ac.Kind != agentKindMast && !asserts:
+		logf.Warnf("agent %s: assert_caller is false, so its daemon is not told who is speaking: a daemon that resolves credentials or owners per caller acts as this gateway's own identity for everyone", ac.Name)
+	}
 }
 
 // label is how the agent is named to a person.
@@ -412,7 +441,7 @@ func buildAgent(ac AgentConfig, b agentBuilder) (*agent, error) {
 			return nil, err
 		}
 		return &agent{name: ac.Name, display: ac.DisplayName, desc: strings.TrimSpace(ac.Description), icon: strings.TrimSpace(ac.IconURL), ax: x,
-			omitCaller: x.omitCaller}, nil
+			omitCaller: x.omitCaller, entry: ac}, nil
 	}
 	if ac.AX != nil {
 		return nil, fmt.Errorf(`.ax is for kind "ax"`)
@@ -435,7 +464,7 @@ func buildAgent(ac AgentConfig, b agentBuilder) (*agent, error) {
 		return nil, fmt.Errorf(": %w", err)
 	}
 	a := &agent{name: ac.Name, display: ac.DisplayName, desc: strings.TrimSpace(ac.Description), icon: strings.TrimSpace(ac.IconURL), daemon: dc,
-		omitCaller: cfg.OmitAssertedCaller}
+		omitCaller: cfg.OmitAssertedCaller, entry: ac}
 	if b.approvals {
 		if a.approvals, err = approval.New(cfg); err != nil {
 			return nil, fmt.Errorf(": %w", err)

@@ -315,7 +315,7 @@ file:
 {
   "agents": [
     {"name": "platform", "display_name": "Platform agent", "daemon_url": "http://platform:7777", "token_env": "PLATFORM_TOKEN"},
-    {"name": "infra", "daemon_url": "http://infra:7777", "token_env": "INFRA_TOKEN", "kind": "mast", "assert_caller": false}
+    {"name": "infra", "daemon_url": "http://infra:7777", "token_env": "INFRA_TOKEN", "kind": "mast"}
   ],
   "default_agent": "platform",
   "channels": {
@@ -494,7 +494,9 @@ template, and each conversation gets a task of its own.
   `false`, because mast in a task, with one token, refuses the header. Set it
   `true` when the task runs core-agent with the gateway's token in its
   `proxy_identities`; the header then goes out on every request, approvals
-  included. Daemon agents default to `true`, and `false` works there too. Who
+  included. `kind: "mast"` daemon agents default to `false` too (mast refuses
+  the header, and startup and the admin API warn about an explicit `true`);
+  other daemon agents default to `true`, and `false` works there too. Who
   may answer a prompt is still decided by `--approvers` and, for a personal
   agent, its owner, and the audit log names the chat user either way.
 - **Starting:** on a conversation's first message, switchboard creates its
@@ -1019,8 +1021,8 @@ The question stays above the answer on purpose: a line naming an approver, with
 the command it approved gone, is not something anyone can audit. The approver is
 whoever the backend says it recorded, and an approval it could attribute to
 nobody says so rather than reading as fine. For an agent with `assert_caller`
-false (an ax agent by default) the backend is never told who pressed, so the
-line names the presser switchboard let through instead. A press against a question that is
+false (ax and mast agents by default) the backend is never told who pressed,
+so the line names the presser switchboard let through instead. A press against a question that is
 no longer pending — it timed out, or it was answered at the daemon's console —
 marks it settled without claiming a decision, since switchboard has no way to
 know which one was made. Where the record cannot be written onto the question at
@@ -1642,8 +1644,8 @@ one JSON line per turn and per approval press.
 ```
 
 - `caller` is exactly what went in `X-Asserted-Caller`, so a daemon audit entry
-  can be matched on it. For an agent with `assert_caller` false (an ax agent by
-  default) it is the chat user switchboard did not send, and a press's
+  can be matched on it. For an agent with `assert_caller` false (ax and mast
+  agents by default) it is the chat user switchboard did not send, and a press's
   `approver` is the agent's own token identity, not a person. `session` is
   `app/sid`; `message_id` is the platform's own handle on the message (a Slack
   `ts`, a Chat message resource name), which is how you get back to what was
