@@ -6,6 +6,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [v0.9.1] — 2026-11-01
+
+A fix for ax agents running mast. v0.9.0 asserted the chat user to every
+agent in `X-Asserted-Caller`, and mast in an ax task, which authenticates one
+bearer token, refuses that header rather than ignoring it, so no thread could
+open a session. switchboard now asserts no caller to `kind: "ax"` agents by
+default.
+
+Whether the chat user is sent is now a per-agent setting, `assert_caller`, on
+the agent entry next to `token_env`. Set it `true` on an ax agent whose task
+runs core-agent with the gateway in `proxy_identities`, and the user goes out
+on every request again, approvals included. Everything else carries over from
+v0.9.0: daemon and core-agent agents assert as before, and who may answer a
+prompt is still decided by `--approvers` and the personal-agent owner check.
+
+Upgrading changes nothing configured. A `kind: "mast"` daemon agent still
+asserts by default; startup now warns about it, and it needs
+`"assert_caller": false` unless mast is set up to let the gateway proxy.
+
 ### Fixed
 - **ax agents could not open a session with mast** (#186). switchboard
   asserted the chat user in `X-Asserted-Caller`, and mast in a task, which
