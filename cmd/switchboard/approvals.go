@@ -785,9 +785,16 @@ func (r *Router) HandlePress(ctx context.Context, p chat.Press) error {
 		rec.Outcome = auditStale
 		return r.surfaceNotice(ctx, p.Conversation, noticeStalePress)
 	}
+	// An agent told no caller (assert_caller false: ax agents by default,
+	// #186) cannot tell who pressed, so it neither refuses a presser nor
+	// records one. The gates above are then the whole of who may answer.
+	omitCaller := false
+	if a, ok := r.agents().lookup(e.agent); ok {
+		omitCaller = a.omitCaller
+	}
 	ack, err := ac.Respond(rctx, e.sess, p.Caller, promptID, d)
 	if err != nil {
-		if errors.Is(err, approval.ErrNotFound) && mayBeRefused(e, p.Caller, promptID) {
+		if errors.Is(err, approval.ErrNotFound) && !omitCaller && mayBeRefused(e, p.Caller, promptID) {
 			// Not necessarily settled. Under core-agent's session ACL, answering
 			// needs write access, which the session's opener has and a fellow
 			// approver does not — and a caller without it is told the same 404
@@ -838,6 +845,18 @@ func (r *Router) HandlePress(ctx context.Context, p chat.Press) error {
 	approver := clampRunes(strings.Join(strings.Fields(ack.Approver), " "), promptNameLimit)
 	rec.Outcome, rec.Approver = auditApplied, approver
 	outcome := decided(d) + " — " + approver
+	if omitCaller {
+		// The daemon was not told who pressed, so whatever it recorded is
+		// its bearer's identity, not a person. The presser is the one this
+		// gateway let answer, and the audit record carries them as Caller.
+		presser := clampRunes(strings.Join(strings.Fields(p.Caller), " "), promptNameLimit)
+		if presser == "" {
+			presser = "_presser unknown_"
+		}
+		r.logf.Infof("perms %s: %s by %s (agent %s is told no caller; it recorded %q)", p.Conversation, d, presser, e.agent, approver)
+		r.traceDecision(ctx, e, p, promptID, decided(d)+" — "+presser, settledHere)
+		return nil
+	}
 	if approver == "" {
 		// The decision applied, but the audit line names nobody — worth a log
 		// line, because an approval trail with a hole in it is the kind of

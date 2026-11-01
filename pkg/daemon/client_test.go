@@ -23,7 +23,9 @@ import (
 	"net/http/httptest"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 	"unicode/utf8"
 )
 
@@ -932,5 +934,59 @@ func TestRedact(t *testing.T) {
 				t.Fatalf("redact(%q) = %q, want %q", tc.in, got, tc.want)
 			}
 		})
+	}
+}
+
+// OmitAssertedCaller keeps X-Asserted-Caller off every verb, whatever caller
+// the call names: mast in an ax task refuses the header (#186). Without it,
+// every verb carries the caller.
+func TestOmitAssertedCaller(t *testing.T) {
+	for _, omit := range []bool{true, false} {
+		var seen []string
+		var mu sync.Mutex
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			seen = append(seen, r.Method+" "+r.URL.Path+" "+r.Header.Get("X-Asserted-Caller"))
+			mu.Unlock()
+			switch {
+			case r.URL.Path == "/sessions":
+				w.WriteHeader(http.StatusCreated)
+				_, _ = w.Write([]byte(`{"app":"mast","sessionID":"s1"}`))
+			case strings.HasSuffix(r.URL.Path, "/events"):
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.WriteHeader(http.StatusOK)
+			default:
+				_, _ = w.Write([]byte(`{}`))
+			}
+		}))
+		c, err := New(Config{BaseURL: srv.URL, BearerToken: "tok", OmitAssertedCaller: omit})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		sess, err := c.CreateSession(ctx, "alice@example.com")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := c.Inject(ctx, sess, "alice@example.com", "hi"); err != nil {
+			t.Fatal(err)
+		}
+		if err := c.Wake(ctx, sess, "alice@example.com"); err != nil {
+			t.Fatal(err)
+		}
+		_ = c.Subscribe(ctx, sess, "alice@example.com", 0, func(Event) error { return nil })
+		_, _ = c.HeadSeq(ctx, sess, "alice@example.com")
+		cancel()
+		srv.Close()
+		mu.Lock()
+		if len(seen) < 5 {
+			t.Fatalf("omit=%v: requests = %v", omit, seen)
+		}
+		for _, s := range seen {
+			if asserted := !strings.HasSuffix(s, " "); asserted == omit || (!omit && !strings.HasSuffix(s, " alice@example.com")) {
+				t.Errorf("omit=%v: %q", omit, s)
+			}
+		}
+		mu.Unlock()
 	}
 }

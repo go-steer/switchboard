@@ -73,8 +73,13 @@ Substrate v1.0, TLS on `:443` since):
   `spec.http.port: 8484` serves the contract switchboard speaks.
 - **Bearer:** `MAST_ATTACH_TOKEN`, carried in the task's env.
 - **Sessions:** many per process, in a session DB that survives suspend.
-- **Single-user:** no owner, no ACL, and `X-Asserted-Caller` is not
-  honoured with token auth.
+- **Single-user:** no owner and no ACL. With token auth, mast *refuses* a
+  request carrying `X-Asserted-Caller`: its attach surface
+  (`internal/attach/caller_middleware.go`, `resolveProxyAssertion`) returns
+  `ErrAssertedCallerForbidden`, "caller is not permitted to proxy", unless
+  its authenticator is a token table that allows proxying, and one
+  `MAST_ATTACH_TOKEN` is not (#186; this doc said "not honoured" until
+  v0.9.1, and v0.9.0 could not open a session).
 
 ### The rebased fork (#182)
 
@@ -235,9 +240,26 @@ and history.
   - `owner` scope: one person's.
   - `shared` scope: everyone shares a sandbox, so the agent kind should be
     allowed only where that is acceptable; startup warns.
-- **`X-Asserted-Caller` is still sent,** for mast's audit and for the day it
-  honours a proxy. The owner of an `owner`-scope task is in its name, and
-  switchboard's audit records both.
+- **No caller is asserted to an ax agent** (#186). Every request to its task
+  goes out without `X-Asserted-Caller`: session create, inject, the event
+  stream, the head probe, the prompt stream and answers. mast would refuse
+  it, and the task boundary is the isolation anyway.
+  - **`assert_caller`** on the agent entry (a bool next to `token_env`)
+    decides it per agent: false by default for `kind: "ax"`, true for every
+    other kind. Which to use depends on what the task runs:
+    - **mast in the task** (one `MAST_ATTACH_TOKEN`): leave it unset or
+      `false`. mast refuses the header.
+    - **core-agent in the task**, whose bearer table lists the gateway's token
+      in `proxy_identities`: set it `true`. core-agent then attributes each
+      turn and answer to the chat user and resolves their credentials, and the
+      header goes out on every path, approvals included.
+  - **Who may answer a prompt** stays switchboard's decision: `--approvers`,
+    the standing-approver list and the owner check for a personal agent all
+    run before anything is sent. Without an asserted caller the agent records
+    the answer against its token, so the thread names the presser switchboard
+    let through.
+  - **switchboard's audit** still records the chat user on every turn and
+    press, and the owner of an `owner`-scope task is in its name.
 - **ax-server is unauthenticated.** switchboard reaches it in-cluster in
   plaintext, as lookout does; a NetworkPolicy is the protection.
 - **The router takes mTLS only** from Agent Substrate v1.0, which removed its

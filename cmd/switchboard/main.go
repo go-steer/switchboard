@@ -501,7 +501,13 @@ func runServe(args []string) (err error) {
 		for _, n := range agents.order {
 			a := agents.byName[n]
 			if a.ax == nil {
+				if a.omitCaller {
+					logf.Warnf("agent %s: assert_caller is false, so its daemon is not told who is speaking: a daemon that resolves credentials or owners per caller acts as this gateway's own identity for everyone", n)
+				}
 				continue
+			}
+			if !a.omitCaller {
+				logf.Infof("agent %s: assert_caller is true, so its tasks are told the chat user: right for core-agent with proxy_identities, while mast with one token refuses every request", n)
 			}
 			if a.ax.scope == axScopeShared {
 				logf.Warnf("agent %s: scope shared runs one task for every caller, so they all share one sandbox, its credentials and its history", n)

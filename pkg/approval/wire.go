@@ -99,7 +99,7 @@ func (c *Client) request(ctx context.Context, method string, sess daemon.Session
 	if c.cfg.BearerToken != "" { // empty only under MutualTLS
 		req.Header.Set("Authorization", "Bearer "+c.cfg.BearerToken)
 	}
-	if assertedCaller != "" {
+	if assertedCaller != "" && !c.cfg.OmitAssertedCaller { // daemon.Config.OmitAssertedCaller
 		req.Header.Set("X-Asserted-Caller", assertedCaller)
 	}
 	return req, nil

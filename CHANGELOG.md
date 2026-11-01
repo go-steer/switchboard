@@ -6,6 +6,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **ax agents could not open a session with mast** (#186). switchboard
+  asserted the chat user in `X-Asserted-Caller`, and mast in a task, which
+  authenticates one `MAST_ATTACH_TOKEN` with no table allowing a proxy,
+  refuses the header: every thread failed with "caller is not permitted to
+  proxy". switchboard now asserts no caller to `kind: "ax"` agents, on the
+  session, turn, event and approval requests alike.
+  - New per-agent `assert_caller` (a bool on the agent entry, next to
+    `token_env`; the admin API takes it too): false by default for
+    `kind: "ax"`, true for every other kind, so daemon and core-agent agents
+    assert as before. Set it true on an ax agent whose task runs core-agent
+    with the gateway in `proxy_identities`, and the chat user goes out on
+    every request again, approvals included.
+  - Who may answer an ax agent's prompt is still switchboard's decision
+    (`--approvers`, standing approvers, the personal-agent owner check), made
+    before anything is sent. The thread names the presser, and the audit log
+    still records the chat user.
+
 ## [v0.9.0] — 2026-10-31
 
 A release about agents that are not daemons somebody runs. On Agent

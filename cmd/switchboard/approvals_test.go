@@ -24,6 +24,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -65,7 +66,14 @@ type permsDaemon struct {
 	// one, indistinguishable from a session that does not exist.
 	streamACL string
 
+	// rejectAsserted answers any request carrying X-Asserted-Caller the way
+	// mast's attach surface does with a plain bearer token (#186): 403,
+	// "caller is not permitted to proxy". asserted records what was sent.
+	rejectAsserted atomic.Bool
+
 	mu            sync.Mutex
+	asserted      []string // refused under rejectAsserted
+	callers       []string // "METHOD path caller", every request served
 	streams       int
 	streamCallers []string
 	responded     []permsPost
@@ -167,9 +175,40 @@ func newPermsDaemon(t *testing.T, prompts ...string) *permsDaemon {
 		}
 		fmt.Fprint(w, out)
 	})
-	d.srv = httptest.NewServer(mux)
+	// The runner's readiness, for an ax agent pointed at this daemon as its
+	// router.
+	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) {})
+	d.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if c := r.Header.Get("X-Asserted-Caller"); c != "" && d.rejectAsserted.Load() {
+			d.mu.Lock()
+			d.asserted = append(d.asserted, r.Method+" "+r.URL.Path+" "+c)
+			d.mu.Unlock()
+			http.Error(w, mastProxyRefusal, http.StatusForbidden)
+			return
+		}
+		d.mu.Lock()
+		d.callers = append(d.callers, r.Method+" "+r.URL.Path+" "+r.Header.Get("X-Asserted-Caller"))
+		d.mu.Unlock()
+		mux.ServeHTTP(w, r)
+	}))
 	t.Cleanup(d.srv.Close)
 	return d
+}
+
+// mastProxyRefusal is mast's answer to an asserted caller it may not believe
+// (internal/attach/caller_middleware.go, ErrAssertedCallerForbidden).
+const mastProxyRefusal = "asserted-caller header rejected: caller is not permitted to proxy"
+
+func (d *permsDaemon) callersSeen() []string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return append([]string(nil), d.callers...)
+}
+
+func (d *permsDaemon) assertedSeen() []string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return append([]string(nil), d.asserted...)
 }
 
 func (d *permsDaemon) streamCount() int {

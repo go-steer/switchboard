@@ -489,6 +489,14 @@ template, and each conversation gets a task of its own.
   It should set `spec.idle` so tasks suspend.
 - **`token_env`** holds the token that agent expects; for mast, its
   `MAST_ATTACH_TOKEN`.
+- **`assert_caller`** (a bool next to `token_env`) says whether the chat user
+  goes to the agent in `X-Asserted-Caller`. For an ax agent it defaults to
+  `false`, because mast in a task, with one token, refuses the header. Set it
+  `true` when the task runs core-agent with the gateway's token in its
+  `proxy_identities`; the header then goes out on every request, approvals
+  included. Daemon agents default to `true`, and `false` works there too. Who
+  may answer a prompt is still decided by `--approvers` and, for a personal
+  agent, its owner, and the audit log names the chat user either way.
 - **Starting:** on a conversation's first message, switchboard creates its
   task, or reuses it if it exists. It resumes the task and waits for it to
   answer (`ax.ready_timeout`, default `2m`). A start that takes more than a
@@ -1632,7 +1640,8 @@ one JSON line per turn and per approval press.
 ```
 
 - `caller` is exactly what went in `X-Asserted-Caller`, so a daemon audit entry
-  can be matched on it; `session` is `app/sid`; `message_id` is the platform's
+  can be matched on it (for an agent with `assert_caller` false, an ax agent by
+  default, it is the chat user switchboard did not send); `session` is `app/sid`; `message_id` is the platform's
   own handle on the message (a Slack `ts`, a Chat message resource name), which
   is how you get back to what was actually said.
 - Every turn is recorded, including the ones that failed (`no_session`,
