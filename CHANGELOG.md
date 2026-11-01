@@ -6,6 +6,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [v0.9.2] — 2026-11-01
+
+A follow-up to v0.9.1's asserted-caller fix, this time for mast daemons.
+mast's attach surface refuses `X-Asserted-Caller`, in an ax task or running
+as a daemon, so v0.9.1's default of asserting to a `kind: "mast"` daemon
+agent failed every request. mast agents now default `assert_caller` to false,
+as ax agents already did; every other kind still asserts.
+
+Upgrading changes nothing that works today: a mast agent that works already
+sets `assert_caller: false`, which still applies, and an explicit value always
+wins. Set `true` on a mast agent only if your mast build accepts proxy
+assertions, which none does yet; switchboard warns if you do, now for agents
+added through the admin API as well as the config file.
+
 ### Changed
 - **`kind: "mast"` daemon agents now default `assert_caller` to false**
   (#186). mast's attach surface refuses `X-Asserted-Caller` (it has no
