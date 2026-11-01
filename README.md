@@ -315,7 +315,7 @@ file:
 {
   "agents": [
     {"name": "platform", "display_name": "Platform agent", "daemon_url": "http://platform:7777", "token_env": "PLATFORM_TOKEN"},
-    {"name": "infra", "daemon_url": "http://infra:7777", "token_env": "INFRA_TOKEN", "kind": "mast"}
+    {"name": "infra", "daemon_url": "http://infra:7777", "token_env": "INFRA_TOKEN", "kind": "mast", "assert_caller": false}
   ],
   "default_agent": "platform",
   "channels": {
@@ -1018,7 +1018,9 @@ _asked by the `builder` subagent_
 The question stays above the answer on purpose: a line naming an approver, with
 the command it approved gone, is not something anyone can audit. The approver is
 whoever the backend says it recorded, and an approval it could attribute to
-nobody says so rather than reading as fine. A press against a question that is
+nobody says so rather than reading as fine. For an agent with `assert_caller`
+false (an ax agent by default) the backend is never told who pressed, so the
+line names the presser switchboard let through instead. A press against a question that is
 no longer pending — it timed out, or it was answered at the daemon's console —
 marks it settled without claiming a decision, since switchboard has no way to
 know which one was made. Where the record cannot be written onto the question at
@@ -1640,10 +1642,12 @@ one JSON line per turn and per approval press.
 ```
 
 - `caller` is exactly what went in `X-Asserted-Caller`, so a daemon audit entry
-  can be matched on it (for an agent with `assert_caller` false, an ax agent by
-  default, it is the chat user switchboard did not send); `session` is `app/sid`; `message_id` is the platform's
-  own handle on the message (a Slack `ts`, a Chat message resource name), which
-  is how you get back to what was actually said.
+  can be matched on it. For an agent with `assert_caller` false (an ax agent by
+  default) it is the chat user switchboard did not send, and a press's
+  `approver` is the agent's own token identity, not a person. `session` is
+  `app/sid`; `message_id` is the platform's own handle on the message (a Slack
+  `ts`, a Chat message resource name), which is how you get back to what was
+  actually said.
 - Every turn is recorded, including the ones that failed (`no_session`,
   `inject_failed`, with the daemon's `status`). Every press is recorded with
   what became of it: `applied`, `not_approver`, `not_standing`, `stale`,

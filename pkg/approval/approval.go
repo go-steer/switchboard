@@ -522,6 +522,10 @@ type Ack struct {
 	Approver string
 }
 
+// OmitsAssertedCaller reports whether this client sends no X-Asserted-Caller
+// (daemon.Config.OmitAssertedCaller), so the daemon cannot tell who answered.
+func (c *Client) OmitsAssertedCaller() bool { return c.cfg.OmitAssertedCaller }
+
 // Attributed reports whether the daemon recorded who approved.
 func (a Ack) Attributed() bool { return a.Approver != "" }
 

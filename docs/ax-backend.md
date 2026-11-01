@@ -243,7 +243,8 @@ and history.
 - **No caller is asserted to an ax agent** (#186). Every request to its task
   goes out without `X-Asserted-Caller`: session create, inject, the event
   stream, the head probe, the prompt stream and answers. mast would refuse
-  it, and the task boundary is the isolation anyway.
+  it, and in `thread` and `owner` scope the task boundary is the isolation;
+  in `shared` scope everyone shares one task, which startup warns about.
   - **`assert_caller`** on the agent entry (a bool next to `token_env`)
     decides it per agent: false by default for `kind: "ax"`, true for every
     other kind. Which to use depends on what the task runs:

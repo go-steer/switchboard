@@ -788,10 +788,10 @@ func (r *Router) HandlePress(ctx context.Context, p chat.Press) error {
 	// An agent told no caller (assert_caller false: ax agents by default,
 	// #186) cannot tell who pressed, so it neither refuses a presser nor
 	// records one. The gates above are then the whole of who may answer.
-	omitCaller := false
-	if a, ok := r.agents().lookup(e.agent); ok {
-		omitCaller = a.omitCaller
-	}
+	// From the client that answers, so an admin change to the agent between
+	// two registry reads cannot pair one with the other's setting (caught in
+	// review).
+	omitCaller := ac.OmitsAssertedCaller()
 	ack, err := ac.Respond(rctx, e.sess, p.Caller, promptID, d)
 	if err != nil {
 		if errors.Is(err, approval.ErrNotFound) && !omitCaller && mayBeRefused(e, p.Caller, promptID) {

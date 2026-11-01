@@ -498,11 +498,18 @@ func runServe(args []string) (err error) {
 		if agents, err = agentsFrom(cfg, *daemonURL, *tokenEnv, builder); err != nil {
 			return err
 		}
+		kinds := map[string]string{}
+		for _, ac := range cfg.Agents {
+			kinds[ac.Name] = ac.Kind
+		}
 		for _, n := range agents.order {
 			a := agents.byName[n]
 			if a.ax == nil {
-				if a.omitCaller {
+				switch k := kinds[n]; {
+				case a.omitCaller:
 					logf.Warnf("agent %s: assert_caller is false, so its daemon is not told who is speaking: a daemon that resolves credentials or owners per caller acts as this gateway's own identity for everyone", n)
+				case k == "mast":
+					logf.Warnf("agent %s: kind mast asserts the chat user, and mast's attach surface, with one bearer token, refuses X-Asserted-Caller; set assert_caller false unless it is configured to let this gateway proxy", n)
 				}
 				continue
 			}

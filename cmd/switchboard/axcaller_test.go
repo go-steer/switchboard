@@ -211,6 +211,65 @@ func TestAnAXAgentsApprovalsAssertNoCaller(t *testing.T) {
 	if !applied || !refused {
 		t.Errorf("audit: applied by alice %v, refused mallory %v:\n%s", applied, refused, buf.String())
 	}
+	// The thread names the presser switchboard let through, not whatever the
+	// agent recorded against its token (the fake says presser@example.com).
+	var said []string
+	for drained := false; !drained; {
+		select {
+		case rep := <-out.replies:
+			said = append(said, rep.Text)
+		default:
+			drained = true
+		}
+	}
+	var named bool
+	for _, text := range said {
+		if strings.Contains(text, "presser@example.com") {
+			t.Errorf("the thread names the agent's recorded approver: %q", text)
+		}
+		named = named || (strings.Contains(text, "Allowed") && strings.Contains(text, "alice@x.com"))
+	}
+	if !named {
+		t.Errorf("nothing in the thread names alice as the approver: %q", said)
+	}
+}
+
+// An agent told no caller cannot refuse a presser by its session ACL, so a
+// 404 to a fellow approver's answer means the question is settled, not
+// "maybe refused".
+func TestAnAXAgentsNotFoundIsSettled(t *testing.T) {
+	d := newPermsDaemon(t, bashPrompt)
+	d.rejectAsserted.Store(true)
+	d.respondStatus = http.StatusNotFound
+	r, out, buf := axPermsRouter(t, d, nil)
+	r.setApprovers(mustApprovers(t, "alice@x.com,bob@x.com"))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := r.Handle(ctx, chat.Message{Conversation: "C1:1", Channel: "C1", Caller: "alice@x.com", Text: "clean up"}); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	deadline := time.After(5 * time.Second)
+	for asked := false; !asked; {
+		select {
+		case rep := <-out.replies:
+			asked = rep.Kind == chat.KindDecision
+		case <-deadline:
+			t.Fatal("the question never reached the thread")
+		}
+	}
+	if err := r.HandlePress(ctx, chat.Press{Conversation: "C1:1", Channel: "C1", Caller: "bob@x.com",
+		DecisionID: agentDecisionRef("triage", testSession, "pr1"), Option: "allow-once"}); err != nil {
+		t.Fatalf("HandlePress: %v", err)
+	}
+	var outcome string
+	for _, rec := range records(t, buf) {
+		if rec.Kind == "press" {
+			outcome = rec.Outcome
+		}
+	}
+	if outcome != auditSettledElsewhere {
+		t.Errorf("press outcome = %q, want %q", outcome, auditSettledElsewhere)
+	}
 }
 
 // assert_caller: true on an ax agent — core-agent in the task, with
