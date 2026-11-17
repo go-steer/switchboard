@@ -294,6 +294,7 @@ func (r *Router) CommitBind(conv string, sess daemon.Session, since int64) {
 	r.metrics.bindRecorded()
 	r.bindings[conv] = binding{sess: sess, since: since}
 	r.boundTo[sessionRef(sess)] = conv
+	r.clearOutboundLocked(conv)
 	r.logf.Infof("bind %s -> session %s from seq %d", conv, sessionRef(sess), since)
 	r.evictBindings()
 	r.markDirty()

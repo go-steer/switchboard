@@ -161,6 +161,10 @@ type ingressConfig struct {
 	// run, which has no router and no inbound path — the session field is
 	// refused rather than accepted and quietly dropped.
 	Bind binder
+	// Seed records unbound outbound posts so the first inbound reply in that
+	// thread carries the message at the head of it. Defaults to Bind when Bind
+	// implements outboundSeeder (i.e. *Router).
+	Seed outboundSeeder
 	// Metrics may be nil (recording becomes a no-op).
 	Metrics *metrics
 	// Logf is where the ingress logs; the zero value discards.
@@ -177,10 +181,21 @@ type binder interface {
 	AbortBind(sess daemon.Session)
 }
 
+// outboundSeeder carries what the outbound ingress posted in an unbound thread
+// across to the router, so the first human reply in that thread gives the new
+// session the message at the head of it. Separate from binder so a test
+// stubbing session bindings does not take on thread seeding too; implemented
+// by *Router (see outbound.go).
+type outboundSeeder interface {
+	NoteOutbound(conv, id, text string)
+	EditOutbound(conv, id, text string)
+}
+
 // ingress serves the outbound message API over a chat adapter's egress.
 type ingress struct {
 	out     sender
 	bind    binder
+	seed    outboundSeeder
 	token   string
 	allow   []string
 	metrics *metrics
@@ -257,9 +272,16 @@ func newIngress(cfg ingressConfig) (*ingress, error) {
 	if cfg.Out == nil {
 		return nil, errors.New("ingress: no chat egress")
 	}
+	seed := cfg.Seed
+	if seed == nil {
+		if s, ok := cfg.Bind.(outboundSeeder); ok {
+			seed = s
+		}
+	}
 	i := &ingress{
 		out:     cfg.Out,
 		bind:    cfg.Bind,
+		seed:    seed,
 		token:   cfg.Token,
 		allow:   slices.Clone(cfg.Allow),
 		metrics: cfg.Metrics,
@@ -449,6 +471,8 @@ func (i *ingress) postMessage(w http.ResponseWriter, r *http.Request) error {
 		if pending != nil {
 			i.bind.CommitBind(ref.Conversation, pending.sess, pending.since)
 			committed = true
+		} else if i.seed != nil {
+			i.seed.NoteOutbound(ref.Conversation, ref.ID, req.Text)
 		}
 		return opResult{ref: ref}, nil
 	})
@@ -590,10 +614,23 @@ func (i *ingress) patchMessage(w http.ResponseWriter, r *http.Request) error {
 // replace rewrites a message's whole body, and resets what append remembers of
 // it — a replace is the caller declaring the new full text.
 func (i *ingress) replace(ctx context.Context, ref chat.MessageRef, text string) (opResult, error) {
+	var prevConv string
+	if prev := i.tracked(ref.Conversation, ref.ID); prev != nil {
+		prev.mu.Lock()
+		prevConv = prev.conv
+		prev.mu.Unlock()
+	}
 	if err := i.update(ctx, ref, text); err != nil {
 		return opResult{}, err
 	}
 	i.track(ref, text)
+	if i.seed != nil {
+		conv := ref.Conversation
+		if !namesThread(conv) && namesThread(prevConv) {
+			conv = prevConv
+		}
+		i.seed.EditOutbound(conv, ref.ID, text)
+	}
 	return opResult{ref: ref}, nil
 }
 
@@ -638,12 +675,22 @@ func (i *ingress) appendTo(ctx context.Context, ref chat.MessageRef, add string)
 			return opResult{}, err
 		}
 		i.track(cont, add)
+		if i.seed != nil {
+			i.seed.NoteOutbound(cont.Conversation, cont.ID, add)
+		}
 		return opResult{ref: cont, rolled: true}, nil
 	}
 	if err := i.update(ctx, ref, combined); err != nil {
 		return opResult{}, err
 	}
 	be.text = combined
+	if i.seed != nil {
+		conv := ref.Conversation
+		if !namesThread(conv) && namesThread(be.conv) {
+			conv = be.conv
+		}
+		i.seed.EditOutbound(conv, ref.ID, combined)
+	}
 	return opResult{ref: ref}, nil
 }
 

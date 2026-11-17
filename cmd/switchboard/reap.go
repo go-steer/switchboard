@@ -16,6 +16,7 @@ package main
 
 import (
 	"context"
+	"slices"
 	"time"
 )
 
@@ -284,6 +285,20 @@ func (r *Router) release(now time.Time, idle func(*sessionEntry) bool) int {
 			delete(r.owners, conv)
 			pruned = true
 		}
+	}
+	outboundPruned := false
+	for conv, t := range r.outbound {
+		if !t.touched.IsZero() && now.Sub(t.touched) > dormantMaxAge {
+			delete(r.outbound, conv)
+			outboundPruned = true
+			pruned = true
+		}
+	}
+	if outboundPruned {
+		r.outboundOrder = slices.DeleteFunc(r.outboundOrder, func(c string) bool {
+			_, ok := r.outbound[c]
+			return !ok
+		})
 	}
 	r.mu.Unlock()
 	for _, e := range released {

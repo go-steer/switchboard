@@ -545,6 +545,20 @@ an existing session. Deployments where that matters run the ingress on a
 network only the agent backend can reach, which is what the `--outbound-only`
 and allowlist controls above are for.
 
+**Unbound outbound threads carry their own context into the first reply.** When
+the default agent runs a task per conversation (`kind: "ax"`), or when the
+caller is an independent alert pipeline or incident task with no shared daemon
+session to bind, `POST /v1/messages` omits `session`. A human replying in the
+thread then opens a fresh session, and switchboard deliberately holds no
+chat-history scope (`channels:history`) to read back the root post. Because that
+message went out through switchboard's own ingress, switchboard already knows
+what it said: the router keeps a bounded per-thread record (last 1024 unbound
+threads, capped at 64 messages and 32 KiB per thread, updated across in-place `PATCH` edits,
+appends, and rollover continuations, and persisted in `--state-dir`), prepends
+it once to the first inbound turn's `Inject`, and drops the record as soon as
+that `Inject` succeeds. Bound threads (`session` set) skip seeding entirely so
+an adopted session never receives a duplicate of its own alert.
+
 What remains open on this seam: an agent's `alert`-shaped tool call
 (`{level, summary, details}`) still has to be rendered into the ingress's
 `{conversation, text}` by its caller — switchboard does not define that

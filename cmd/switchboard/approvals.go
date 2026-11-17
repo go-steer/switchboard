@@ -126,6 +126,9 @@ func (r *Router) watchPerms(ctx context.Context, conv string, e *sessionEntry, a
 		// adopted session, exactly as the relay's is.
 		err := ac.Stream(ctx, e.sess, e.owner, func(p approval.Prompt) error {
 			delivered = true
+			if !e.seeded.Load() {
+				r.markSeeded(conv, e)
+			}
 			r.postPrompt(ctx, conv, e, p)
 			return nil
 		})

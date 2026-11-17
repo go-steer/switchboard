@@ -564,6 +564,13 @@ type Router struct {
 	bindOrder []string
 	reserving map[string]string
 
+	// outbound holds the unbound outbound-ingress threads whose first inbound
+	// reply has not yet reached an agent session (see outbound.go). Guarded by
+	// mu, like sessions and bindings, so session() and NoteOutbound agree on
+	// whether a thread already has a session.
+	outbound      map[string]*outboundThread
+	outboundOrder []string
+
 	// omu guards overrides, the per-channel progress-mode overrides set at
 	// runtime via chat commands (HandleCommand). This is the narrowest of the
 	// three layers settingsFor resolves and the only one reachable at runtime;
@@ -887,6 +894,15 @@ type sessionEntry struct {
 	footPending bool
 	footTimer   *time.Timer
 	footDelay   time.Duration
+
+	// seedMu serializes a new session's first Inject across concurrent turns
+	// released by ready, so a second turn cannot overtake the one carrying
+	// remembered outbound thread context (or run bare while the first fails
+	// and leaves a stale seed behind). seeded turns true once the session
+	// accepts a turn or emits turn activity, after which turns run without
+	// taking seedMu.
+	seedMu sync.Mutex
+	seeded atomic.Bool
 }
 
 // unfootedText is a posted text that may yet turn out to be its turn's answer.
@@ -1719,6 +1735,7 @@ func NewRouter(client *daemon.Client, out sender, progress ProgressMode, m *metr
 		bindings:      make(map[string]binding),
 		boundTo:       make(map[string]string),
 		reserving:     make(map[string]string),
+		outbound:      make(map[string]*outboundThread),
 		overrides:     make(map[string]ProgressMode),
 	}
 	r.reg.Store(&registry{agents: singleAgent(client, nil)})
@@ -1942,9 +1959,7 @@ func (r *Router) Handle(ctx context.Context, msg chat.Message) (err error) {
 	// the moment the daemon acknowledges it: the relay is a separate goroutine
 	// and the turn can fail on the stream before Inject's response is read.
 	entry.beginTurnInFlight()
-	start := time.Now()
-	err = r.daemonOf(entry).Inject(ctx, entry.sess, msg.Caller, msg.Text)
-	r.metrics.recordDaemon("inject", time.Since(start), err)
+	err = r.injectTurn(ctx, msg.Conversation, entry, msg.Caller, msg.Text)
 	if err != nil {
 		// The turn never reached the daemon, so nothing on the stream will ever
 		// conclude it, and the progress message would linger; undo both here.
@@ -2881,6 +2896,9 @@ func (r *Router) sessionAs(ctx context.Context, conv, channel, caller, agent str
 	// double-create, and release the map lock before the network call.
 	b, adopted := r.bindings[conv]
 	e := &sessionEntry{ready: make(chan struct{}), channel: channel, adopted: adopted}
+	if adopted {
+		e.seeded.Store(true)
+	}
 	set, cs := r.routing(channel) // one snapshot: the agents and what the channel allows agree
 	switch {
 	case adopted:
@@ -3250,6 +3268,9 @@ func (r *Router) relay(ctx context.Context, conv string, e *sessionEntry, owner 
 				}
 				return nil
 			case daemon.EventTurnComplete:
+				if !e.seeded.Load() {
+					r.markSeeded(conv, e)
+				}
 				// The boundary is the event, not its contents: a frame that
 				// carries nothing legible still ends the turn everywhere the
 				// turn's end is consulted.
@@ -3294,6 +3315,9 @@ func (r *Router) relay(ctx context.Context, conv string, e *sessionEntry, owner 
 					r.logf.Warnf("relay %s: unreadable turn-error: %s", conv, ev.Data)
 					return nil
 				}
+				if !e.seeded.Load() {
+					r.markSeeded(conv, e)
+				}
 				r.logf.Errorf("relay %s: turn failed: kind=%s code=%s retryable=%t: %s",
 					conv, te.Kind, te.Code, te.Retryable, te.Message)
 				// The turn is over and produced no answer, so nothing will
@@ -3321,6 +3345,9 @@ func (r *Router) relay(ctx context.Context, conv string, e *sessionEntry, owner 
 				if !ok {
 					r.logf.Warnf("relay %s: unreadable inbox event: %s", conv, ev.Data)
 					return nil
+				}
+				if !e.seeded.Load() {
+					r.markSeeded(conv, e)
 				}
 				e.noteInbox(c)
 				if c.Dequeued() {
@@ -3353,6 +3380,9 @@ func (r *Router) relay(ctx context.Context, conv string, e *sessionEntry, owner 
 				// it is doing decides whether the conversation may let go of
 				// its streams.
 				e.agentBusy.Store(!st.Idle())
+				if !st.Idle() && !e.seeded.Load() {
+					r.markSeeded(conv, e)
+				}
 				switch {
 				case st.Working():
 					streaming = true
@@ -3438,6 +3468,9 @@ func (r *Router) relay(ctx context.Context, conv string, e *sessionEntry, owner 
 				return nil
 			}
 			reply, ok := daemon.AgentText(ev.Data)
+			if reply.Seq > 0 && !e.seeded.Load() {
+				r.markSeeded(conv, e)
+			}
 			r.resolveFoot(ctx, e, conv, ok && !reply.Partial && reply.Text != "" && reply.Seq > e.relayed.Load(), ok && reply.Partial)
 			if reply.Seq > e.seq.Load() {
 				e.seq.Store(reply.Seq)
