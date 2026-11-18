@@ -28,6 +28,7 @@ import (
 	"github.com/go-steer/switchboard/pkg/approval"
 	"github.com/go-steer/switchboard/pkg/chat"
 	"github.com/go-steer/switchboard/pkg/daemon"
+	"github.com/go-steer/switchboard/pkg/subagent"
 )
 
 // Multi-agent routing (#140, docs/multi-agent.md).
@@ -120,6 +121,9 @@ type agent struct {
 	desc    string
 	icon    string
 	daemon  *daemon.Client
+	// subagents reads inner subagent tool turns (#193); nil only when daemon is
+	// nil (an unconfigured router in tests or outbound-only mode) or kind "ax".
+	subagents *subagent.Client
 	// approvals is nil when no channel relays permission prompts: a run with
 	// approvals off everywhere holds no client for a surface it does not offer.
 	approvals *approval.Client
@@ -198,6 +202,9 @@ func newAgentSet(def string, agents ...*agent) (*agentSet, error) {
 	for _, a := range agents {
 		if _, dup := s.byName[a.name]; dup {
 			return nil, fmt.Errorf("agent %q is registered twice", a.name)
+		}
+		if a.subagents == nil && a.daemon != nil {
+			a.subagents, _ = subagent.New(a.daemon.Config())
 		}
 		s.byName[a.name] = a
 		s.order = append(s.order, a.name)
@@ -326,6 +333,25 @@ func (r *Router) approvalsOf(e *sessionEntry) *approval.Client {
 		return nil
 	}
 	return tc.approvals
+}
+
+// subagentsOf is the subagent turn-log client of a conversation's agent, nil
+// when the agent is gone or holds no daemon client.
+func (r *Router) subagentsOf(e *sessionEntry) *subagent.Client {
+	a, ok := r.agents().lookup(e.agent)
+	switch {
+	case !ok:
+		return nil
+	case a.ax == nil:
+		return a.subagents
+	case e.task == "":
+		return nil
+	}
+	tc, err := a.ax.forTask(e.task)
+	if err != nil {
+		return nil
+	}
+	return tc.subagents
 }
 
 // identityOf is how a conversation's agent signs what it writes (phase 5):
@@ -463,7 +489,11 @@ func buildAgent(ac AgentConfig, b agentBuilder) (*agent, error) {
 	if err != nil {
 		return nil, fmt.Errorf(": %w", err)
 	}
-	a := &agent{name: ac.Name, display: ac.DisplayName, desc: strings.TrimSpace(ac.Description), icon: strings.TrimSpace(ac.IconURL), daemon: dc,
+	sc, err := subagent.New(cfg)
+	if err != nil {
+		return nil, fmt.Errorf(": %w", err)
+	}
+	a := &agent{name: ac.Name, display: ac.DisplayName, desc: strings.TrimSpace(ac.Description), icon: strings.TrimSpace(ac.IconURL), daemon: dc, subagents: sc,
 		omitCaller: cfg.OmitAssertedCaller, entry: ac}
 	if b.approvals {
 		if a.approvals, err = approval.New(cfg); err != nil {

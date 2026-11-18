@@ -516,6 +516,10 @@ type Router struct {
 	// defaulted in NewRouter and shortened in tests.
 	tickInterval, tickMaxAge time.Duration
 
+	// subPollInterval is how often an active subagent branch is polled for
+	// inner tool calls (#193). Zero or less means defaultSubagentPollInterval.
+	subPollInterval time.Duration
+
 	// footDelay is how long a turn-complete waits for an answer behind it; see
 	// scheduleFoot. Zero or less means defaultFootDelay.
 	footDelay time.Duration
@@ -833,6 +837,9 @@ type sessionEntry struct {
 	turnStart time.Time
 	tools     []string
 	step      int
+	subAgent  string
+	subTools  []string
+	subCall   int
 	tickStop  chan struct{}
 
 	// bmu guards backlog, the messages the daemon has told us are sitting on
@@ -903,6 +910,16 @@ type sessionEntry struct {
 	// taking seedMu.
 	seedMu sync.Mutex
 	seeded atomic.Bool
+
+	// smu guards subagent turn-log watchers and cursors (#193); see subagents.go.
+	smu          sync.Mutex
+	subFloor     int64
+	noSubagents  bool
+	notSubagent  map[string]bool
+	subSeq       map[string]int64
+	subCallTotal map[string]int
+	subWatches   map[string][]subWatch
+	subPollers   map[string]*subPoller
 }
 
 // unfootedText is a posted text that may yet turn out to be its turn's answer.
@@ -1168,6 +1185,7 @@ func (e *sessionEntry) beginTurnInFlight() {
 	e.turnSeq.Add(1)
 	e.notices = nil
 	e.amu.Unlock()
+	e.stopAllSubagents()
 	e.turnGen.Store(e.streamGen.Load())
 	e.inFlight.Store(true)
 }
@@ -1240,7 +1258,11 @@ func (e *sessionEntry) backlogged() bool {
 // endTurn concludes the turn in flight, reporting whether this call is the one
 // that did it. Nobody is waiting on the daemon once this returns, so a stream
 // that drops afterwards is an idle session rather than an abandoned turn.
-func (e *sessionEntry) endTurn() bool { return e.inFlight.CompareAndSwap(true, false) }
+func (e *sessionEntry) endTurn() bool {
+	ended := e.inFlight.CompareAndSwap(true, false)
+	e.stopAllSubagents()
+	return ended
+}
 
 // turnInFlight reports whether a turn is waiting on the daemon right now.
 func (e *sessionEntry) turnInFlight() bool { return e.inFlight.Load() }
@@ -1418,6 +1440,7 @@ func (e *sessionEntry) takeProgressStart() (chat.MessageRef, time.Time) {
 	ref, stop, start := e.progressMsg, e.tickStop, e.turnStart
 	e.progressMsg, e.tickStop = chat.MessageRef{}, nil
 	e.turnStart, e.tools, e.step = time.Time{}, nil, 0
+	e.subAgent, e.subTools, e.subCall = "", nil, 0
 	e.pmu.Unlock()
 	// Outside the lock, and safe against a concurrent caller: whoever nils
 	// tickStop under the lock is the only one holding a channel to close.
@@ -1466,6 +1489,7 @@ func (e *sessionEntry) resumeTurnClock(start time.Time) (stop chan struct{}, ok 
 	stop = make(chan struct{})
 	e.tickStop = stop
 	e.turnStart, e.tools, e.step = start, nil, 0
+	e.subAgent, e.subTools, e.subCall = "", nil, 0
 	return stop, true
 }
 
@@ -1479,6 +1503,7 @@ func (e *sessionEntry) beginTurn(ref chat.MessageRef, start time.Time) (stale ch
 	stop = make(chan struct{})
 	e.progressMsg, e.tickStop = ref, stop
 	e.turnStart, e.tools, e.step = start, nil, 0
+	e.subAgent, e.subTools, e.subCall = "", nil, 0
 	e.pmu.Unlock()
 	if prev != nil {
 		close(prev)
@@ -1519,6 +1544,7 @@ func (e *sessionEntry) noteActivity(tools []string) (ref chat.MessageRef, text s
 		return chat.MessageRef{}, "", false
 	}
 	e.tools, e.step = tools, e.step+1
+	e.subAgent, e.subTools, e.subCall = "", nil, 0
 	return e.progressMsg, tickText(time.Since(e.turnStart), e.tools, e.step), true
 }
 
@@ -1529,16 +1555,26 @@ func (e *sessionEntry) noteActivity(tools []string) (ref chat.MessageRef, text s
 // detail records the mode the notice was rendered in, so a re-render on a
 // result reproduces it rather than assuming.
 type activityNote struct {
-	ref    chat.MessageRef
-	calls  []daemon.ToolCall
-	res    []*daemon.ToolResult
-	detail bool
+	subagent string
+	ref      chat.MessageRef
+	calls    []daemon.ToolCall
+	res      []*daemon.ToolResult
+	detail   bool
 	// seen is when the frame's calls reached the gateway, and took[i] how long
-	// call i ran to its result, measured from there. Gateway-side, so it is
-	// the call plus the stream's latency both ways — close enough to tell a
+	// call i ran to its result, measured from there (or from eventAt when a
+	// subagent's persisted event timestamps are available). Gateway-side, so it
+	// is the call plus the stream's latency both ways — close enough to tell a
 	// slow command from a quick one, which is what it is for.
-	seen time.Time
-	took []time.Duration
+	seen    time.Time
+	eventAt time.Time
+	took    []time.Duration
+}
+
+func (n *activityNote) render() string {
+	if n.subagent != "" {
+		return subagentActivityText(n.subagent, n.calls, n.res, n.took)
+	}
+	return timedActivityText(n.calls, n.res, n.took, n.detail)
 }
 
 // pending returns the index of the oldest still-unanswered call of this name,
@@ -1588,9 +1624,7 @@ func (e *sessionEntry) noteToolCalls(ref chat.MessageRef, calls []daemon.ToolCal
 		seen:   seen,
 		took:   make([]time.Duration, len(calls)),
 	})
-	if n := len(e.notices) - noticeMemory; n > 0 {
-		e.notices = append([]*activityNote(nil), e.notices[n:]...)
-	}
+	e.notices = capNotices(e.notices)
 }
 
 // resolveTool files a result against the notice that announced its call and
@@ -1618,6 +1652,9 @@ func (e *sessionEntry) resolveTool(r daemon.ToolResult) (*activityNote, bool) {
 	if r.ID != "" {
 		for i := len(e.notices) - 1; i >= 0; i-- {
 			n := e.notices[i]
+			if n.subagent != "" {
+				continue
+			}
 			for j, c := range n.calls {
 				if c.ID == r.ID && n.res[j] == nil {
 					res := r
@@ -1632,6 +1669,9 @@ func (e *sessionEntry) resolveTool(r daemon.ToolResult) (*activityNote, bool) {
 		return nil, false
 	}
 	for _, n := range e.notices {
+		if n.subagent != "" {
+			continue
+		}
 		if at := n.pending(r.Name); at != -1 {
 			res := r
 			n.res[at] = &res
@@ -1688,8 +1728,7 @@ func (e *sessionEntry) applyToolResults(results []daemon.ToolResult) []toolEdit 
 	// Rendered after every result in the frame is filed, so each notice is
 	// rendered once, in its final state.
 	for i := range edits {
-		n := edits[i].note
-		edits[i].text = timedActivityText(n.calls, n.res, n.took, n.detail)
+		edits[i].text = edits[i].note.render()
 	}
 	return edits
 }
@@ -1704,11 +1743,10 @@ func (e *sessionEntry) tickRender(mode ProgressMode) (ref chat.MessageRef, text 
 	if e.progressMsg.ID == "" || e.turnStart.IsZero() {
 		return chat.MessageRef{}, "", false
 	}
-	tools, step := e.tools, e.step
 	if mode != ProgressStatus {
-		tools, step = nil, 0
+		return e.progressMsg, tickText(time.Since(e.turnStart), nil, 0), true
 	}
-	return e.progressMsg, tickText(time.Since(e.turnStart), tools, step), true
+	return e.progressMsg, subTickText(time.Since(e.turnStart), e.tools, e.step, e.subAgent, e.subTools, e.subCall), true
 }
 
 // NewRouter builds a Router. progress selects long-turn feedback (ProgressOff
@@ -2520,13 +2558,22 @@ func (r *Router) deletesCleanly() bool {
 // replayed from seq, and believing that absence would strand a live clock under
 // a delivered answer. Failing either, every text ends the turn, as it did
 // before #42.
-func (r *Router) deliverText(ctx context.Context, e *sessionEntry, conv, text string, seq int64) {
-	usage, settled := e.takeUsage()
+func (r *Router) deliverText(ctx context.Context, e *sessionEntry, conv, text string, seq int64, hasCalls bool) {
+	var (
+		usage   *chat.Usage
+		settled bool
+	)
+	if !hasCalls {
+		usage, settled = e.takeUsage()
+	}
 	// Two questions, and #42 is what happens when they are answered as one.
 	//
 	// ended is about the turn: has this text concluded it, or is the turn still
 	// running and this only something it said on the way? That is the first
-	// case, and the paragraphs above are its reasoning.
+	// case, and the paragraphs above are its reasoning. When the same frame
+	// also carries tool calls (hasCalls), the model has explicitly asked for a
+	// tool execution in this step, so the text is narration regardless of
+	// signalsEnd or watchedWhole.
 	//
 	// final is about the thread: is this its last word for now? A turn can be
 	// genuinely over — turn-complete banked, answer in hand — while a message
@@ -2535,16 +2582,22 @@ func (r *Router) deliverText(ctx context.Context, e *sessionEntry, conv, text st
 	// a later turn behind it hands that turn a thread with no placeholder and
 	// no clock. That is the second case. Backlogged text keeps the placeholder,
 	// re-anchoring it below the answer exactly as narration does.
-	// A text arriving when no turn is in flight cannot be narration either:
-	// the boundary has already ended the turn (a boundary-first answer that
-	// lost its usage to a quiet stream), or no human turn began it. Reading it
-	// as narration would re-anchor a stopped clock below it and leave it there.
-	ended := settled || !e.signalsEnd.Load() || !e.watchedWhole() || !e.turnInFlight()
+	// A text arriving when no turn is in flight and carrying no tool calls
+	// cannot be narration either: the boundary has already ended the turn (a
+	// boundary-first answer that lost its usage to a quiet stream), or no human
+	// turn began it. Reading an answerless turn's late text as narration would
+	// re-anchor a stopped clock below it and leave it there. When hasCalls is
+	// true, though, this frame explicitly starts tool work — even on an
+	// autonomous or adopted session where turnInFlight is false — so it has not
+	// ended the turn, while still avoiding placeholder re-anchoring unless a
+	// turn is in flight or backlogged.
+	ended := !hasCalls && (!e.turnInFlight() || settled || !e.signalsEnd.Load() || !e.watchedWhole())
 	final := ended && !e.backlogged()
 	if ended {
 		// The counter is about turns, not placeholders: a completed turn was
 		// delivered to the thread whether or not another is queued behind it.
 		r.metrics.recordTurnRelayed()
+		e.stopAllSubagents()
 	}
 	if final {
 		// An answer with nothing behind it concludes the wait: whatever the
@@ -2571,12 +2624,14 @@ func (r *Router) deliverText(ctx context.Context, e *sessionEntry, conv, text st
 		// A failed post should not tear down the stream; log and keep relaying.
 		r.logf.Errorf("relay %s: send: %v", conv, err)
 	}
-	if final {
+	if final || (!e.turnInFlight() && !e.backlogged()) {
 		return
 	}
-	// The turn was left running on the strength of a boundary that has not
-	// arrived; make sure something ends it if it never does.
-	r.armTurnBackstop(ctx, e, conv)
+	if e.turnInFlight() {
+		// The turn was left running on the strength of a boundary that has not
+		// arrived; make sure something ends it if it never does.
+		r.armTurnBackstop(ctx, e, conv)
+	}
 	// The rest only once the narration is actually in the thread. A re-anchor
 	// exists to put the clock back underneath something; if nothing was posted
 	// there is nothing to get under, and moving the placeholder would spend two
@@ -2588,12 +2643,13 @@ func (r *Router) deliverText(ctx context.Context, e *sessionEntry, conv, text st
 	// permission to delete the placeholder instead of freezing it, and the
 	// boundary can land while the re-anchor's own Send is still in the air.
 	e.noteSpoke()
-	if !ended && ref.ID != "" {
+	if !ended && !hasCalls && ref.ID != "" {
 		e.noteUnfooted(ref, text)
 	}
-	if ended {
-		// A backlogged answer (#42): the next turn is already queued and its
-		// clock belongs below this answer now. Nothing to wait for.
+	if ended || hasCalls {
+		// A backlogged answer (#42) or narration paired with tool calls in the
+		// same frame: the clock belongs below this text now, with nothing to
+		// wait for.
 		r.reanchorProgress(ctx, e, conv)
 		return
 	}
@@ -2941,6 +2997,7 @@ func (r *Router) sessionAs(ctx context.Context, conv, channel, caller, agent str
 		e.relayed.Store(since)
 		e.delivered.Store(since)
 		e.noticed.Store(since)
+		e.setSubFloor(since)
 		e.touch()
 		r.metrics.sessionOpened()
 		r.startRelay(ctx, conv, e, "")
@@ -3070,6 +3127,7 @@ func (r *Router) reviveLocked(ctx context.Context, conv, channel string, rec ses
 		e.relayed.Store(since)
 		e.delivered.Store(since)
 		e.noticed.Store(max(since, e.noticed.Load()))
+		e.setSubFloor(since)
 	}
 	r.metrics.sessionOpened()
 	r.startRelay(ctx, conv, e, e.owner)
@@ -3215,6 +3273,7 @@ func (r *Router) discard(conv string, e *sessionEntry, unbind bool) bool {
 // turns, and skipping any turn already posted so a boundary replay cannot double
 // up (#3). It runs until ctx is cancelled.
 func (r *Router) relay(ctx context.Context, conv string, e *sessionEntry, owner string) {
+	defer e.stopAllSubagents()
 	backoff := r.minBackoff
 	// The last moment the stream was known to be carrying traffic — what the
 	// grace period is measured from. Written only from inside the callback,
@@ -3424,6 +3483,7 @@ func (r *Router) relay(ctx context.Context, conv string, e *sessionEntry, owner 
 					owed := e.awaitingAnswer()
 					if !owed {
 						e.clearBacklog()
+						e.stopAllSubagents()
 					}
 					if !streaming {
 						return nil
@@ -3468,10 +3528,12 @@ func (r *Router) relay(ctx context.Context, conv string, e *sessionEntry, owner 
 				return nil
 			}
 			reply, ok := daemon.AgentText(ev.Data)
+			calls := daemon.ToolCalls(ev.Data)
+			hasCalls := len(calls) > 0
 			if reply.Seq > 0 && !e.seeded.Load() {
 				r.markSeeded(conv, e)
 			}
-			r.resolveFoot(ctx, e, conv, ok && !reply.Partial && reply.Text != "" && reply.Seq > e.relayed.Load(), ok && reply.Partial)
+			r.resolveFoot(ctx, e, conv, ok && !reply.Partial && reply.Text != "" && !hasCalls && reply.Seq > e.relayed.Load(), ok && reply.Partial)
 			if reply.Seq > e.seq.Load() {
 				e.seq.Store(reply.Seq)
 				e.touch()
@@ -3480,48 +3542,51 @@ func (r *Router) relay(ctx context.Context, conv string, e *sessionEntry, owner 
 			// A completed, non-empty model turn is a reply worth relaying
 			// (partial chunks are repeated by the final event). Exactly-once: a
 			// reconnect resumes from the last seq seen, but skip anything
-			// already posted in case a turn straddled the drop.
+			// already posted in case a turn straddled the drop. A single frame
+			// may carry both narration text and functionCall parts, so when
+			// hasCalls is true we still fall through to surface the tool calls.
 			if ok && !reply.Partial && reply.Text != "" {
-				if reply.Seq <= e.relayed.Load() {
+				if reply.Seq > e.relayed.Load() {
+					e.relayed.Store(reply.Seq)
+					e.touch()
+					r.noteAttempt(e, reply.Seq)
+					r.deliverText(ctx, e, conv, reply.Text, reply.Seq, hasCalls)
+					if ctx.Err() == nil {
+						e.delivered.Store(reply.Seq)
+						r.markDirty()
+					}
+				}
+				if !hasCalls {
 					return nil
 				}
-				e.relayed.Store(reply.Seq)
-				e.touch()
-				r.noteAttempt(e, reply.Seq)
-				r.deliverText(ctx, e, conv, reply.Text, reply.Seq)
-				if ctx.Err() == nil {
-					e.delivered.Store(reply.Seq)
-					r.markDirty()
-				}
-				return nil
 			}
-			// Otherwise it may be tool activity — surfaced only in the modes
-			// that show progress, and gated by its own seq watermark so a
-			// reconnect replay does not repost it. Its own, not the answer's:
-			// sharing one would let a tool result raise the bar the answer has
-			// to clear. The mode is resolved per event so a mid-session command
-			// takes effect on the next turn.
-			if mode := r.progressFor(e.channel); mode == ProgressStream || mode == ProgressStatus {
-				if reply.Seq <= e.noticed.Load() {
-					return nil
+			// Tool activity — surfaced in the modes that show progress, and
+			// gated by its own seq watermark so a reconnect replay does not
+			// repost it. Its own, not the answer's: sharing one would let a
+			// tool result raise the bar the answer has to clear. The mode is
+			// resolved per event so a mid-session command takes effect on the
+			// next turn. Active subagent watches still observe parent
+			// ToolResults even if the mode changed mid-turn so their pollers
+			// retire promptly.
+			mode := r.progressFor(e.channel)
+			if (mode == ProgressStream || mode == ProgressStatus || e.hasSubagentWatches()) && reply.Seq > e.noticed.Load() {
+				var results []daemon.ToolResult
+				if mode == ProgressStream || e.hasSubagentWatches() {
+					results = daemon.ToolResults(ev.Data)
 				}
-				if calls := daemon.ToolCalls(ev.Data); len(calls) > 0 {
-					e.noticed.Store(reply.Seq)
-					r.markDirty()
-					r.postActivity(ctx, e, conv, mode, calls)
-					return nil
-				}
-				// Tool results ride the same event, under the "user" role the
-				// daemon gives anything the model did not author (#36). Stream
-				// mode only: it is the one mode that registers a notice for a
-				// result to tick off, so anywhere else this would be a parse
-				// and a watermark advance for a message never sent.
-				if mode == ProgressStream {
-					if results := daemon.ToolResults(ev.Data); len(results) > 0 {
+				if len(results) > 0 {
+					r.finishSubagentsOnResults(ctx, conv, e, results)
+					if mode == ProgressStream {
 						e.noticed.Store(reply.Seq)
 						r.markDirty()
 						r.postToolResults(ctx, e, conv, results)
 					}
+				}
+				if hasCalls && (mode == ProgressStream || mode == ProgressStatus) {
+					e.noticed.Store(reply.Seq)
+					r.markDirty()
+					r.postActivity(ctx, e, conv, mode, calls)
+					r.startSubagentWatches(ctx, conv, e, mode, reply.Seq, calls)
 				}
 			}
 			return nil

@@ -6,6 +6,37 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Subagent inner-tool progress in `status` and `stream` modes** (#193). While a
+  parent subagent call (`_fallback`, `propose-change`, or a synchronously awaited
+  `spawn_agent`) is in flight, switchboard tails
+  `GET /sessions/<app>/<sid>/agents/<name>/events` at ~1s until the parent call's
+  `ToolResult` arrives or the turn ends, working identically across Slack and
+  Google Chat:
+  - In `status` mode, the single progress placeholder updates in place with the
+    subagent's active tool and call count (for example,
+    ``⏳ Working… 25s · running `_fallback` › `get_k8s_logs` (call 23)``).
+  - In `stream` mode, inner tool calls post standalone activity notices
+    attributed to the subagent (for example,
+    `▸ Running **propose-change** › **vcs_clone**` ticking off in place to
+    `✔︎ Ran **propose-change** › **vcs_clone**` with argument summary and `⏱`
+    duration from the subagent's event timestamps, coalescing sub-second
+    call+result pairs arriving in the same poll batch into a single settled
+    post).
+  - Synthetic subagent loop-control calls (`finish_task`, `return_result`,
+    `report_done`, `report_completed`, `mark_task_done`, `schedule_next_turn`)
+    are suppressed. Ordinary tools answer `404` once and are cached per session
+    so repeated calls to them never poll; daemons returning `501` or `412`
+    disable subagent polling for the session on the first probe; `off` and
+    `indicator` modes never poll.
+
+### Fixed
+- **Agent frames carrying both narration text and tool calls no longer drop
+  their tool activity**. When a single completed `EventAgent` frame carried
+  assistant narration alongside `functionCall` parts, `relay` returned after
+  delivering the text, skipping `postActivity` (and subagent watches) for that
+  frame in `status` and `stream` modes.
+
 ## [v0.10.0] — 2026-11-18
 
 Outbound-ingress threads posted without a `session` binding — the normal shape
