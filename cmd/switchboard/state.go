@@ -22,6 +22,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -86,6 +88,7 @@ type routerState struct {
 	Version   int                      `json:"version"`
 	Sessions  map[string]sessionRecord `json:"sessions,omitempty"`
 	Bindings  []bindingRecord          `json:"bindings,omitempty"`
+	Outbound  []outboundRecord         `json:"outbound,omitempty"`
 	Overrides map[string]string        `json:"overrides,omitempty"`
 	// Owners is who each personal agent's thread belongs to (#172): kept
 	// apart from Sessions, and far longer, because a session is rebuilt and
@@ -113,6 +116,10 @@ type sessionRecord struct {
 	// an adopted session (sessionEntry.owner).
 	Owner   string `json:"owner,omitempty"`
 	Adopted bool   `json:"adopted,omitempty"`
+	// Seeded records that the session has already accepted or run a turn, so a
+	// turn that ended without relaying an answer (e.g. turn-error) and was
+	// released to dormant never re-seeds or accepts late outbound edits.
+	Seeded bool `json:"seeded,omitempty"`
 	// Relayed and Noticed are the delivery watermarks: the last answer whose
 	// post completed, and the last tool notice posted. The stream resumes from
 	// Relayed, and neither watermark lets a replayed event be posted twice.
@@ -149,6 +156,15 @@ type bindingRecord struct {
 	Since        int64  `json:"since"`
 	// Agent is the bound session's agent; absent means the default (#140).
 	Agent string `json:"agent,omitempty"`
+}
+
+// outboundRecord is one unbound thread's remembered outbound ingress posts,
+// kept in outboundOrder until the thread's first inbound turn consumes them.
+type outboundRecord struct {
+	Conversation string        `json:"conversation"`
+	Messages     []outboundMsg `json:"messages"`
+	Touched      time.Time     `json:"touched"`
+	Truncated    bool          `json:"truncated,omitempty"`
 }
 
 // stateStore persists the snapshot. The file is the only implementation; the
@@ -342,6 +358,18 @@ func (r *Router) snapshot() routerState {
 		}
 		st.Bindings = append(st.Bindings, bindingRecord{Conversation: conv, Session: sessionRef(b.sess), Since: b.since, Agent: b.agent})
 	}
+	for _, conv := range r.outboundOrder {
+		t, ok := r.outbound[conv]
+		if !ok || len(t.msgs) == 0 {
+			continue
+		}
+		st.Outbound = append(st.Outbound, outboundRecord{
+			Conversation: conv,
+			Messages:     slices.Clone(t.msgs),
+			Touched:      t.touched,
+			Truncated:    t.truncated,
+		})
+	}
 	if len(r.owners) > 0 {
 		st.Owners = make(map[string]threadOwner, len(r.owners))
 		for conv, o := range r.owners {
@@ -370,6 +398,7 @@ func (e *sessionEntry) record() sessionRecord {
 		Task:    e.task,
 		Owner:   e.owner,
 		Adopted: e.adopted,
+		Seeded:  e.seeded.Load(),
 		// delivered, not relayed: relayed moves before the post is made, so a
 		// post cut off by shutdown would otherwise be recorded as made.
 		Relayed:   e.delivered.Load(),
@@ -436,6 +465,7 @@ func entryFromRecord(rec sessionRecord, channel string) (*sessionEntry, error) {
 	// the answer rather than as narration awaiting a turn-complete that will
 	// never be replayed (lifecycle frames carry no seq).
 	e.streamGen.Store(1)
+	e.seeded.Store(rec.recordProgressed())
 	if len(rec.Asked) > 0 {
 		e.asked = make(map[string]*askRecord, len(rec.Asked))
 		for _, a := range rec.Asked {
@@ -482,6 +512,40 @@ func (r *Router) restore(ctx context.Context, st routerState, now time.Time) (re
 		}
 	}
 	dormant = len(r.dormant) - len(recent)
+	for _, o := range st.Outbound {
+		if !namesThread(o.Conversation) || len(o.Messages) == 0 {
+			continue
+		}
+		if !o.Touched.IsZero() && now.Sub(o.Touched) > dormantMaxAge {
+			continue
+		}
+		if _, bound := r.bindings[o.Conversation]; bound {
+			continue
+		}
+		if rec, ok := r.dormant[o.Conversation]; ok && rec.recordProgressed() {
+			continue
+		}
+		var msgs []outboundMsg
+		for _, m := range o.Messages {
+			text := sanitizeUTF8(m.Text)
+			if strings.TrimSpace(text) != "" || (m.Truncated && m.ID != "") {
+				msgs = append(msgs, outboundMsg{ID: m.ID, Text: text, Truncated: m.Truncated})
+			}
+		}
+		if len(msgs) == 0 && !o.Truncated {
+			continue
+		}
+		t := &outboundThread{msgs: msgs, touched: o.Touched, truncated: o.Truncated}
+		t.capLimits()
+		if len(t.msgs) == 0 {
+			continue
+		}
+		if _, dup := r.outbound[o.Conversation]; !dup {
+			r.outboundOrder = append(r.outboundOrder, o.Conversation)
+		}
+		r.outbound[o.Conversation] = t
+	}
+	r.evictOutboundLocked()
 	for conv, o := range st.Owners {
 		if o.Owner == "" || now.Sub(o.Since) > ownerMaxAge {
 			continue

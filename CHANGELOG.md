@@ -6,6 +6,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Unbound outbound-ingress threads carry their posted context into the first
+  inbound reply.** When `POST /v1/messages` omits `session` — the normal shape
+  when chat runs a task-per-conversation `kind: "ax"` agent or when an
+  independent incident task posts an alert — the router remembers what its
+  ingress posted in that thread (including in-place `PATCH` edits, appends, and
+  rollover continuations; bounded to 1024 threads, 64 messages, and 32 KiB per
+  thread, and persisted in `--state-dir`) and prepends it once to the first
+  human reply's `Inject`, without needing chat-history scopes on Slack or Google
+  Chat. Bound threads (`session` set) continue to adopt their daemon session
+  without seeding.
+
+### Security
+- **Go 1.26.11** for GO-2026-6859 (`net/http` `MaxBytesReader` header race);
+  `govulncheck` now flags switchboard under 1.26.10. Both `go.mod` (which CI
+  and `release-images.yml` read) and `Dockerfile`'s default `GO_VERSION` move
+  to 1.26.11.
+
 ## [v0.9.2] — 2026-11-01
 
 A follow-up to v0.9.1's asserted-caller fix, this time for mast daemons.
