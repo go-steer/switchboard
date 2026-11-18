@@ -6,6 +6,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [v0.11.0] — 2026-11-18
+
+Long subagent delegations (`_fallback`, `propose-change`, and synchronously
+awaited `spawn_agent`) now surface their inner tool calls live in both `status`
+and `stream` modes across Slack and Google Chat, and agent frames carrying both
+assistant narration text and `functionCall` parts now post both the narration
+and the tool activity.
+
+Upgrading requires no config or flag changes: switchboard uses `core-agent`
+`v3.1.0+`'s existing `/sessions/<app>/<sid>/agents/<name>/events` route
+automatically and disables subagent polling cleanly against older daemons.
+
 ### Added
 - **Subagent inner-tool progress in `status` and `stream` modes** (#193). While a
   parent subagent call (`_fallback`, `propose-change`, or a synchronously awaited
