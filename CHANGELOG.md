@@ -6,9 +6,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [v0.10.0] — 2026-11-18
+
+Outbound-ingress threads posted without a `session` binding — the normal shape
+when chat runs a task-per-conversation `kind: "ax"` agent or when an
+independent alert task opens a thread — now carry their posted context into the
+first inbound human reply, without requiring chat-history scopes on Slack or
+Google Chat. Also moves the build toolchain to Go 1.26.11 for GO-2026-6859.
+
+Upgrading requires no config or flag changes: unbound outbound posts, in-place
+`PATCH` edits, appends, and continuation rollovers are tracked automatically
+when `--ingress-addr` and an inbound adapter run together, and bound threads
+(`session` set) continue to adopt their daemon session unchanged.
+
 ### Added
 - **Unbound outbound-ingress threads carry their posted context into the first
-  inbound reply.** When `POST /v1/messages` omits `session` — the normal shape
+  inbound reply** (#194). When `POST /v1/messages` omits `session` — the normal shape
   when chat runs a task-per-conversation `kind: "ax"` agent or when an
   independent incident task posts an alert — the router remembers what its
   ingress posted in that thread (including in-place `PATCH` edits, appends, and
