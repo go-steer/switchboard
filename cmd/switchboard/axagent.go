@@ -32,6 +32,7 @@ import (
 	"github.com/go-steer/switchboard/pkg/ax"
 	"github.com/go-steer/switchboard/pkg/chat"
 	"github.com/go-steer/switchboard/pkg/daemon"
+	"github.com/go-steer/switchboard/pkg/subagent"
 )
 
 // ax agents (#170, docs/ax-backend.md).
@@ -152,6 +153,7 @@ func (x *axAgent) ownsTask(agentName, name string) bool {
 // taskClients are one task's contract clients.
 type taskClients struct {
 	daemon    *daemon.Client
+	subagents *subagent.Client
 	approvals *approval.Client
 }
 
@@ -165,7 +167,11 @@ func (x *axAgent) forTask(task string) (*taskClients, error) {
 	if err != nil {
 		return nil, err
 	}
-	tc := &taskClients{daemon: dc}
+	sc, err := subagent.New(cfg)
+	if err != nil {
+		return nil, err
+	}
+	tc := &taskClients{daemon: dc, subagents: sc}
 	if x.approvals {
 		if tc.approvals, err = approval.New(cfg); err != nil {
 			return nil, err

@@ -459,6 +459,7 @@ func entryFromRecord(rec sessionRecord, channel string) (*sessionEntry, error) {
 		e.verifyThrough.Store(rec.Attempted)
 	}
 	e.noticed.Store(max(rec.Noticed, rec.Relayed))
+	e.setSubFloor(max(rec.Noticed, rec.Relayed))
 	e.touched.Store(rec.Touched.UnixNano())
 	// A new process is a new connection: whatever turn was in flight was not
 	// watched whole by this one, so an answer replayed into it is taken as

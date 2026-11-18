@@ -135,6 +135,12 @@ func New(cfg Config) (*Client, error) {
 	return &Client{cfg: cfg, http: hc}, nil
 }
 
+// Config returns the configuration this Client was built from, so a sibling
+// package speaking an optional route on the same daemon (pkg/approval,
+// pkg/subagent) can share its address, credential and transport without a
+// second description that could drift.
+func (c *Client) Config() Config { return c.cfg }
+
 // NoRedirects is the redirect policy of the default client: the contract has
 // no redirects, and following one would resend the bearer token (net/http
 // keeps Authorization on a same-host hop, https to http included) and the
@@ -803,6 +809,11 @@ type ToolCall struct {
 	// "safely" is doing there — it is a disclosure decision, not a formatting
 	// one, and it is deliberately lossy.
 	Arg string
+	// Subagent is the target subagent name when Name is core-agent's
+	// background delegation tool ("spawn_agent"): args["name"] when set,
+	// else args["agent"]. Empty for every other tool, including synchronous
+	// subagent tools whose Name already is the subagent's name.
+	Subagent string
 }
 
 // ToolResult is one tool result: whether the call finished, and — if it
@@ -818,16 +829,17 @@ type ToolResult struct {
 
 // ToolCalls returns the tool (function) calls carried by an EventAgent
 // payload, in the order they appear, and is empty for events that carry none
-// (plain model text, tool results, user turns, or a parse failure). It pairs
-// with AgentText: an agent event is either model text (AgentText ok) or tool
-// activity (ToolCalls non-empty), letting the gateway surface "the agent is
-// running <tool>" progress distinctly from the answer text.
+// (plain model text, partial streaming chunks, tool results, user turns, or a
+// parse failure). It pairs with AgentText: an agent event may carry model text,
+// tool activity, or both (when the model narrates and invokes a tool in the
+// same turn), letting the gateway surface "the agent is running <tool>"
+// progress distinctly from the spoken text.
 func ToolCalls(data string) []ToolCall {
 	var f agentFrame
 	if err := json.Unmarshal([]byte(data), &f); err != nil {
 		return nil
 	}
-	if f.Event == nil || f.Event.Content == nil || f.Event.Content.Role != "model" {
+	if f.Event == nil || f.Event.Partial || f.Event.Content == nil || f.Event.Content.Role != "model" {
 		return nil
 	}
 	var calls []ToolCall
@@ -835,13 +847,32 @@ func ToolCalls(data string) []ToolCall {
 		if p.FunctionCall == nil || p.FunctionCall.Name == "" {
 			continue
 		}
+		var sub string
+		if p.FunctionCall.Name == "spawn_agent" {
+			sub = spawnSubagentName(p.FunctionCall.Args)
+		}
 		calls = append(calls, ToolCall{
-			ID:   p.FunctionCall.ID,
-			Name: p.FunctionCall.Name,
-			Arg:  summariseArg(p.FunctionCall.Args),
+			ID:       p.FunctionCall.ID,
+			Name:     p.FunctionCall.Name,
+			Arg:      summariseArg(p.FunctionCall.Args),
+			Subagent: sub,
 		})
 	}
 	return calls
+}
+
+// spawnSubagentName extracts the branch/agent name a spawn_agent call
+// delegates to: "name" overrides the instance label when given, and "agent"
+// names the configured subagent template.
+func spawnSubagentName(args map[string]any) string {
+	for _, k := range []string{"name", "agent"} {
+		if s, ok := args[k].(string); ok {
+			if s = strings.TrimSpace(s); s != "" {
+				return s
+			}
+		}
+	}
+	return ""
 }
 
 // ToolResults returns the tool results carried by an EventAgent payload.
@@ -860,7 +891,7 @@ func ToolResults(data string) []ToolResult {
 	if err := json.Unmarshal([]byte(data), &f); err != nil {
 		return nil
 	}
-	if f.Event == nil || f.Event.Content == nil {
+	if f.Event == nil || f.Event.Partial || f.Event.Content == nil {
 		return nil
 	}
 	var results []ToolResult

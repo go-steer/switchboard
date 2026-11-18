@@ -33,7 +33,7 @@ func TestAnAnswerNamesItsAgent(t *testing.T) {
 	e := liveEntryIn(r, "C2:1", "C2")
 	e.agent = "b"
 
-	r.deliverText(context.Background(), e, "C2:1", "the answer", 1)
+	r.deliverText(context.Background(), e, "C2:1", "the answer", 1, false)
 
 	got := recvReply(t, fake.replies)
 	if got.Agent == nil || got.Agent.Name != "b" || got.Agent.Label != "Agent B" || got.Agent.IconURL != "https://example.com/b.png" {
@@ -104,7 +104,7 @@ func TestASingleAgentGatewaySignsNothing(t *testing.T) {
 	r := NewRouter(d.client, fake, ProgressOff, nil, nil)
 	e := liveEntryIn(r, "C1:1", "C1")
 
-	r.deliverText(context.Background(), e, "C1:1", "the answer", 1)
+	r.deliverText(context.Background(), e, "C1:1", "the answer", 1, false)
 
 	if got := recvReply(t, fake.replies); got.Agent != nil {
 		t.Errorf("reply agent = %+v, want none", got.Agent)
