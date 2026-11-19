@@ -15,7 +15,7 @@
 
 # What the rig on this machine has built and is running. It cannot see
 # another machine: whether a rig is up somewhere else is something to
-# check there (dev/rig/README.md, "One machine at a time").
+# check there (dev/rig/README.md, "One rig at a time").
 set -euo pipefail
 source "$(dirname "$0")/lib.sh"
 

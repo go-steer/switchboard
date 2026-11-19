@@ -7,7 +7,16 @@ really carries. Unit and integration tests need none of this
 (`dev/tools/ci` runs offline).
 
 The rig can live on any number of machines, but only **one runs it at a
-time**: see [One machine at a time](#one-machine-at-a-time).
+time**: see [One rig at a time](#one-rig-at-a-time).
+
+[`dev/demo/slack-rig`](../demo/slack-rig) is the other rig, for a
+different question: it runs a shipmind SRE bundle (subagents over the
+hosted GKE MCP server, with the flags prod boots it with) against a
+core-agent release tag, Slack only. Use it to test that workload; use this
+one for the platform surface on both chat apps, approvals, and against
+core-agent `main`. The two share nothing on disk, and this one ignores
+the `RIG_*` variables slack-rig reads from the shell: only `rig.env`
+configures it.
 
 | Script | Does |
 |---|---|
@@ -48,10 +57,10 @@ Two guards back this up: `.gitignore` covers `dev/rig/*.env` and
 shaped like a private key or a real Slack, Google API or GitHub token, in
 tracked files and in untracked ones git is not ignoring.
 
-## One machine at a time
+## One rig at a time
 
 Three things deliver an event to exactly one receiver, and none of them can
-be seen from the other machine:
+be seen from another machine, or from another rig on this one:
 
 - **Slack Socket Mode** hands each event to one of the app's open
   connections. Two gateways on the same app split the mentions between them,
@@ -62,9 +71,14 @@ be seen from the other machine:
   on `switchboard-chat-sub` split the messages.
 
 So moving the rig is: `dev/rig/stop` on the old machine, then start on the
-new one. `dev/rig/status` shows only this machine. If mentions are going
-unanswered and nothing here is wrong, the first question is whether a rig
-is still up somewhere else.
+new one. `dev/rig/status` shows only this rig on this machine. If mentions
+are going unanswered and nothing here is wrong, the first question is
+whether a rig is still up somewhere else.
+
+That includes `dev/demo/slack-rig` given the same Slack app's tokens: its
+gateway splits Socket Mode events with this one exactly as a second machine
+would. Both daemons also default to port 7777, so the second to start
+fails to bind. Stop one before starting the other.
 
 For the same reason the rig's Slack app is its own: the GKE demo gateway
 uses the main `switchboard` app, and a rig on that app would split events

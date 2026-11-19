@@ -38,6 +38,13 @@ then fill it in. dev/rig/README.md walks through it.
 EOF
   exit 2
 fi
+# rig.env is the only configuration: drop any RIG_* the shell carries
+# first. dev/demo/slack-rig reads RIG_MODEL, RIG_SLACK_ENV and others from
+# the environment, so an export meant for it would otherwise reach this rig
+# wherever rig.env leaves a value unset.
+for v in $(compgen -v RIG_); do
+  unset "$v"
+done
 # shellcheck source=/dev/null
 source "$rig_env"
 

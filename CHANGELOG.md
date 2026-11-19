@@ -15,7 +15,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `~/.config/switchboard-rig`, binaries, token, session database and logs in
   `~/.local/state/switchboard-rig`; nothing secret is in the checkout.
   `dev/rig/README.md` covers setting up a machine, moving the rig between
-  machines, and handing the Chat app back.
+  machines, and handing the Chat app back. It complements
+  `dev/demo/slack-rig` (the shipmind workload on Slack) and ignores the
+  `RIG_*` variables that one reads from the shell.
 - **`dev/demo/daemon --permissions MODE`.** Any mode but the default `yolo`
   also turns off core-agent's built-in allow list, so approvals can be
   tested end to end.
