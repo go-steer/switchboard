@@ -173,6 +173,12 @@ calls `auth.test` and logs `slack: connected as <name> (<id>)` — if that line 
 missing, the tokens are wrong and nothing downstream will work. An outbound-only
 run never opens the socket, so it never makes that call either.
 
+For end-to-end live testing against a real subagent workload (building
+`core-agent` at its latest tag, importing a `shipmind` SRE bundle over the
+hosted read-only GKE MCP server on Vertex, and running `switchboard` with rich
+blocks, task cards, and usage footers), use `dev/demo/slack-rig` (`--help` for
+options and env overrides).
+
 ## Demo script
 
 In the order that shows what is there:

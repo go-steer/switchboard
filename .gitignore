@@ -13,8 +13,10 @@ dist/
 *.out
 coverage.*
 
-# Scratch config, session db, and bearer table written by dev/demo/daemon.
+# Scratch config, session db, and bearer table written by dev/demo/daemon
+# and dev/demo/slack-rig.
 .demo-daemon/
+.demo-rig/
 
 # Editor / OS noise
 .idea/
