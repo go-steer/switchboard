@@ -170,6 +170,15 @@ type Reply struct {
 	// its platform shows in notifications.
 	Decision *Decision
 
+	// Activity, when set, is the tool activity this reply reports — one unit
+	// of work, its calls beneath a title — for an adapter that can draw it
+	// natively: Slack, as one task card. Nil on everything but a progress
+	// message whose turn has called a tool.
+	//
+	// Text still says the whole thing, as it does beside a Decision: an
+	// adapter that draws nothing from here posts Text and loses nothing.
+	Activity *Activity
+
 	// Key identifies this reply across processes, so that posting it twice —
 	// once before a crash, once after — can be recognized as one post. Empty
 	// for a reply that has no stable identity, which posts as it always has.
@@ -189,6 +198,70 @@ type Reply struct {
 	// posts anyway, and the worst case is a duplicate message.
 	Verify bool
 }
+
+// Activity is a reply's tool activity, structured: one unit of work, with a
+// title saying where it has got to and the calls it has made, oldest first.
+// The router decides what is shown — which calls, whether their arguments —
+// and the adapter decides only how; nothing here is something Text does not
+// already say.
+type Activity struct {
+	// Title says where the work has got to: the clock, the call count, the
+	// tool running now. Plain text, drawn literally — not markup.
+	Title string
+	// Status is the state of the whole activity.
+	Status StepStatus
+	// Steps are the calls, oldest first. Empty for an activity that is a
+	// title alone.
+	Steps []Step
+	// Recent are the lines to show without the reader asking for them while
+	// the work is running — a few of the latest, one flat list whatever
+	// their nesting in Steps. The router decides what goes in it and the
+	// adapter only draws it. Nil for none: an activity that has finished, or
+	// one whose mode shows its title alone.
+	Recent []Step
+}
+
+// Step is one call, or one run of identical calls.
+type Step struct {
+	// Title names the tool and, for a run, how many: "bash ×3", or
+	// "bash (exit 2)" once it has failed. Plain text, not markup.
+	Title string
+	// Status is where the step has got to.
+	Status StepStatus
+	// Code is what the tool was called with, shown verbatim, or empty when
+	// the router shows no arguments. Agent-supplied: render it as literal
+	// text, never as markup.
+	Code string
+	// Note is a short trailing remark, e.g. how long the call took. Plain text.
+	Note string
+	// Calls is how many calls a subagent has made under this one, for a call
+	// that delegates; zero for any other. It can exceed len(Steps): a long
+	// delegation is drawn across several messages, and the count is the
+	// delegation's, not the message's.
+	Calls int
+	// Steps are the calls a subagent made under this call, oldest first. One
+	// level deep, deliberately: a child's own Steps are not drawn.
+	Steps []Step
+}
+
+// StepStatus is a step's state, and an Activity's. Running, done and failed
+// are the states a tool call has: a step that has not started is not one the
+// router knows about yet. The fourth is for a step in something that will not
+// be drawn again.
+type StepStatus string
+
+const (
+	StepRunning StepStatus = "running"
+	StepDone    StepStatus = "done"
+	StepFailed  StepStatus = "failed"
+	// StepUnfinished says no result was seen: the gateway stopped following
+	// this call here before one arrived — its message was left behind for a
+	// newer one, or the call carries on in a later one. It is not a verdict.
+	// The call may have succeeded, failed, or still be running; an adapter
+	// draws it as neither a success nor a failure, and not as running, since
+	// nothing will come back to change it.
+	StepUnfinished StepStatus = "unfinished"
+)
 
 // Usage is the token and cost accounting for the turn a Reply carries. It is
 // structured rather than pre-rendered because the platforms have genuinely
@@ -302,6 +375,21 @@ var (
 	ErrDenied   = errors.New("chat: the platform refused the operation")
 )
 
+// RetryAfter reports how long a platform asked to be left alone before the
+// operation that failed with err is tried again, and whether it asked at all:
+// a rate limit that came with a delay. An Adapter says so by wrapping, beside
+// its own error, one with a RetryAfter() time.Duration method — as with
+// ErrNotFound and ErrDenied, the platform's wording stays in the message and
+// only the delay is portable. A caller that retries waits at least this long;
+// one that does not can ignore it.
+func RetryAfter(err error) (time.Duration, bool) {
+	var limited interface{ RetryAfter() time.Duration }
+	if errors.As(err, &limited) {
+		return limited.RetryAfter(), true
+	}
+	return 0, false
+}
+
 // ErrNoInbound is returned by Run on an adapter built without an inbound
 // source — no Slack app token, no Google Chat subscription. Such an adapter
 // posts and never receives, which is the shape an outbound-only deployment
@@ -367,6 +455,14 @@ type Command struct {
 // (the progress placeholder) edits it into a final line instead.
 type DeleteLeavesTrace interface {
 	DeleteLeavesTrace() bool
+}
+
+// DrawsActivity is an optional Adapter capability: the adapter renders
+// Reply.Activity rather than only Text. The router keeps a turn's calls as one
+// drawn record only for an adapter that will draw it; any other gets the text
+// it always did, and none of the edits only a drawn record would show.
+type DrawsActivity interface {
+	DrawsActivity() bool
 }
 
 // AgentChoice is one agent a picker offers (#140).

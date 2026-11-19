@@ -79,7 +79,11 @@ type subWatch struct {
 // the synchronous final drain that runs when the parent call's ToolResult
 // arrives. pollMu is never acquired under any sessionEntry lock.
 type subPoller struct {
-	cancel     context.CancelFunc
+	cancel context.CancelFunc
+	// base is the context the poller's own was derived from: the relay's.
+	// Work the poller starts that must outlive it — a card redraw owed after
+	// its last poll — runs on this one.
+	base       context.Context
 	turn       int64
 	nonSpawn   bool // guarded by sessionEntry.smu
 	sawSuccess bool // guarded by sessionEntry.smu
@@ -242,7 +246,7 @@ func (r *Router) startSubagentWatches(ctx context.Context, conv string, e *sessi
 		p := e.subPollers[subName]
 		if p == nil {
 			pctx, cancel := context.WithCancel(ctx)
-			p = &subPoller{cancel: cancel, turn: turn}
+			p = &subPoller{cancel: cancel, base: ctx, turn: turn}
 			e.subPollers[subName] = p
 			toLaunch = append(toLaunch, launch{name: subName, p: p, ctx: pctx})
 		}
@@ -480,11 +484,28 @@ func (r *Router) pollSubagent(ctx context.Context, conv string, e *sessionEntry,
 	}
 	e.touch()
 
-	switch r.progressFor(e.channel) {
+	mode := r.progressFor(e.channel)
+	if r.carded(e, mode) {
+		// Card mode, either mode: the subagent's calls go on the turn's card,
+		// under the call that delegated to it, and nothing is posted for
+		// them. Without a card to put them on — a turn with no placeholder —
+		// the mode does below what it does for an adapter that draws none.
+		if taken, changed := e.noteCardSubagent(subName, frames, mode == ProgressStream); taken {
+			if !finalDrain && len(lastCalls) > 0 {
+				e.noteSubagentActivity(subName, toolNames(lastCalls), totalCalls) // for the text beside the card
+			}
+			if changed {
+				r.markDirty() // the snapshot keeps the card of a turn in flight
+				r.requestRedraw(p.base, e, conv)
+			}
+			return !finalDrain
+		}
+	}
+	switch mode {
 	case ProgressStatus:
 		if !finalDrain && len(lastCalls) > 0 {
-			if ref, text, ok := e.noteSubagentActivity(subName, toolNames(lastCalls), totalCalls); ok {
-				if err := r.editProgress(ctx, e, conv, ref, text); err != nil {
+			if e.noteSubagentActivity(subName, toolNames(lastCalls), totalCalls) {
+				if _, err := r.redrawProgress(ctx, e, conv, ProgressStatus); err != nil {
 					r.logf.Warnf("subagent %s (%s): status activity: %v", conv, subName, err)
 				}
 			}
@@ -678,15 +699,31 @@ func capNotices(notices []*activityNote) []*activityNote {
 }
 
 // noteSubagentActivity records the latest inner tool(s) a subagent started for
-// status mode and returns the placeholder message and line to edit into it.
-func (e *sessionEntry) noteSubagentActivity(subagent string, tools []string, call int) (ref chat.MessageRef, text string, ok bool) {
+// status mode, reporting whether there is a progress message to show them in.
+// The caller redraws (redrawProgress), as noteActivity's does: recording and
+// rendering are apart so every render reads the state as it is when its edit
+// goes out.
+func (e *sessionEntry) noteSubagentActivity(subagent string, tools []string, call int) bool {
 	e.pmu.Lock()
 	defer e.pmu.Unlock()
 	if e.progressMsg.ID == "" || e.turnStart.IsZero() {
-		return chat.MessageRef{}, "", false
+		return false
 	}
 	e.subAgent, e.subTools, e.subCall = subagent, tools, call
-	return e.progressMsg, subTickText(time.Since(e.turnStart), e.tools, e.step, e.subAgent, e.subTools, e.subCall), true
+	return true
+}
+
+// noteCardSubagent records a batch of a subagent's frames on the turn's card.
+// taken is false when the card has nowhere to put them — no progress message,
+// or no call on it that delegated to this subagent — and the caller does what
+// it does without a card. changed is whether the card now draws differently.
+func (e *sessionEntry) noteCardSubagent(sub string, frames []subagent.Frame, detail bool) (taken, changed bool) {
+	e.pmu.Lock()
+	defer e.pmu.Unlock()
+	if e.progressMsg.ID == "" || e.turnStart.IsZero() || !e.card.follows(sub) {
+		return false, false
+	}
+	return true, e.card.addSub(sub, frames, detail, time.Now())
 }
 
 // clearSubagentActivity drops the subagent inner-tool trail from the status

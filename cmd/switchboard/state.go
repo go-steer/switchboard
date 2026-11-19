@@ -27,6 +27,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-steer/switchboard/pkg/chat"
 	"github.com/go-steer/switchboard/pkg/daemon"
 )
 
@@ -94,6 +95,28 @@ type routerState struct {
 	// apart from Sessions, and far longer, because a session is rebuilt and
 	// forgotten and the thread's owner must not be.
 	Owners map[string]threadOwner `json:"owners,omitempty"`
+	// Owed are the cards still owed the edit that finalises them (card.go),
+	// oldest first. Apart from Sessions, like Owners and for a like reason:
+	// the message is in the thread whatever becomes of the session, a
+	// conversation can owe more than one, and owing one must not make it look
+	// as if a turn were running there.
+	Owed []owedRecord `json:"owed,omitempty"`
+}
+
+// owedRecord is one card owed its last edit: the message, and what it is to
+// be edited into.
+type owedRecord struct {
+	Conversation string `json:"conversation"`
+	Message      string `json:"message"`
+	// In is the conversation key the message's own ref carried, where that
+	// differs from Conversation: an adapter can key a message it posted more
+	// narrowly than the conversation it was posted to.
+	In     string       `json:"in,omitempty"`
+	Title  string       `json:"title"`
+	Status string       `json:"status,omitempty"`
+	Steps  []stepRecord `json:"steps,omitempty"`
+	// Since is when the card first became owed the edit.
+	Since time.Time `json:"since"`
 }
 
 // sessionRecord is what it takes to re-attach one conversation.
@@ -140,6 +163,59 @@ type sessionRecord struct {
 	// Its ticker died with the process, so a revived entry takes it down
 	// rather than leave "Working… 3m" frozen in the thread.
 	Placeholder string `json:"placeholder,omitempty"`
+	// Card is what Placeholder was drawing, when that was a card that holds
+	// calls (card.go): the turn's record so far. The next process finalises
+	// the message with it instead of taking it down — deleting it would
+	// delete the record, and leaving it would leave its spinner for good —
+	// and does so at boot, whatever becomes of the session (restore). Absent
+	// for a plain clock, and once the turn has ended.
+	Card *cardRecord `json:"card,omitempty"`
+	// InFlight says a turn was in flight although Placeholder no longer says
+	// so: a shutdown finalised the turn's card and took it out of service
+	// (finishCardsAtExit), and the daemon carries on with the turn. It is
+	// what Placeholder was to the question "was a turn in flight here", for
+	// the one case that now leaves none. Absent in older snapshots, where
+	// Placeholder alone answers.
+	InFlight bool `json:"in_flight,omitempty"`
+}
+
+// owedCard is a card owed the edit that finalises it: the message, what it is
+// to be edited into, and since when. One a previous process left in flight is
+// owed being marked interrupted; one whose turn ended is owed whatever that
+// end was — done, stopped, a stretch left behind.
+type owedCard struct {
+	conv  string
+	ref   chat.MessageRef
+	act   *chat.Activity
+	since time.Time
+}
+
+// record is the owed card's durable form.
+func (o *owedCard) record() owedRecord {
+	rec := owedRecord{
+		Conversation: o.conv,
+		Message:      o.ref.ID,
+		Title:        o.act.Title,
+		Status:       string(o.act.Status),
+		Steps:        stepRecords(o.act.Steps),
+		Since:        o.since.UTC(),
+	}
+	if o.ref.Conversation != o.conv {
+		rec.In = o.ref.Conversation
+	}
+	return rec
+}
+
+// activity is what the record's message is to be edited into. Whatever the
+// file says, nothing in it is drawn as running: this is the last edit the
+// message gets. A card status that is not "failed" reads done, and a line
+// that is neither done nor failed reads unfinished.
+func (rec owedRecord) activity() *chat.Activity {
+	status := chat.StepDone
+	if chat.StepStatus(rec.Status) == chat.StepFailed {
+		status = chat.StepFailed
+	}
+	return &chat.Activity{Title: rec.Title, Status: status, Steps: interruptedSteps(rec.Steps)}
 }
 
 // askedRecord is one unanswered question, as the thread was shown it.
@@ -386,6 +462,12 @@ func (r *Router) snapshot() routerState {
 		}
 	}
 	r.omu.Unlock()
+
+	// A card owed its last edit stays in the snapshot until that edit lands,
+	// so a process that exits first leaves it for the next one.
+	for _, o := range r.owedCards() {
+		st.Owed = append(st.Owed, o.record())
+	}
 	return st
 }
 
@@ -421,8 +503,17 @@ func (e *sessionEntry) record() sessionRecord {
 	e.pmu.Lock()
 	if e.tickStop != nil || e.turnInFlight() {
 		rec.Placeholder = e.progressMsg.ID
+		if rec.Placeholder != "" {
+			// The card as it stands now, not as it was last drawn: every
+			// line a reader has seen is in it, and a redraw still owed can
+			// only have added to them.
+			rec.Card = e.card.persisted()
+		}
 	}
 	e.pmu.Unlock()
+	// A turn whose card a shutdown finalised has no placeholder to say it is
+	// in flight, and still is.
+	rec.InFlight = e.leftAtExit.Load() && e.turnInFlight()
 	return rec
 }
 
@@ -495,7 +586,44 @@ func (r *Router) restore(ctx context.Context, st routerState, now time.Time) (re
 	}
 	r.evictBindings()
 	var recent []string
+	var owed []*owedCard
+	// The cards the last process still owed their last edit: tried again
+	// now. One owed for longer than a record is kept is given up, as a
+	// record is: the file must not grow with every edit ever refused.
+	for _, o := range st.Owed {
+		if o.Conversation == "" || o.Message == "" {
+			continue
+		}
+		if !o.Since.IsZero() && now.Sub(o.Since) > dormantMaxAge {
+			r.logf.Warnf("state: giving up on message %s in %s, owed its last edit since %s; it is left as it was last drawn, which may be as running",
+				o.Message, o.Conversation, o.Since.Format(time.RFC3339))
+			continue
+		}
+		ref := chat.MessageRef{Conversation: o.Conversation, ID: o.Message}
+		if o.In != "" {
+			ref.Conversation = o.In
+		}
+		owed = append(owed, r.owe(o.Conversation, ref, o.activity(), o.Since))
+	}
 	for conv, rec := range st.Sessions {
+		// Whether a turn was in flight, read before the card is taken off
+		// the record below. The placeholder says so, and where a shutdown
+		// took the placeholder away with the card it finalised, the record
+		// says so itself.
+		inFlight := rec.Placeholder != "" || rec.InFlight
+		// A card the last process left in flight is finalised now, and here:
+		// before anything decides whether this record is kept, read, recent
+		// enough or revived. Every one of those can go against it — a record
+		// past its age, one that cannot be read, a task that was deleted or
+		// would not wake — and the card is in the thread regardless, drawn as
+		// running, with nothing else that will ever stop it. It becomes a
+		// card owed its last edit, and is taken off the record so that no
+		// revive handles it a second time.
+		if rec.Placeholder != "" && rec.Card != nil {
+			ref := chat.MessageRef{Conversation: conv, ID: rec.Placeholder}
+			owed = append(owed, r.owe(conv, ref, rec.Card.interrupted(), now))
+			rec.Placeholder, rec.Card = "", nil
+		}
 		if _, err := parseSessionRef(rec.Session); err != nil {
 			r.logf.Warnf("state: dropping the session of %s: %v", conv, err)
 			continue
@@ -508,7 +636,7 @@ func (r *Router) restore(ctx context.Context, st routerState, now time.Time) (re
 		// attaching at boot would wake every task the gateway knows — unless
 		// a turn was in flight, whose answer and placeholder would otherwise
 		// wait for somebody to speak again (caught in review).
-		if now.Sub(rec.Touched) <= r.reviveWindow() && (rec.Task == "" || rec.Placeholder != "") && !rec.TaskDeleted {
+		if now.Sub(rec.Touched) <= r.reviveWindow() && (rec.Task == "" || inFlight) && !rec.TaskDeleted {
 			recent = append(recent, conv)
 		}
 	}
@@ -566,6 +694,12 @@ func (r *Router) restore(ctx context.Context, st routerState, now time.Time) (re
 	}
 	r.omu.Unlock()
 
+	// Before the re-attaching below, which can wait on a task waking, and
+	// apart from it: each is a platform edit with retries of its own.
+	for _, o := range owed {
+		go r.finishOwed(ctx, o)
+	}
+
 	for _, conv := range recent {
 		r.mu.Lock()
 		rec, ok := r.dormant[conv]
@@ -580,6 +714,17 @@ func (r *Router) restore(ctx context.Context, st routerState, now time.Time) (re
 		revived++
 	}
 	return revived, dormant
+}
+
+// finishOwed makes the edit an owed card is owed, with every attempt it gets,
+// and settles the debt by how they went (settleOwed): paid, written off
+// because the platform refused for good, or still owed.
+func (r *Router) finishOwed(ctx context.Context, o *owedCard) {
+	// On ctx's values but not its cancellation: the edit is owed even if
+	// the run is already ending.
+	fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cardFinishGrace)
+	defer cancel()
+	r.settleOwed(o, r.finishCardNow(fctx, o.conv, o.ref, o.act))
 }
 
 // reviveWindow is how recent a restored conversation's traffic must be for it

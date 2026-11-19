@@ -29,6 +29,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 	"unicode"
 
 	"github.com/slack-go/slack"
@@ -93,6 +94,10 @@ type Adapter struct {
 	// noCustomize is set once Slack refuses to post under an agent's name
 	// for want of chat:write.customize; see identity.go.
 	noCustomize atomic.Bool
+
+	// noCards is set once Slack refuses task cards, after which tool activity
+	// goes as text; see activity.go.
+	noCards atomic.Bool
 
 	// botUserID is this bot's own user ID, resolved at Run start and
 	// used to ignore our own posts (loop guard).
@@ -394,6 +399,24 @@ func (a *Adapter) Send(ctx context.Context, r chat.Reply) (chat.MessageRef, erro
 		a.logf.Warnf("slack: decision blocks rejected for %s (%v); retrying as text", r.Conversation, err)
 	}
 
+	// Tool activity is drawn as task cards whatever RichBlocks says, for the
+	// reason a question is: the cards are what the reply is, not a styling of
+	// its prose. Rejected, it goes as the same text the cards were drawn from.
+	if blocks := a.cardBlocks(r); blocks != nil {
+		opts := append(threadOpt(thread),
+			slack.MsgOptionBlocks(toSlackBlocks(blocks)...),
+			slack.MsgOptionText(clamp(rendered, maxSectionText), false),
+		)
+		ts, err := a.postAs(ctx, channel, r.Agent, opts...)
+		if err == nil {
+			return chat.MessageRef{Conversation: landedKey(channel, thread, ts), ID: ts}, nil
+		}
+		if !isBlockRejection(err) {
+			return chat.MessageRef{}, fmt.Errorf("slack: post activity to %s: %w", r.Conversation, platformErr(err))
+		}
+		a.refuseCards(r.Conversation, err)
+	}
+
 	// Some of a chunked reply is already in the thread: finish it as chunks.
 	// Trying blocks first would post the whole reply again on top of the
 	// parts that are there, if the blocks render now succeeds where it was
@@ -482,6 +505,24 @@ func (a *Adapter) Update(ctx context.Context, ref chat.MessageRef, r chat.Reply)
 	}
 	rendered := toMrkdwn(r.Text)
 
+	// As in Send: activity as task cards whatever RichBlocks says. An edit
+	// that carries no Activity — the clock before the first tool, a retired
+	// placeholder's final line — takes the paths below, and the text path's
+	// explicit empty block set is what takes the cards down.
+	if blocks := a.cardBlocks(r); blocks != nil {
+		_, _, _, err := a.api.UpdateMessageContext(ctx, channel, ref.ID,
+			slack.MsgOptionBlocks(toSlackBlocks(blocks)...),
+			slack.MsgOptionText(clamp(rendered, maxSectionText), false),
+		)
+		if err == nil {
+			return nil
+		}
+		if !isBlockRejection(err) {
+			return fmt.Errorf("slack: update activity in %s: %w", ref.Conversation, platformErr(err))
+		}
+		a.refuseCards(ref.Conversation, err)
+	}
+
 	if a.richBlocks {
 		blocks := sanitizeBlocks(withUsageFooter(renderBlocks(r.Text, toMrkdwn), r.Usage))
 		if blocks != nil {
@@ -532,10 +573,16 @@ func (a *Adapter) Delete(ctx context.Context, ref chat.MessageRef) error {
 	return nil
 }
 
-// clamp truncates s to at most max bytes, mirroring Slack's field limits.
+// clamp truncates s to at most max bytes, mirroring Slack's field limits, and
+// never inside a character: the cut falls back to the start of the rune it
+// would have split. It used to cut on the byte, which for text full of
+// multi-byte marks — a kept card's record, which lists every call and is
+// routinely longer than one message — ended the field on half a character.
+// What comes back is always a prefix of what the byte cut returned, so it
+// fits wherever that did.
 func clamp(s string, max int) string {
 	if len(s) > max {
-		return s[:max]
+		return s[:runeBoundary(s, max)]
 	}
 	return s
 }
@@ -572,14 +619,30 @@ func classify(err error) error {
 
 // platformErr wraps a Slack failure with its classification, if it has one.
 // The result reads exactly like err (no sentinel noise in the log line) but
-// errors.Is finds chat.ErrNotFound / chat.ErrDenied through it.
+// errors.Is finds chat.ErrNotFound / chat.ErrDenied through it, and
+// chat.RetryAfter finds the delay Slack sent with a rate limit.
 func platformErr(err error) error {
+	var limited *slack.RateLimitedError
+	if errors.As(err, &limited) {
+		return rateLimitedError{err: err, after: limited.RetryAfter}
+	}
 	class := classify(err)
 	if class == nil {
 		return err
 	}
 	return classifiedError{err: err, class: class}
 }
+
+// rateLimitedError carries a rate-limited call's error and the delay Slack
+// asked for (its Retry-After header), for chat.RetryAfter.
+type rateLimitedError struct {
+	err   error
+	after time.Duration
+}
+
+func (e rateLimitedError) Error() string             { return e.err.Error() }
+func (e rateLimitedError) Unwrap() error             { return e.err }
+func (e rateLimitedError) RetryAfter() time.Duration { return e.after }
 
 // classifiedError carries a platform error and its neutral classification.
 type classifiedError struct {

@@ -689,17 +689,19 @@ the process default:
 | Mode | Behavior |
 |------|----------|
 | `indicator` (default) | posts a "⏳ Working…" placeholder with a running clock, deleted when the reply lands (on Google Chat, finalised as "✔ Done · 12s" instead) |
-| `status` | keeps one message per turn, edited in place with the clock and the running tool |
-| `stream` | the `indicator` clock, plus a notice per tool frame — tool, argument, verdict, how long it took — that stays as a log |
+| `status` | keeps one message per turn, edited in place with the clock and the running tool (on Slack, drawn as one `task_card` and kept when the turn ran tools) |
+| `stream` | on Slack, one `task_card` per turn with arguments, durations, and a 5-line live window while running, kept as the turn's record; on Google Chat, the `indicator` clock plus a permanent notice per tool frame |
 | `off` | silent until the reply is ready |
 
 In every mode but `off` the placeholder ticks: every 15 seconds it is
 re-rendered with how long the turn has been running, and in `status` with the
-tool it is on. In `stream` it carries the clock alone, since the tools are on
-their own notices, and like `indicator`'s it is deleted when the answer lands.
-It is posted when the turn starts, so in a busy `stream` turn it sits above the
-notices rather than following them down; moving it after every notice would
-cost two more API calls per tool frame.
+tool it is on. On Slack, once a `status` or `stream` turn calls a tool, that
+placeholder becomes the turn's single `task_card` (see below). Where activity
+cards are not drawn (Google Chat, or Slack if cards are refused), `stream`
+carries the clock alone on the placeholder and posts each tool frame as its own
+notice; the clock placeholder is retired when the answer lands, and sits above
+the notices rather than following them down because moving it after every
+notice would cost two more API calls per tool frame.
 
 ```
 ⏳ Working… 45s
@@ -714,6 +716,43 @@ refused, lost its stream or never reached the agent. For the same reason, the
 clock isn't moved below narration on Chat. Moving it is a post and a delete,
 so it stays where it is. On Slack, where a delete leaves nothing, the
 placeholder is deleted as before.
+
+**On Slack, a turn's tool activity is drawn as one `task_card`.** Slack's
+`task_card` block folds to one title line by default (spinner while running,
+check when complete, warning triangle when stopped or interrupted), with a
+chevron to expand its `details`, and stays open across `chat.update` edits when
+given a fixed `block_id`. Once a turn in `status` or `stream` calls its first
+tool, the progress placeholder becomes that single card, edited in place
+(coalesced to at most one redraw every 3 seconds, backing off on edit errors)
+and **kept** above the answer when the turn ends instead of being deleted:
+
+- **Title:** `Working… 3m10s · 26 calls · _fallback › get_k8s_logs` while
+  running, then `Done · 5m02s · 61 calls` (with `(2 failed)` if any failed),
+  `Stopped · 1m12s · 9 calls`, or `Interrupted by a restart · 9 calls` when a
+  graceful shutdown or `--state-dir` restore settles an in-flight card.
+- **Details:** every call the turn ran, with subagent inner calls (`_fallback`,
+  `propose-change`, `spawn_agent`) indented under the parent call that
+  delegated to them, and adjacent identical calls collapsed (`×3`). `status`
+  keeps tool names and verdicts only; `stream` adds each call's duration
+  (including `<0.1s`) and redacted argument summary.
+- **Live window in `stream`:** while a `stream` turn is running, a second
+  `rich_text` block directly below the folded card shows the latest five lines
+  without requiring a click; when the turn finishes, the window is removed so
+  the kept record folds to one line.
+- **Splits, rollover, and fallback:** mid-turn narration freezes the calls so
+  far above the narration and continues in a fresh card below; a card reaching
+  400 lines rolls over to a continuation message so no call is dropped; calls
+  with no result in a frozen or interrupted segment show a neutral `–` mark
+  (`N unfinished`). Finalising edits retry on transient failures (honouring
+  `Retry-After`), are bounded to 5 seconds during graceful shutdown, and are
+  remembered across restarts under `--state-dir` when a transient outage
+  outlasts the process. A turn that ran no tools has only a clock, deleted as
+  before. Plain fallback text accompanies every card (clamped rune-safely to a
+  single Slack message) and becomes the message if Slack refuses `task_card`
+  with `invalid_blocks`: the turn already in flight keeps its single-message
+  record as text, and subsequent turns run without cards until restart. Cards
+  need no extra scope or manifest setting. Google Chat draws no activity cards
+  and keeps its per-frame notices unchanged.
 
 The clock is what makes a long turn readable. A turn that runs for four minutes
 without calling a tool has nothing else to say for itself, and a static
@@ -763,10 +802,13 @@ footers can therefore land on the wrong answer (#42).
 #### What `stream` shows
 
 `stream` is the mode that exists to show detail, so it shows the tool, one
-argument, and the verdict once the call finishes. One notice per *frame*, not
-per call: a frame carrying three concurrent shells is three blocks under one
-header, and the results tick those blocks off by editing the notice in place
-rather than posting again.
+argument, and the verdict once the call finishes. On Slack, those lines sit
+inside the turn's `task_card` (and the latest five appear in the live window
+below it while running). Where activity cards are not drawn (Google Chat, or
+Slack if cards are refused), `stream` posts one standalone notice per *frame*,
+not per call: a frame carrying three concurrent shells is three blocks under
+one header, and the results tick those blocks off by editing the notice in
+place rather than posting again.
 
 Each call is a small block: the tool and its verdict, the argument in a code
 block, and how long it took on its own line. A notice for one call reads
@@ -805,19 +847,24 @@ Chat keeps them apart.
 
 A finished call says how long it ran, measured at the gateway from when its
 call arrived to when its result did, so it includes the stream's latency both
-ways (and any reconnect in between). A call under a tenth of a second shows no
-time, and neither does a collapsed `×3` call, whose calls each took their own
-time.
+ways (and any reconnect in between). In a standalone notice (Google Chat, or
+Slack when cards are refused), a call under a tenth of a second shows no time,
+and neither does a collapsed `×3` call, whose calls each took their own time;
+inside a Slack `task_card`, sub-100ms calls show `<0.1s` so every finished line
+in the column carries a duration.
 
 Calls that a reader could not tell apart — same tool, same argument, same
 verdict — collapse to **bash** ×3 rather than repeating the block
 (`` `bash` ×3 `` in `status`'s terse line).
 
-**The notices are permanent, by decision.** `indicator` and `status` clean up
-after themselves; `stream` accumulates, and the trail it leaves is the reason to
-choose it over the other two. Retiring the notices when the answer lands would
-make `stream` a noisier `indicator`. A thread that wants no residue should use
-`indicator` or `off`.
+**The trail is permanent, by decision.** `indicator` cleans up after itself,
+and so does `status` on Google Chat (or on Slack when a turn ran no tools). On
+Slack, both `status` and `stream` keep one folded `task_card` per turn (plus
+any rollover or narration segments); on Google Chat, `stream` accumulates one
+notice per tool frame, and the trail it leaves is the reason to choose it over
+the other two. Retiring the trail when the answer lands would make `stream` a
+noisier `indicator`. A thread that wants no residue should use `indicator` or
+`off`.
 
 **Arguments are a disclosure decision.** Tool arguments are untrusted,
 unbounded, and exactly where a secret turns up: a shell command line with a
@@ -1486,15 +1533,19 @@ answer the dead process may have posted is looked for in the thread before it
 is posted again — which needs the optional history scopes (see
 [Slack setup](docs/slack-setup.md)); without them, or if Slack has not yet
 returned a message it accepted, the worst case is one duplicate message.
-Progress notices stay at-least-once. Questions
-still on screen are not asked again, a "Working…" placeholder a turn had up is
-taken down, and ingress bindings and `progress` overrides survive too. The
-directory is created `0700` — the file names who spoke in every thread; a
-directory switchboard cannot write stops the run at startup; a file it cannot
-parse is moved aside with an error rather than stopping it; and a thread
-nobody has spoken in for 30 days is forgotten. If the daemon itself lost its
-sessions, each recently active thread is told so once, as it would be on any
-other lost session.
+Progress notices stay at-least-once. Questions still on screen are not asked
+again, a plain "Working…" clock placeholder a turn had up is taken down, an
+in-flight Slack activity card is finalised as `Interrupted by a restart · N
+calls` (and any card whose finalising edit was still owed after transient API
+failures is retried on boot, up to 30 days), and ingress bindings and
+`progress` overrides survive too. The directory is created `0700` (the file is
+`0600`) — it names who spoke in every thread and, for an in-flight or owed
+Slack `stream` card, holds the card's redacted 120-byte argument summaries (`status`
+stores tool names only); a directory switchboard cannot write stops the run at
+startup; a file it cannot parse is moved aside with an error rather than
+stopping it; and a thread nobody has spoken in for 30 days is forgotten. If the
+daemon itself lost its sessions, each recently active thread is told so once,
+as it would be on any other lost session.
 
 With `--state-dir`, a conversation idle for **`--session-idle-ttl`** (default
 `12h`, `0` for never) releases its daemon streams — the relay and the prompt

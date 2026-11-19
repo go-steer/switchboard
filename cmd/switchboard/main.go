@@ -1010,8 +1010,19 @@ func runServe(args []string) (err error) {
 		runErr = ctx.Err()
 	}
 
-	// The run is over: bring the listeners down with it and collect what they
-	// have to say.
+	// The run is over. First, while there is still time to reach the
+	// platform: a card left as it was last drawn spins for good, so every one
+	// still running is finalised as interrupted. Whatever ended the run — the
+	// adapter can fail without ctx having been cancelled — nothing may feed a
+	// card from here on, so the relays are stopped before it. With or without
+	// --state-dir, and ahead of the last snapshot (the deferred saveState
+	// above), which then no longer names the cards this finalised.
+	stop()
+	if router != nil { // an outbound-only run has no router, and no cards
+		router.finishCardsAtExit(ctx)
+	}
+
+	// Then bring the listeners down and collect what they have to say.
 	if srvErr := stopListeners(stop, listeners, srvErrs); srvErr != nil {
 		// serveOptional already logged this one, with the name of the listener
 		// that failed attached.

@@ -22,6 +22,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-steer/switchboard/pkg/chat"
 )
@@ -99,5 +100,52 @@ func TestFitsOneMessage(t *testing.T) {
 	ampersands := strings.Repeat("&", slackTextLimit-1)
 	if a.FitsOneMessage(ampersands) {
 		t.Error("escaping growth was ignored; Slack would truncate the message")
+	}
+}
+
+// A rate limit that came with a delay says so in a way a caller outside this
+// package can read (chat.RetryAfter), and the error still reads as Slack's.
+func TestARateLimitCarriesItsDelay(t *testing.T) {
+	mux := http.NewServeMux()
+	limited := func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "7")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}
+	mux.HandleFunc("/chat.postMessage", limited)
+	mux.HandleFunc("/chat.update", limited)
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	a := newTestAdapter(srv.URL)
+
+	ref := chat.MessageRef{Conversation: "C0:100.5", ID: "111.111"}
+	for name, err := range map[string]error{
+		"a text edit": a.Update(context.Background(), ref, chat.Reply{Conversation: "C0:100.5", Text: "hi"}),
+		"a card edit": a.Update(context.Background(), ref, chat.Reply{Conversation: "C0:100.5", Text: "hi",
+			Activity: &chat.Activity{Title: "Done · 5s · 1 call", Status: chat.StepDone}}),
+	} {
+		if err == nil {
+			t.Fatalf("%s: no error from a rate-limited call", name)
+		}
+		after, ok := chat.RetryAfter(err)
+		if !ok || after != 7*time.Second {
+			t.Errorf("%s: RetryAfter = %v, %t; want the 7s Slack asked for (%v)", name, after, ok, err)
+		}
+		if !strings.Contains(err.Error(), "rate limit") {
+			t.Errorf("%s: error %q no longer reads as Slack's", name, err)
+		}
+		if errors.Is(err, chat.ErrNotFound) || errors.Is(err, chat.ErrDenied) {
+			t.Errorf("%s: a rate limit was classified as permanent", name)
+		}
+	}
+	// An error with no delay says it has none.
+	if _, ok := chat.RetryAfter(errors.New("boom")); ok {
+		t.Error("RetryAfter found a delay in an error that carries none")
+	}
+	if _, ok := chat.RetryAfter(nil); ok {
+		t.Error("RetryAfter found a delay in no error")
+	}
+	// A rate-limited card is not a refused one: the adapter keeps drawing.
+	if !a.DrawsActivity() {
+		t.Error("a rate limit stopped the cards; only a refusal should")
 	}
 }
