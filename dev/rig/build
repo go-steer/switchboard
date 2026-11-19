@@ -62,12 +62,8 @@ build_core_agent() (
   local repo="${RIG_CORE_AGENT_REPO:-https://github.com/go-steer/core-agent}"
   local ref="${RIG_CORE_AGENT_REF:-main}"
   local sha
-  if [[ $ref =~ ^[0-9a-f]{40}$ ]]; then
-    sha="$ref"
-  else
-    sha="$(git ls-remote "$repo" "refs/heads/$ref" "refs/tags/$ref" | awk 'NR==1{print $1}')"
-    [[ -n $sha ]] || rig_die "core-agent: no branch or tag $ref in $repo"
-  fi
+  sha="$(rig_resolve_ref "$repo" "$ref")"
+  [[ -n $sha ]] || rig_die "core-agent: no branch or tag $ref in $repo"
   echo "== core-agent $ref = $sha"
 
   local stamp="$RIG_STATE/core-agent.commit"
@@ -113,7 +109,9 @@ build_core_agent() (
 
 build_cloudflared() {
   local dst="$RIG_STATE/bin/cloudflared" found
-  if found="$(command -v cloudflared)"; then
+  # Skip what PATH finds in the state directory itself (it would link
+  # to itself).
+  if found="$(command -v cloudflared)" && [[ $found != "$dst" ]]; then
     ln -sf "$found" "$dst"
     echo "== cloudflared linked from $found"
     return

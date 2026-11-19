@@ -68,7 +68,12 @@ rig_bin() {
 rig_token() {
   local f="$RIG_STATE/daemon-token"
   if [[ ! -s $f ]]; then
-    (umask 077 && printf 'tok_rig_%s\n' "$(od -An -tx1 -N18 /dev/urandom | tr -d ' \n')" >"$f")
+    # Written aside and linked into place, which fails if another script
+    # got there first: two starting at once still end up sharing one.
+    local tmp="$f.$$"
+    (umask 077 && printf 'tok_rig_%s\n' "$(od -An -tx1 -N18 /dev/urandom | tr -d ' \n')" >"$tmp")
+    ln "$tmp" "$f" 2>/dev/null || true
+    rm -f "$tmp"
   fi
   SWITCHBOARD_DAEMON_TOKEN="$(<"$f")"
   export SWITCHBOARD_DAEMON_TOKEN
@@ -82,25 +87,44 @@ rig_secret_file() {
   [[ -n $f ]] || rig_die "$var is not set in $rig_env"
   [[ -f $f ]] || rig_die "$var names $f, which does not exist"
   local perms
-  perms="$(ls -l "$f" | cut -c5-10)"
+  # -L: a symlink's own mode is always open; what matters is the target's.
+  perms="$(ls -lL "$f" | cut -c5-10)"
   if [[ $perms != "------" ]]; then
-    rig_die "$f is readable by others ($(ls -l "$f" | cut -c1-10)): chmod 600 $f"
+    rig_die "$f is readable by others ($(ls -lL "$f" | cut -c1-10)): chmod 600 $f"
   fi
 }
 
 # rig_log NAME tees the rest of the script's output, and whatever it execs,
-# to a fresh log under the state directory.
+# to a fresh log under the state directory. tee ignores SIGINT (-i): Ctrl-C
+# reaches the whole foreground group, and a tee that died with it would
+# turn the binary's first shutdown log line into a SIGPIPE, cutting its
+# graceful exit short.
 rig_log() {
   local log
   log="$RIG_STATE/logs/$1-$(date +%Y%m%dT%H%M%S).log"
   echo "rig: logging to $log" >&2
-  exec > >(tee -a "$log") 2>&1
+  exec > >(tee -i -a "$log") 2>&1
 }
 
-# rig_procs lists the rig's running processes: anything executing a binary
-# out of the state directory. Matching on that path, not on a name, is what
-# keeps it off the wrapper shells and off anything else on the machine
-# called switchboard.
+# rig_procs lists the rig's running processes: those whose executable (the
+# first word of the command line) is a binary in the state directory.
+# Matching that path, not a name, keeps it off the wrapper shells, off
+# anything else on the machine called switchboard, and off commands that
+# merely mention the path (a build writing to it, a tail reading a log).
+# -ww: procps otherwise cuts lines at $COLUMNS when it is set.
 rig_procs() {
-  ps -eo pid=,args= | awk -v p="$RIG_STATE/bin/" 'index($0, p) && !/awk -v p=/'
+  ps -ww -eo pid=,args= | awk -v p="$RIG_STATE/bin/" 'index($2, p) == 1'
+}
+
+# rig_resolve_ref prints the commit a core-agent branch, tag or SHA names.
+# An annotated tag's own line is the tag object; its ^{} line is the commit.
+rig_resolve_ref() {
+  local repo="$1" ref="$2"
+  if [[ $ref =~ ^[0-9a-f]{40}$ ]]; then
+    printf '%s\n' "$ref"
+    return
+  fi
+  git ls-remote "$repo" "refs/heads/$ref" "refs/tags/$ref" "refs/tags/$ref^{}" |
+    awk '$2 ~ /\^\{\}$/ {peeled = $1} {if (first == "") first = $1}
+         END {print (peeled != "" ? peeled : first)}'
 }

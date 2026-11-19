@@ -43,6 +43,19 @@ else
   echo "rig: no persona at $persona; the daemon runs without one" >&2
 fi
 
+# RIG_PROVIDER belongs to RIG_MODEL. When the model that will actually run
+# is echo (from rig.env, or a --model echo override) and no --provider is
+# given on the command line, leave it off, so dev/demo/daemon picks the
+# echo provider instead of running Vertex for a model called echo.
+model="${RIG_MODEL:-echo}"
+provider_arg=0
+prev=""
+for a in "$@"; do
+  [[ $prev != --model ]] || model="$a"
+  [[ $a != --provider ]] || provider_arg=1
+  prev="$a"
+done
+
 args=(
   --bin "$bin"
   --workdir "$workdir"
@@ -50,7 +63,9 @@ args=(
   --model "${RIG_MODEL:-echo}"
   --permissions "${RIG_PERMISSIONS:-yolo}"
 )
-[[ -z ${RIG_PROVIDER:-} ]] || args+=(--provider "$RIG_PROVIDER")
+if [[ -n ${RIG_PROVIDER:-} && $model != echo ]] && ((!provider_arg)); then
+  args+=(--provider "$RIG_PROVIDER")
+fi
 # shellcheck disable=SC2206 # a space-separated list, split on purpose
 callers=(${RIG_CALLERS:-})
 for c in ${callers+"${callers[@]}"}; do

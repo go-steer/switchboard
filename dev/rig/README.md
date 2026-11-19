@@ -123,7 +123,9 @@ HTTP ingress (downloaded on Linux; `brew install cloudflared` on macOS).
    gcloud auth application-default login
    ```
 
-   `RIG_MODEL=echo` needs nothing and is enough to test transport.
+   `RIG_MODEL=echo` (or `dev/rig/daemon --model echo` for one run) needs
+   nothing and is enough to test transport; the rig leaves `RIG_PROVIDER`
+   off whenever the model is echo.
 
 4. **Build** and check:
 
@@ -188,7 +190,7 @@ one), but keep it up only while you are testing.
 ```sh
 dev/rig/daemon --permissions ask
 dev/rig/slack --approvals
-dev/rig/chat --http      # Chat buttons need the HTTP ingress
+dev/rig/chat --http --approvals   # Chat buttons need the HTTP ingress
 ```
 
 `ask` also turns off core-agent's built-in allow list, so even `ls` asks.

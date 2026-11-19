@@ -20,7 +20,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   also turns off core-agent's built-in allow list, so approvals can be
   tested end to end.
 - **`verify-no-secrets` presubmit.** Fails on anything shaped like a private
-  key or a live Slack, Google API or GitHub token, in tracked files and in
+  key or a live Slack (including rotating and refresh forms), Google API or
+  GitHub (classic or fine-grained) token, in tracked files and in
   untracked ones git is not ignoring.
 
 ### Changed

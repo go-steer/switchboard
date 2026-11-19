@@ -27,7 +27,7 @@ if [[ -z $procs ]]; then
 fi
 printf '%s\n' "$procs"
 # shellcheck disable=SC2086 # one PID per word
-kill $(awk '{print $1}' <<<"$procs")
+kill $(awk '{print $1}' <<<"$procs") 2>/dev/null || true # one may have exited already
 for _ in $(seq 20); do
   [[ -n $(rig_procs) ]] || { echo "stopped"; exit 0; }
   sleep 0.5

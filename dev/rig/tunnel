@@ -32,7 +32,8 @@ trap 'kill "$pid" 2>/dev/null; rm -f "$url_file"' EXIT INT TERM
 
 url=""
 for _ in $(seq 60); do
-  url="$(grep -Eo 'https://[a-z0-9-]+\.trycloudflare\.com' "$log" | head -1 || true)"
+  # api.trycloudflare.com shows up in cloudflared's own error lines.
+  url="$(grep -Eo 'https://[a-z0-9-]+\.trycloudflare\.com' "$log" | grep -v '^https://api\.' | head -1 || true)"
   [[ -z $url ]] || break
   kill -0 "$pid" 2>/dev/null || { cat "$log" >&2; rig_die "cloudflared exited"; }
   sleep 0.5

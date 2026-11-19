@@ -29,15 +29,16 @@ for b in switchboard core-agent cloudflared; do
     continue
   fi
   case "$b" in
-    switchboard) v="$("$p" version 2>&1 | head -1)" ;;
-    *) v="$("$p" --version 2>&1 | head -1)" ;;
+    switchboard) v="$("$p" version 2>&1 | head -1)" || true ;;
+    *) v="$("$p" --version 2>&1 | head -1)" || true ;;
   esac
   printf '%-12s %s\n' "$b" "$v"
 done
 if [[ -f $RIG_STATE/core-agent.commit ]]; then
   echo
   echo "core-agent was built from $(<"$RIG_STATE/core-agent.commit")."
-  echo "${RIG_CORE_AGENT_REF:-main} is now $(git ls-remote "${RIG_CORE_AGENT_REPO:-https://github.com/go-steer/core-agent}" "refs/heads/${RIG_CORE_AGENT_REF:-main}" 2>/dev/null | awk '{print $1}' || true)"
+  now="$(rig_resolve_ref "${RIG_CORE_AGENT_REPO:-https://github.com/go-steer/core-agent}" "${RIG_CORE_AGENT_REF:-main}" 2>/dev/null)" || true
+  echo "${RIG_CORE_AGENT_REF:-main} is now ${now:-(could not ask the remote)}"
 fi
 if [[ -s $RIG_STATE/tunnel-url ]]; then
   echo
