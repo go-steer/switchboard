@@ -1,0 +1,414 @@
+#!/usr/bin/env bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Stand up a local Slack live-testing rig against a real core-agent running a
+# shipmind SRE bundle (gke-chat by default: the `_fallback` specialist over
+# Google's hosted read-only GKE MCP endpoint) on Vertex AI.
+#
+# Where dev/demo/daemon stands up a bare core-agent (echo by default), this
+# imports a multi-step subagent workload and drives it from a Slack test app so
+# subagent polling, task_card rendering, and usage footers can be exercised end
+# to end on a workstation without deploying to a cluster.
+#
+# For local testing only: writes a generated daemon bearer token and session DB
+# under --workdir (default: ./.demo-rig, git-ignored), never prints tokens, and
+# reads Slack and Vertex settings from env files or the shell environment.
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "$0")/../.." && pwd)"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  dev/demo/slack-rig info        [options]
+  dev/demo/slack-rig smoke       [options] -- "PROMPT"
+  dev/demo/slack-rig agent       [options]
+  dev/demo/slack-rig switchboard [options]
+
+Subcommands:
+  info         Print resolved core-agent ref, bundle, model, cluster, and paths; start nothing.
+  smoke        Run one headless turn against core-agent (no Slack) to verify Vertex + MCP + subagent.
+  agent        Build core-agent at --ref, import the bundle, and run the attach daemon in the foreground.
+  switchboard  Build switchboard from --switchboard-src and connect it to Slack Socket Mode in the foreground.
+
+Options (every option also reads an env var so a personal rig env file can set defaults):
+  --workdir DIR           Scratch dir for binaries, imported bundle, and state
+                          (default: $RIG_WORKDIR or ./.demo-rig)
+  --ref REF               core-agent git tag or commit to build; defaults to the highest version
+                          tag on origin, release candidates included (env: $RIG_REF)
+  --core-agent-repo DIR   Local core-agent git clone (default: $CORE_AGENT_REPO or ../core-agent)
+  --shipmind-repo DIR     Local shipmind git clone holding agents/sre-triage/<bundle>
+                          (default: $SHIPMIND_REPO or ../shipmind)
+  --switchboard-src DIR   Switchboard checkout to build (default: $SWITCHBOARD_SRC or this repo root)
+  --bundle NAME           Bundle under agents/sre-triage/ (default: $RIG_BUNDLE or gke-chat)
+  --model NAME            Vertex model ID (default: $RIG_MODEL or gemini-3.8-flash)
+  --port N                Loopback attach port (default: $RIG_PORT or 7777)
+  --caller IDENTITY       Caller identity switchboard may assert; repeatable
+                          (default: $RIG_CALLER or `gcloud config get-value core/account`)
+  --cluster PATH          Full GKE cluster resource path:
+                          projects/<project>/locations/<location>/clusters/<name>
+                          (env: $RIG_CLUSTER_PATH; required for agent and smoke)
+  --progress-mode MODE    Initial switchboard --progress-mode (default: $RIG_PROGRESS_MODE or stream)
+  --model-env FILE        Optional env file sourced before core-agent (env: $RIG_MODEL_ENV)
+  --slack-env FILE        Optional env file sourced before switchboard (env: $RIG_SLACK_ENV;
+                          must export SWITCHBOARD_SLACK_APP_TOKEN and SWITCHBOARD_SLACK_BOT_TOKEN
+                          if not already in the environment)
+  --gotoolchain NAME      GOTOOLCHAIN for go build (default: $RIG_GOTOOLCHAIN, else read from go.mod)
+  -h, --help              Show this help.
+
+Example (two terminals):
+  # Terminal 1 — core-agent daemon
+  dev/demo/slack-rig agent \
+    --cluster projects/my-proj/locations/us-central1-b/clusters/my-dev-cluster \
+    --model-env ~/scripts/gemini-env.sh
+
+  # Terminal 2 — switchboard on Slack Socket Mode
+  dev/demo/slack-rig switchboard --slack-env ~/scripts/slack-dev-rig.env
+EOF
+}
+
+if [[ $# -eq 0 ]]; then
+  usage >&2
+  exit 2
+fi
+
+case "$1" in
+  -h|--help) usage; exit 0 ;;
+  info|smoke|agent|switchboard) cmd="$1"; shift ;;
+  *) echo "unknown subcommand: $1" >&2; usage >&2; exit 2 ;;
+esac
+
+workdir="${RIG_WORKDIR:-$repo_root/.demo-rig}"
+ref="${RIG_REF:-}"
+core_agent_repo="${CORE_AGENT_REPO:-$repo_root/../core-agent}"
+shipmind_repo="${SHIPMIND_REPO:-$repo_root/../shipmind}"
+switchboard_src="${SWITCHBOARD_SRC:-$repo_root}"
+bundle="${RIG_BUNDLE:-gke-chat}"
+model="${RIG_MODEL:-gemini-3.8-flash}"
+port="${RIG_PORT:-7777}"
+callers=()
+if [[ -n "${RIG_CALLER:-}" ]]; then
+  callers+=("$RIG_CALLER")
+fi
+cluster_path="${RIG_CLUSTER_PATH:-}"
+progress_mode="${RIG_PROGRESS_MODE:-stream}"
+model_env="${RIG_MODEL_ENV:-}"
+slack_env="${RIG_SLACK_ENV:-}"
+gotc="${RIG_GOTOOLCHAIN:-}"
+prompt_args=()
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --workdir) workdir="${2:?--workdir needs a path}"; shift 2 ;;
+    --ref) ref="${2:?--ref needs a tag or commit}"; shift 2 ;;
+    --core-agent-repo) core_agent_repo="${2:?--core-agent-repo needs a path}"; shift 2 ;;
+    --shipmind-repo) shipmind_repo="${2:?--shipmind-repo needs a path}"; shift 2 ;;
+    --switchboard-src) switchboard_src="${2:?--switchboard-src needs a path}"; shift 2 ;;
+    --bundle) bundle="${2:?--bundle needs a name}"; shift 2 ;;
+    --model) model="${2:?--model needs a model id}"; shift 2 ;;
+    --port) port="${2:?--port needs a port number}"; shift 2 ;;
+    --caller) callers+=("${2:?--caller needs an identity}"); shift 2 ;;
+    --cluster) cluster_path="${2:?--cluster needs projects/<p>/locations/<l>/clusters/<c>}"; shift 2 ;;
+    --progress-mode) progress_mode="${2:?--progress-mode needs off|indicator|status|stream}"; shift 2 ;;
+    --model-env) model_env="${2:?--model-env needs a file path}"; shift 2 ;;
+    --slack-env) slack_env="${2:?--slack-env needs a file path}"; shift 2 ;;
+    --gotoolchain) gotc="${2:?--gotoolchain needs a value}"; shift 2 ;;
+    --) shift; prompt_args=("$@"); break ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+if [[ ! $port =~ ^[0-9]+$ ]] || (( port < 1 || port > 65535 )); then
+  echo "not a valid port: $port" >&2
+  exit 2
+fi
+
+if (( ${#callers[@]} == 0 )); then
+  acct="$(gcloud config get-value core/account 2>/dev/null || true)"
+  if [[ -n $acct && $acct != "(unset)" ]]; then
+    callers+=("$acct")
+  fi
+fi
+
+bot_identity="sa:switchboard-bot"
+for id in "$bot_identity" ${callers+"${callers[@]}"}; do
+  if [[ ! $id =~ ^[A-Za-z0-9._:@/+-]+$ ]]; then
+    echo "identity has characters that are not allowed: $id" >&2
+    exit 2
+  fi
+done
+if [[ ! $model =~ ^[A-Za-z0-9._:@/+-]+$ ]]; then
+  echo "model name has characters that are not allowed: $model" >&2
+  exit 2
+fi
+if [[ ! $bundle =~ ^[A-Za-z0-9._-]+$ ]]; then
+  echo "bundle name has characters that are not allowed: $bundle" >&2
+  exit 2
+fi
+
+mkdir -p "$workdir"
+workdir="$(cd "$workdir" && pwd)"
+mkdir -p "$workdir/bin" "$workdir/src" "$workdir/agent" "$workdir/state" "$workdir/log"
+
+default_gotoolchain() {
+  local gomod="$1/go.mod" v
+  if [[ -n $gotc ]]; then
+    echo "$gotc"
+    return
+  fi
+  v="$(awk '/^toolchain go[0-9]/{print $2; exit}' "$gomod" 2>/dev/null || true)"
+  if [[ -z $v ]]; then
+    v="$(awk '/^go [0-9]+\.[0-9]+/{print "go"$2; exit}' "$gomod" 2>/dev/null || true)"
+  fi
+  echo "${v:-auto}"
+}
+
+latest_tag() {
+  git -C "$core_agent_repo" -c versionsort.suffix=-rc ls-remote --tags --refs --sort=-v:refname origin 'v*' \
+    | head -1 | sed 's#.*refs/tags/##'
+}
+
+# resolve REF -> "ref commit", fetching from origin if the local clone lacks it.
+resolve_ref() {
+  local want="${1:-}"
+  [[ -d "$core_agent_repo/.git" || -f "$core_agent_repo/.git" ]] || {
+    echo "core-agent repo not found at $core_agent_repo (pass --core-agent-repo)" >&2
+    exit 2
+  }
+  [[ -n $want ]] || want="$(latest_tag)"
+  [[ -n $want ]] || { echo "could not resolve latest core-agent tag from origin" >&2; exit 1; }
+  if ! git -C "$core_agent_repo" rev-parse -q --verify "$want^{commit}" >/dev/null; then
+    git -C "$core_agent_repo" fetch -q origin "refs/tags/$want:refs/tags/$want" 2>/dev/null \
+      || git -C "$core_agent_repo" fetch -q origin "$want"
+  fi
+  local commit
+  commit="$(git -C "$core_agent_repo" rev-parse --short=12 "$want^{commit}" 2>/dev/null \
+    || git -C "$core_agent_repo" rev-parse --short=12 FETCH_HEAD)"
+  echo "$want $commit"
+}
+
+# build_core_agent REF COMMIT -> binary path. Built from a git archive export so
+# the developer's core-agent working tree is never touched; cached per commit.
+build_core_agent() {
+  local build_ref="$1" commit="$2"
+  local bin="$workdir/bin/core-agent-$commit" src="$workdir/src/core-agent-$commit"
+  if [[ ! -x $bin ]]; then
+    if [[ ! -d $src ]]; then
+      mkdir -p "$src"
+      git -C "$core_agent_repo" archive "$commit" | tar -x -C "$src"
+    fi
+    local tc pkg="github.com/go-steer/core-agent/v3/internal/version"
+    tc="$(default_gotoolchain "$src")"
+    (cd "$src" && GOTOOLCHAIN="$tc" CGO_ENABLED=0 go build -trimpath \
+      -ldflags "-X $pkg.Version=$build_ref -X $pkg.Commit=$commit" -o "$bin" ./cmd/core-agent) >&2
+  fi
+  echo "$bin"
+}
+
+daemon_token_file() {
+  local f="$workdir/state/daemon.token"
+  if [[ ! -s $f ]]; then
+    (umask 077; printf 'tok_%s' "$(od -An -tx1 -N18 /dev/urandom | tr -d ' \n')" >"$f")
+  fi
+  echo "$f"
+}
+
+validate_cluster_path() {
+  if [[ -z $cluster_path ]]; then
+    echo "$cmd requires --cluster projects/<project>/locations/<location>/clusters/<name> (or \$RIG_CLUSTER_PATH)" >&2
+    exit 2
+  fi
+  if [[ ! $cluster_path =~ ^projects/[A-Za-z0-9._:-]+/locations/[A-Za-z0-9._-]+/clusters/[A-Za-z0-9._-]+$ ]]; then
+    echo "malformed --cluster path: $cluster_path (want projects/<p>/locations/<l>/clusters/<c>)" >&2
+    exit 2
+  fi
+}
+
+# The flags shipmind's task template boots this bundle with
+# (images/agent/Dockerfile, TASK_FLAGS), so the rig runs what prod runs: no
+# shell, no file tools, delegation through the specialist's own tool.
+TASK_FLAGS=(--provider=vertex --checkpoint=operator
+  --disable-tools=bash,read_file,read_many_files,view_file_outline,write_file,edit_file,delete_file,stat,list_dir,glob,grep
+  --agentic-tools=false --no-background-agents --no-pricing-refresh)
+
+prepare_agent() {
+  local bin="$1" commit="$2" a="$workdir/agent/$bundle-$commit"
+  local bundle_dir="$shipmind_repo/agents/sre-triage/$bundle"
+  [[ -d $bundle_dir ]] || {
+    echo "bundle directory not found: $bundle_dir (pass --shipmind-repo or --bundle)" >&2
+    exit 2
+  }
+  if (( ${#callers[@]} == 0 )); then
+    echo "no caller identity resolved: pass --caller you@example.com or set \$RIG_CALLER" >&2
+    exit 2
+  fi
+  rm -rf "$a"
+  "$bin" config import-workload -o "$a" "$bundle_dir" >&2
+  mkdir -p "$a/.agents/plans" "$workdir/state/content"
+
+  local users="$workdir/state/users.json" tokf
+  tokf="$(daemon_token_file)"
+  (umask 077; RIG_TOK_FILE="$tokf" RIG_USERS="$users" RIG_BOT="$bot_identity" python3 - "${callers[@]}" <<'EOF'
+import json, os, sys
+tok = open(os.environ["RIG_TOK_FILE"]).read().strip()
+rows = [{"identity": os.environ["RIG_BOT"], "token": tok}]
+for i, caller in enumerate(sys.argv[1:], 1):
+    rows.append({"identity": caller, "token": f"tok_unused_caller_{i}"})
+with open(os.environ["RIG_USERS"], "w") as f:
+    json.dump({"version": 1, "users": rows}, f, indent=2)
+EOF
+  )
+  chmod 600 "$users"
+
+  RIG_A="$a" RIG_PORT="$port" RIG_USERS="$users" RIG_BOT="$bot_identity" \
+    RIG_MAIN_TOOLS="$shipmind_repo/agents/sre-triage/ax/core-agent-$bundle.main-tools.json" \
+    RIG_BUNDLE_MCP="$bundle_dir/mcp.json" python3 - <<'EOF'
+import json, os
+a = os.environ["RIG_A"]
+cfg_path = os.path.join(a, ".agents", "config.json")
+cfg = json.load(open(cfg_path))
+cfg["attach"] = {
+    "listen": "127.0.0.1:" + os.environ["RIG_PORT"],
+    "multi_session": {
+        "enabled": True,
+        "auth": {"kind": "bearer_table", "table_file": os.environ["RIG_USERS"]},
+        "proxy_identities": [os.environ["RIG_BOT"]],
+        "default_identity": "anon",
+        "allow_anonymous": False,
+    },
+}
+with open(cfg_path, "w") as f:
+    json.dump(cfg, f, indent=2)
+mt = os.environ["RIG_MAIN_TOOLS"]
+if os.path.exists(mt):
+    tools = json.load(open(mt))
+    if tools:
+        mcp = json.load(open(os.environ["RIG_BUNDLE_MCP"]))
+        for s in mcp.get("servers", {}).values():
+            s["tools"] = tools
+        with open(os.path.join(a, ".agents", "mcp.json"), "w") as f:
+            json.dump(mcp, f, indent=2)
+EOF
+
+  local cluster_short="${cluster_path##*/}"
+  cat >"$workdir/state/scope.md" <<EOF
+
+## Scope of this rig
+
+This is a development rig with one target GKE cluster:
+
+    $cluster_path
+
+- When a person refers to "$cluster_short" (or asks about "the cluster" without
+  naming another), use \`$cluster_path\` as the \`parent\` of every call.
+- Never guess or probe other project IDs, locations, or cluster names. If a
+  call is refused, report the refusal directly; do not enumerate projects.
+- If asked about any other cluster or project, say this rig is scoped to
+  \`$cluster_path\` and do not query anything else.
+- Never ask to mutate cluster state.
+EOF
+  # A specialist runs on its own instructions and does not inherit the main
+  # agent's --append-system-prompt, so append the scope to every imported
+  # subagent definition as well.
+  local sa
+  for sa in "$a"/.agents/subagents/*.md; do
+    [[ -f $sa ]] && cat "$workdir/state/scope.md" >>"$sa"
+  done
+  echo "$a"
+}
+
+agent_args() {
+  local a="$1"
+  printf '%s\n' -c "$a/.agents/config.json" "--agents-dir=$a/.agents" "${TASK_FLAGS[@]}" "--model=$model" \
+    "--agents-content-dir=$workdir/state/content" "--append-system-prompt=@$workdir/state/scope.md"
+}
+
+source_optional_env() {
+  local f="$1" label="$2"
+  if [[ -n $f ]]; then
+    [[ -r $f ]] || { echo "$label env file is not readable: $f" >&2; exit 2; }
+    # shellcheck disable=SC1090
+    source "$f"
+  fi
+}
+
+case "$cmd" in
+  info)
+    read -r resolved_ref commit < <(resolve_ref "$ref")
+    echo "workdir     $workdir"
+    echo "core-agent  $resolved_ref ($commit) from $core_agent_repo"
+    echo "bundle      $bundle from $shipmind_repo"
+    echo "model       $model (Vertex)"
+    echo "cluster     ${cluster_path:-(not set; pass --cluster for agent/smoke)}"
+    echo "daemon      127.0.0.1:$port, callers: ${callers[*]:-(none)}"
+    echo "switchboard $switchboard_src @ $(git -C "$switchboard_src" rev-parse --short HEAD 2>/dev/null || echo '?') (mode: $progress_mode)"
+    ;;
+  agent|smoke)
+    prompt=""
+    if [[ $cmd == smoke ]]; then
+      if (( ${#prompt_args[@]} == 0 )); then
+        echo "smoke requires -- \"PROMPT\"" >&2
+        usage >&2
+        exit 2
+      fi
+      prompt="${prompt_args[*]}"
+    fi
+    validate_cluster_path
+    read -r resolved_ref commit < <(resolve_ref "$ref")
+    bin="$(build_core_agent "$resolved_ref" "$commit")"
+    a="$(prepare_agent "$bin" "$commit")"
+    source_optional_env "$model_env" "--model-env"
+    export CORE_AGENT_TRUSTED_DIRS="$a,$a/.agents"
+    mapfile -t args < <(agent_args "$a")
+    cd "$a"
+    echo "core-agent $resolved_ref ($commit), model $model, bundle $bundle, cluster $cluster_path" >&2
+    if [[ $cmd == smoke ]]; then
+      exec "$bin" "${args[@]}" "--session-db-path=$workdir/state/smoke-$commit.db" -p "$prompt"
+    fi
+    exec "$bin" "${args[@]}" --no-repl --session-db "--session-db-path=$workdir/state/sessions-$commit.db"
+    ;;
+  switchboard)
+    [[ -d "$switchboard_src/cmd/switchboard" ]] || {
+      echo "switchboard source not found at $switchboard_src (pass --switchboard-src)" >&2
+      exit 2
+    }
+    sha="$(git -C "$switchboard_src" rev-parse --short HEAD 2>/dev/null || echo "dev")"
+    dirty=""
+    [[ -z "$(git -C "$switchboard_src" status --porcelain 2>/dev/null || true)" ]] || dirty="-dirty"
+    bin="${RIG_SWITCHBOARD_BIN:-}"
+    if [[ -z $bin ]]; then
+      bin="$workdir/bin/switchboard-$sha$dirty"
+      tc="$(default_gotoolchain "$switchboard_src")"
+      (cd "$switchboard_src" && GOTOOLCHAIN="$tc" CGO_ENABLED=0 go build -o "$bin" ./cmd/switchboard)
+    fi
+    source_optional_env "$slack_env" "--slack-env"
+    if [[ -z "${SWITCHBOARD_SLACK_APP_TOKEN:-}" || -z "${SWITCHBOARD_SLACK_BOT_TOKEN:-}" ]]; then
+      echo "SWITCHBOARD_SLACK_APP_TOKEN and SWITCHBOARD_SLACK_BOT_TOKEN must be set (pass --slack-env FILE or export them)" >&2
+      exit 2
+    fi
+    SWITCHBOARD_DAEMON_TOKEN="$(cat "$(daemon_token_file)")"
+    export SWITCHBOARD_DAEMON_TOKEN
+    mkdir -p "$workdir/state/switchboard"
+    echo "switchboard $(basename "$bin"), progress $progress_mode, daemon http://127.0.0.1:$port" >&2
+    exec "$bin" serve --platform slack --daemon-url "http://127.0.0.1:$port" \
+      --token-env SWITCHBOARD_DAEMON_TOKEN \
+      --slack-app-token-env SWITCHBOARD_SLACK_APP_TOKEN \
+      --slack-bot-token-env SWITCHBOARD_SLACK_BOT_TOKEN \
+      --slack-rich-blocks --show-usage \
+      --progress-mode "$progress_mode" \
+      --state-dir "$workdir/state/switchboard"
+    ;;
+esac
