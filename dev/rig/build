@@ -1,0 +1,153 @@
+#!/usr/bin/env bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Build what the rig runs into the state directory:
+#
+#   switchboard   from this checkout, so the rig tests the branch you are on
+#   core-agent    from go-steer/core-agent at RIG_CORE_AGENT_REF (default
+#                 main), stamped with the commit, plus the persona from
+#                 the same tree
+#   cloudflared   linked from PATH, or downloaded on Linux (HTTP ingress only)
+#
+# core-agent is rebuilt only when the ref has moved; --force rebuilds anyway.
+set -euo pipefail
+source "$(dirname "$0")/lib.sh"
+
+usage() {
+  cat <<'EOF'
+Usage: dev/rig/build [--force] [switchboard|core-agent|cloudflared]...
+
+With no names, builds switchboard and core-agent, and links cloudflared if
+it is on PATH.
+EOF
+}
+
+force=0
+targets=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --force) force=1; shift ;;
+    switchboard|core-agent|cloudflared) targets+=("$1"); shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+explicit=$((${#targets[@]} > 0))
+if (( ! explicit )); then
+  targets=(switchboard core-agent cloudflared)
+fi
+
+build_switchboard() {
+  echo "== switchboard (from $rig_repo)"
+  # go build stamps the checkout's commit (and a dirty flag) into the
+  # binary, so `switchboard version` names exactly what is running.
+  (cd "$rig_repo" && go build -o "$RIG_STATE/bin/switchboard" ./cmd/switchboard)
+  "$RIG_STATE/bin/switchboard" version
+}
+
+# A subshell, so the EXIT trap that removes the source tree is its own.
+build_core_agent() (
+  local repo="${RIG_CORE_AGENT_REPO:-https://github.com/go-steer/core-agent}"
+  local ref="${RIG_CORE_AGENT_REF:-main}"
+  local sha
+  if [[ $ref =~ ^[0-9a-f]{40}$ ]]; then
+    sha="$ref"
+  else
+    sha="$(git ls-remote "$repo" "refs/heads/$ref" "refs/tags/$ref" | awk 'NR==1{print $1}')"
+    [[ -n $sha ]] || rig_die "core-agent: no branch or tag $ref in $repo"
+  fi
+  echo "== core-agent $ref = $sha"
+
+  local stamp="$RIG_STATE/core-agent.commit"
+  if (( ! force )) && [[ -x $RIG_STATE/bin/core-agent && -f $stamp && $(<"$stamp") == "$sha" ]]; then
+    echo "   already built; --force to rebuild"
+    "$RIG_STATE/bin/core-agent" --version
+    exit 0
+  fi
+
+  # A fresh, empty directory for the source, and the tree fetched by the
+  # exact commit: what gets stamped is what got built.
+  local tmp
+  tmp="$(mktemp -d)"
+  trap 'rm -rf "$tmp"' EXIT
+  mkdir "$tmp/src"
+  git -C "$tmp/src" init -q
+  git -C "$tmp/src" fetch -q --depth 1 "$repo" "$sha"
+  git -C "$tmp/src" -c advice.detachedHead=false checkout -q FETCH_HEAD
+
+  local module
+  module="$(awk '$1 == "module" {print $2; exit}' "$tmp/src/go.mod")"
+  [[ -n $module ]] || rig_die "core-agent: no module line in go.mod"
+  go build -C "$tmp/src" -o "$RIG_STATE/bin/core-agent" \
+    -ldflags "-X $module/internal/version.Commit=$sha -X $module/internal/version.Date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    ./cmd/core-agent
+
+  # The persona the rig daemon runs with, from the same commit as the
+  # binary so the two never disagree. Without one, a bare daemon answers
+  # follow-ups after a task checkpoint with a generic "ready for the next
+  # task" instead of the question.
+  local persona="$tmp/src/${RIG_PERSONA_PATH:-examples/gke-platform-agent/AGENTS.md}"
+  if [[ -f $persona ]]; then
+    cp "$persona" "$RIG_STATE/core-agent.AGENTS.md"
+    echo "   persona from ${RIG_PERSONA_PATH:-examples/gke-platform-agent/AGENTS.md}"
+  else
+    rm -f "$RIG_STATE/core-agent.AGENTS.md"
+    echo "   no persona at ${persona#"$tmp/src/"} in this commit; the daemon runs without one"
+  fi
+
+  printf '%s\n' "$sha" >"$stamp"
+  "$RIG_STATE/bin/core-agent" --version
+)
+
+build_cloudflared() {
+  local dst="$RIG_STATE/bin/cloudflared" found
+  if found="$(command -v cloudflared)"; then
+    ln -sf "$found" "$dst"
+    echo "== cloudflared linked from $found"
+    return
+  fi
+  if [[ -x $dst && ! -L $dst ]]; then
+    echo "== cloudflared already downloaded"
+    return
+  fi
+  if (( ! explicit )); then
+    echo "== cloudflared not on PATH, skipped (only the HTTP ingress needs it: dev/rig/build cloudflared)"
+    return
+  fi
+  local os arch
+  os="$(uname -s | tr '[:upper:]' '[:lower:]')"
+  case "$(uname -m)" in
+    x86_64|amd64) arch=amd64 ;;
+    aarch64|arm64) arch=arm64 ;;
+    *) rig_die "cloudflared: no download for $(uname -m); install it and rerun" ;;
+  esac
+  if [[ $os != linux ]]; then
+    rig_die "cloudflared: install it (macOS: brew install cloudflared) and rerun"
+  fi
+  echo "== cloudflared (downloading the latest linux-$arch release)"
+  curl -fsSL -o "$dst.part" \
+    "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-$arch"
+  chmod 755 "$dst.part"
+  mv "$dst.part" "$dst"
+  "$dst" --version
+}
+
+for t in "${targets[@]}"; do
+  case "$t" in
+    switchboard) build_switchboard ;;
+    core-agent) build_core_agent ;;
+    cloudflared) build_cloudflared ;;
+  esac
+done

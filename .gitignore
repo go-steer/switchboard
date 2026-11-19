@@ -18,6 +18,14 @@ coverage.*
 .demo-daemon/
 .demo-rig/
 
+# dev/rig keeps its config, secrets and state outside the checkout
+# (~/.config/switchboard-rig, ~/.local/state/switchboard-rig). These catch
+# a copy made here by mistake; dev/ci/presubmits/verify-no-secrets catches
+# what they miss.
+dev/rig/*.env
+dev/rig/*.json
+.rig/
+
 # Editor / OS noise
 .idea/
 .vscode/

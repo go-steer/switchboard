@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# The rig's Slack gateway, against the rig daemon, on the rig's own Slack
+# app. Socket Mode hands each event to one of the app's open connections,
+# so anything else connected as the same app (another machine's rig, or a
+# deployment sharing the app) takes a share of the mentions and this one
+# never sees them.
+#
+#   dev/rig/slack [switchboard serve args...]
+#   dev/rig/slack --manifest    print the rig app's manifest
+set -euo pipefail
+source "$(dirname "$0")/lib.sh"
+
+if [[ ${1:-} == --manifest ]]; then
+  # The shipped manifest renamed, rather than a second copy: the scopes
+  # follow the code, and a copy would fall behind it.
+  name="${RIG_SLACK_APP_NAME:-switchboard-dev}"
+  [[ $name =~ ^[a-z0-9_-]+$ ]] || rig_die "RIG_SLACK_APP_NAME must be lowercase letters, digits, - and _: $name"
+  out="$(sed -e "s|^  name: switchboard\$|  name: $name|" \
+    -e "s|^    display_name: switchboard\$|    display_name: $name|" \
+    -e "s|^    - command: /switchboard\$|    - command: /$name|" \
+    -e 's|^  description: Chat gateway for core-agent$|  description: Chat gateway for core-agent (dev rig)|' \
+    "$rig_repo/deploy/slack/app-manifest.yaml")"
+  # A rename that silently matched nothing would hand out a manifest for
+  # an app with the production app's name and slash command.
+  for want in "  name: $name" "    display_name: $name" "    - command: /$name"; do
+    grep -qxF -- "$want" <<<"$out" ||
+      rig_die "deploy/slack/app-manifest.yaml no longer has the line this renames to '$want'; update dev/rig/slack"
+  done
+  printf '%s\n' "$out"
+  exit 0
+fi
+
+bin="$(rig_bin switchboard)"
+rig_token
+
+# Tokens stay in their own file and reach switchboard as environment
+# variables, never as flags.
+rig_secret_file RIG_SLACK_ENV
+set -a
+# shellcheck source=/dev/null
+source "$RIG_SLACK_ENV"
+set +a
+: "${SWITCHBOARD_SLACK_APP_TOKEN:?RIG_SLACK_ENV must set SWITCHBOARD_SLACK_APP_TOKEN}"
+: "${SWITCHBOARD_SLACK_BOT_TOKEN:?RIG_SLACK_ENV must set SWITCHBOARD_SLACK_BOT_TOKEN}"
+
+# shellcheck disable=SC2206 # extra flags from rig.env, split on purpose
+extra=(${RIG_SLACK_ARGS:-})
+
+rig_log slack
+exec "$bin" serve --platform slack --daemon-url "$rig_daemon_url" ${extra+"${extra[@]}"} "$@"

@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# What the rig on this machine has built and is running. It cannot see
+# another machine: whether a rig is up somewhere else is something to
+# check there (dev/rig/README.md, "One machine at a time").
+set -euo pipefail
+source "$(dirname "$0")/lib.sh"
+
+echo "config  $rig_env"
+echo "state   $RIG_STATE"
+echo
+for b in switchboard core-agent cloudflared; do
+  p="$RIG_STATE/bin/$b"
+  if [[ ! -x $p ]]; then
+    printf '%-12s not built\n' "$b"
+    continue
+  fi
+  case "$b" in
+    switchboard) v="$("$p" version 2>&1 | head -1)" ;;
+    *) v="$("$p" --version 2>&1 | head -1)" ;;
+  esac
+  printf '%-12s %s\n' "$b" "$v"
+done
+if [[ -f $RIG_STATE/core-agent.commit ]]; then
+  echo
+  echo "core-agent was built from $(<"$RIG_STATE/core-agent.commit")."
+  echo "${RIG_CORE_AGENT_REF:-main} is now $(git ls-remote "${RIG_CORE_AGENT_REPO:-https://github.com/go-steer/core-agent}" "refs/heads/${RIG_CORE_AGENT_REF:-main}" 2>/dev/null | awk '{print $1}' || true)"
+fi
+if [[ -s $RIG_STATE/tunnel-url ]]; then
+  echo
+  echo "tunnel  $(<"$RIG_STATE/tunnel-url")/chat"
+fi
+echo
+procs="$(rig_procs)"
+if [[ -n $procs ]]; then
+  echo "running:"
+  printf '%s\n' "$procs"
+else
+  echo "nothing running"
+fi

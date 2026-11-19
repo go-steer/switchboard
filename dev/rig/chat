@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# The rig's Google Chat gateway, against the rig daemon.
+#
+#   dev/rig/chat [switchboard serve args...]          Pub/Sub ingress
+#   dev/rig/chat --http [switchboard serve args...]   HTTP ingress, through
+#                                                     dev/rig/tunnel
+#
+# Pub/Sub carries messages and cards; button presses and dialogs only
+# arrive over HTTP. Either way the Chat app's console setting decides where
+# Chat sends events, and it names one place: the rig only receives once the
+# console points at it (dev/rig/README.md).
+#
+# CARDS=off|status|rich overrides RIG_CHAT_CARDS for one run.
+set -euo pipefail
+source "$(dirname "$0")/lib.sh"
+
+ingress="${RIG_CHAT_INGRESS:-pubsub}"
+if [[ ${1:-} == --http ]]; then
+  ingress=http
+  shift
+fi
+
+bin="$(rig_bin switchboard)"
+rig_token
+
+# Chat API calls have to be made as the Chat app's service account. A key
+# file is the tested way; with RIG_CHAT_CREDENTIALS unset, Application
+# Default Credentials decide, and they have to resolve to that account.
+if [[ -n ${RIG_CHAT_CREDENTIALS:-} ]]; then
+  rig_secret_file RIG_CHAT_CREDENTIALS
+  export GOOGLE_APPLICATION_CREDENTIALS="$RIG_CHAT_CREDENTIALS"
+else
+  echo "rig: RIG_CHAT_CREDENTIALS unset, so Chat calls use Application Default Credentials" >&2
+fi
+
+args=(
+  serve --platform googlechat
+  --daemon-url "$rig_daemon_url"
+  --googlechat-cards "${CARDS:-${RIG_CHAT_CARDS:-status}}"
+)
+case "$ingress" in
+  pubsub)
+    : "${RIG_CHAT_PROJECT:?RIG_CHAT_PROJECT is not set in $rig_env}"
+    : "${RIG_CHAT_SUBSCRIPTION:?RIG_CHAT_SUBSCRIPTION is not set in $rig_env}"
+    args+=(--google-project "$RIG_CHAT_PROJECT" --google-subscription "$RIG_CHAT_SUBSCRIPTION")
+    ;;
+  http)
+    : "${RIG_CHAT_ADDON_SA:?RIG_CHAT_ADDON_SA is not set in $rig_env}"
+    url="${RIG_CHAT_ENDPOINT_URL:-}"
+    if [[ -z $url ]]; then
+      [[ -s $RIG_STATE/tunnel-url ]] || rig_die "no tunnel: start dev/rig/tunnel first, or set RIG_CHAT_ENDPOINT_URL"
+      url="$(<"$RIG_STATE/tunnel-url")/chat"
+    fi
+    # The tunnel rewrites Host, so the audience every inbound token is
+    # checked against has to be pinned to what the console names.
+    args+=(
+      --googlechat-ingress http
+      --googlechat-listen "127.0.0.1:$RIG_CHAT_LISTEN_PORT"
+      --googlechat-service-account "$RIG_CHAT_ADDON_SA"
+      --googlechat-endpoint-url "$url"
+    )
+    echo "rig: HTTP ingress; the console's endpoint must be exactly $url" >&2
+    ;;
+  *) rig_die "RIG_CHAT_INGRESS is $ingress; want pubsub or http" ;;
+esac
+# shellcheck disable=SC2206 # extra flags from rig.env, split on purpose
+extra=(${RIG_CHAT_ARGS:-})
+
+rig_log "chat-$ingress"
+exec "$bin" "${args[@]}" ${extra+"${extra[@]}"} "$@"

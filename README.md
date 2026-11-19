@@ -1782,6 +1782,7 @@ Google Chat Workload Identity) and image pinning.
 | `docs/daemon-setup.md` | the core-agent daemon behind it, and running both platforms at once |
 | `docs/slack-setup.md` | Slack app setup, scopes, demo script |
 | `docs/googlechat-setup.md` | Chat app + Pub/Sub setup, card/event testing, demo script |
+| `dev/rig/` | the live test rig against the real Slack and Chat apps, runnable from any one machine at a time |
 
 ## License
 

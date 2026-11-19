@@ -21,9 +21,9 @@
 # up, so the integration suite is what keeps it honest.
 #
 # For demos and local testing only. It writes a bearer token to disk and
-# prints it to the terminal, runs the agent with permissions.mode=yolo,
-# and puts everything in a scratch directory. None of that belongs in a
-# deployment.
+# prints it to the terminal, runs the agent with permissions.mode=yolo
+# unless --permissions says otherwise, and puts everything in a scratch
+# directory. None of that belongs in a deployment.
 set -euo pipefail
 
 usage() {
@@ -38,6 +38,10 @@ Options:
   --model NAME      model to run (default: echo)
   --provider NAME   provider flag to pass core-agent (default: echo, or none
                     once --model names something other than echo)
+  --permissions MODE
+                    core-agent permissions mode (default: yolo). Any other
+                    mode also turns the built-in allow list off, so even
+                    ls and cat ask — which is what testing approvals needs
   -h, --help        this
 
 The token comes from $SWITCHBOARD_DAEMON_TOKEN if set, otherwise a random
@@ -64,6 +68,7 @@ callers=()
 model="echo"
 provider=""
 provider_set=0
+permissions="yolo"
 passthrough=()
 
 while [[ $# -gt 0 ]]; do
@@ -74,6 +79,7 @@ while [[ $# -gt 0 ]]; do
     --caller) callers+=("${2:?--caller needs an identity}"); shift 2 ;;
     --model) model="${2:?--model needs a name}"; shift 2 ;;
     --provider) provider="${2:?--provider needs a name}"; provider_set=1; shift 2 ;;
+    --permissions) permissions="${2:?--permissions needs a mode}"; shift 2 ;;
     --) shift; passthrough=("$@"); break ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
@@ -116,6 +122,19 @@ done
 if [[ ! $model =~ ^[A-Za-z0-9._:@/+-]+$ ]]; then
   echo "model name has characters that need JSON escaping: $model" >&2
   exit 2
+fi
+if [[ ! $permissions =~ ^[a-z_-]+$ ]]; then
+  echo "not a permissions mode: $permissions" >&2
+  exit 2
+fi
+
+# yolo keeps the config byte-for-byte what it always was, the shape the
+# integration suite stands up. Anything else is someone testing prompts,
+# and the built-in allow list would pre-approve the read-only tools a
+# test reaches for first.
+permissions_json="{ \"mode\": \"$permissions\" }"
+if [[ $permissions != "yolo" ]]; then
+  permissions_json="{ \"mode\": \"$permissions\", \"use_builtin_allow\": false }"
 fi
 
 token="${SWITCHBOARD_DAEMON_TOKEN:-}"
@@ -166,7 +185,7 @@ cat >"$config_file" <<EOF
 {
   "version": 1,
   "model": { "name": "$model" },
-  "permissions": { "mode": "yolo" },
+  "permissions": $permissions_json,
   "attach": {
     "listen": "127.0.0.1:$port",
     "multi_session": {
@@ -189,6 +208,7 @@ args+=(${passthrough+"${passthrough[@]}"})
 cat >&2 <<EOF
 core-agent on 127.0.0.1:$port
   model    $model${provider:+ (provider $provider)}
+  perms    $permissions
   workdir  $workdir
   config   $config_file
   users    $users_file

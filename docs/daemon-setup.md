@@ -193,6 +193,7 @@ authorization.
 ## Not for deployment
 
 `dev/demo/daemon` is for demos and local testing. It writes a bearer token to
-disk and prints it to the terminal, runs the agent with `permissions.mode=yolo`,
-and puts everything in a scratch directory. None of that belongs in a
+disk and prints it to the terminal, runs the agent with `permissions.mode=yolo`
+unless `--permissions` names another mode, and puts everything in a scratch
+directory. None of that belongs in a
 deployment; see [deploy/](../deploy) for the shipped posture.
