@@ -582,7 +582,14 @@ reader can at least see that the agent is blocked and on what. The one part that
 is not advisory is the *edit* that settles a question: a `KindDecision` reply
 with no `Decision` must leave nothing pressable behind (§2.3).
 
-Two optional capabilities work the same way — an adapter type-asserts for them
+`Reply.Activity` follows the same rule for tool activity: one unit of work with
+a plain-text `Title`, a `Status`, the `Steps` it has run (one level of child
+`Steps` for a subagent's inner calls under the parent call that delegated to
+it), and `Recent` lines to display unfolded while a turn runs. `Reply.Text`
+still says the whole thing in the router's markup, so an adapter that ignores
+`Activity` loses nothing.
+
+Three optional capabilities work the same way — an adapter type-asserts for them
 and degrades if they are absent:
 
 - `chat.TextFitter` — does this text fit one message on this platform?
@@ -593,6 +600,13 @@ and degrades if they are absent:
   It is asked outside a command, too — Google Chat's welcome names the values
   before anyone has run anything — so a handler that does not report them
   leaves that message with nothing to name.
+- `chat.DrawsActivity` — does this adapter render `Reply.Activity` natively?
+  When true (Slack, as one `task_card` per turn), the router tracks the turn's
+  calls and subagent calls in one card edited in place and kept when the turn
+  ends instead of posting separate per-frame notices. When false (Google Chat,
+  or Slack from the next turn after an `invalid_blocks` refusal trips the
+  adapter's latch — a turn already in flight finishes its single-message record
+  as text), the router runs its plain-text progress and notice paths unchanged.
 
 ### 3.3 Google Chat: dialects, Pub/Sub, and cards
 
@@ -935,10 +949,16 @@ record is switchboard's own).
 
 What is written is a snapshot, not a log: per conversation its session, the
 identity its relay subscribes as, whether it was adopted, its two delivery
-watermarks and when it last had traffic; plus the ingress bindings and the
-runtime progress overrides. A debounced persister writes it after each burst of
+watermarks, when it last had traffic, any in-flight placeholder (and, for a
+Slack activity card, its steps — including `stream` mode's redacted argument
+summaries — plus an `in_flight` marker when graceful shutdown already finalised
+the card for an `ax` task turn); plus the ingress bindings, the runtime
+progress overrides, and a bounded `owed` list (up to 256 cards, aged out at 30
+days) of finished or interrupted cards whose finalising edit had not yet landed
+against the platform. A debounced persister writes it after each burst of
 changes (a temporary file, synced, renamed over the old one) and once more at
-shutdown, serialized with it so an older snapshot never lands last. On boot
+shutdown (after a bounded 5-second pass to finalise live and owed cards),
+serialized with it so an older snapshot never lands last. On boot
 every conversation is restored **dormant**; those with traffic in the revive
 window (the idle TTL, else an hour) are re-attached at once, so an answer the
 agent produced while switchboard was down still arrives, and the rest
@@ -987,8 +1007,11 @@ a bot posts with `chat:write` alone — no manifest declaration — and returns 
 from `conversations.replies` once the history scopes are granted; the adapter's
 own verified re-send found the existing message and posted nothing. The questions still on screen
 are carried across, so the revived prompt watcher does not ask them again; a
-placeholder a turn had up is taken down, its ticker having died with the
-process; and a stale adopted session is re-measured from its head, as adoption
+plain clock placeholder a turn had up is taken down, its ticker having died
+with the process, while an in-flight Slack activity card is finalised in place
+as `Interrupted by a restart · N calls` (and any owed card edits are retried
+independently of session revival); and a stale adopted session is re-measured
+from its head, as adoption
 is. A dormant record is the conversation's session as surely as a live entry
 is — `session()` revives it before anything opens a new one, and a bind treats
 the thread as taken. Records untouched for 30 days are forgotten.

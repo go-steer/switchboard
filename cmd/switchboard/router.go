@@ -520,6 +520,36 @@ type Router struct {
 	// inner tool calls (#193). Zero or less means defaultSubagentPollInterval.
 	subPollInterval time.Duration
 
+	// cardRedraw is the least time between two edits of a card caused by
+	// calls, results and subagent frames (requestRedraw), and cardMaxLines how
+	// many lines a card holds before it is frozen and continued in a new
+	// message. Zero or less means defaultCardRedraw and defaultCardMaxLines;
+	// tests shorten both.
+	cardRedraw   time.Duration
+	cardMaxLines int
+
+	// cardRetry is the first wait before a card's finalising edit is tried
+	// again (retryFinish); zero or less means defaultCardRetry, and tests
+	// shorten it.
+	cardRetry time.Duration
+
+	// fmu guards owed and finishing, and is a leaf: nothing is called with it
+	// held.
+	//
+	// owed are the cards still owed the edit that finalises them, by message
+	// (owedCard, in state.go): one the last process left in
+	// flight, or one whose finalising edit has failed so far. Each is in the
+	// snapshot, on a list of its own rather than on its conversation's
+	// record, until that edit lands or the platform refuses it for good — so
+	// a card is owed its last edit whatever becomes of the session, and
+	// owing one says nothing about whether a turn is running there now.
+	//
+	// finishing counts the finalising edits being retried in the background:
+	// what a shutdown waits for before it lets the process go.
+	fmu       sync.Mutex
+	owed      map[chat.MessageRef]*owedCard
+	finishing int
+
 	// footDelay is how long a turn-complete waits for an answer behind it; see
 	// scheduleFoot. Zero or less means defaultFootDelay.
 	footDelay time.Duration
@@ -833,14 +863,40 @@ type sessionEntry struct {
 	// for it. turnStart is when the turn was handed to the daemon — what the
 	// elapsed clock counts from, not the moment the placeholder landed; tools
 	// and step are the last tool activity seen, replayed by each tick so the
-	// clock does not erase it; tickStop closes the ticker goroutine down.
+	// clock does not erase it; card is every call the turn has made, for an
+	// adapter that draws them (card mode, see card.go); tickStop closes the
+	// ticker goroutine down.
 	turnStart time.Time
 	tools     []string
 	step      int
 	subAgent  string
 	subTools  []string
 	subCall   int
+	card      turnCard
 	tickStop  chan struct{}
+
+	// A card's redraws, coalesced (requestRedraw), under pmu with the state
+	// they render: redrawAt is when the progress message was last rendered
+	// for an edit, and redrawTimer the trailing redraw owed for what has been
+	// recorded since, nil when none is. redrawGen tells a timer the turn's
+	// state was reset under from the one armed after it.
+	redrawAt    time.Time
+	redrawTimer *time.Timer
+	redrawGen   uint64
+	// leftAtExit says the turn in flight had its card finalised by a shutdown
+	// (interruptCard): the turn is still running on the daemon, and nothing in
+	// the record says so any more. See sessionRecord.InFlight.
+	leftAtExit atomic.Bool
+
+	// redrawBackoff is how long the card's coalesced redraws stand off after
+	// a failed edit, zero when the last one landed. clockDone says the
+	// daemon's own boundary stopped this turn's clock, as against anything
+	// else that did; tickDead that the ticker gave up at its deadline while
+	// the turn was still nominally running. All three are the turn's, under
+	// pmu, and reset with it.
+	redrawBackoff time.Duration
+	clockDone     bool
+	tickDead      bool
 
 	// bmu guards backlog, the messages the daemon has told us are sitting on
 	// this session's inbox and have not yet been taken up by a turn. Keyed by
@@ -1167,6 +1223,7 @@ func (e *sessionEntry) awaitingAnswer() bool {
 // outage announced a failure for a turn that answered long ago. Handle undoes
 // it if the inject never lands.
 func (e *sessionEntry) beginTurnInFlight() {
+	e.leftAtExit.Store(false)
 	e.failed.Store(false)
 	e.spoke.Store(false)
 	e.backstopped.Store(false)
@@ -1425,29 +1482,88 @@ func (e *sessionEntry) claimSettle(id string, want settleState) (text string, kn
 	return text, true, true
 }
 
+// progressTurn is a progress message taken out of service, with the turn state
+// that was being drawn into it: when the turn started, for the final line, and
+// the turn's calls, for a card kept as the turn's record.
+type progressTurn struct {
+	ref   chat.MessageRef
+	start time.Time
+	card  turnCard
+	// live says the turn's clock was still running when the message was
+	// taken: the turn was cut off from its message, not finished with it.
+	live bool
+	// completed says the clock, if it had stopped, was stopped by the
+	// daemon's turn boundary: the turn finished, and was not given up on.
+	completed bool
+}
+
 // takeProgress atomically reads and clears the entry's progress message along
 // with the rest of the turn's ticker state, and stops the ticker: the message
 // it renders into is about to be deleted.
 func (e *sessionEntry) takeProgress() chat.MessageRef {
-	ref, _ := e.takeProgressStart()
-	return ref
+	return e.takeProgressTurn(false).ref
 }
 
-// takeProgressStart is takeProgress, also returning when the turn started,
-// for the final line a placeholder is retired with.
-func (e *sessionEntry) takeProgressStart() (chat.MessageRef, time.Time) {
+// takeProgressTurn is takeProgress, also handing over the turn state the
+// message was drawn from. cardOnly takes the message only if it is a card that
+// holds calls, and otherwise leaves everything as it was: the check and the
+// take are one step, so a card frozen and replaced by a plain clock in between
+// is not taken for the card it was.
+func (e *sessionEntry) takeProgressTurn(cardOnly bool) progressTurn {
 	e.pmu.Lock()
-	ref, stop, start := e.progressMsg, e.tickStop, e.turnStart
+	if cardOnly && (e.progressMsg.ID == "" || !e.card.holds()) {
+		e.pmu.Unlock()
+		return progressTurn{}
+	}
+	t := progressTurn{ref: e.progressMsg, start: e.turnStart, card: e.card, live: e.tickStop != nil, completed: e.clockDone}
+	stop := e.tickStop
 	e.progressMsg, e.tickStop = chat.MessageRef{}, nil
-	e.turnStart, e.tools, e.step = time.Time{}, nil, 0
-	e.subAgent, e.subTools, e.subCall = "", nil, 0
+	e.resetTurnLocked(time.Time{})
 	e.pmu.Unlock()
 	// Outside the lock, and safe against a concurrent caller: whoever nils
 	// tickStop under the lock is the only one holding a channel to close.
 	if stop != nil {
 		close(stop)
 	}
-	return ref, start
+	return t
+}
+
+// takeProgressIf takes the progress message out of service if it is still
+// ref, reporting whether it was. For a caller that edited ref and let go of
+// pmu to do it: a later turn, or a move, can have put another message in the
+// slot meanwhile — neither waits on emu to do so — and that one is not this
+// caller's to clear.
+func (e *sessionEntry) takeProgressIf(ref chat.MessageRef) bool {
+	e.pmu.Lock()
+	if ref.ID == "" || e.progressMsg != ref {
+		e.pmu.Unlock()
+		return false
+	}
+	stop := e.tickStop
+	e.progressMsg, e.tickStop = chat.MessageRef{}, nil
+	e.resetTurnLocked(time.Time{})
+	e.pmu.Unlock()
+	if stop != nil {
+		close(stop)
+	}
+	return true
+}
+
+// resetTurnLocked clears what one turn drew into the progress message, for
+// the next to start from: its clock is dated from start (zero for none), and
+// its tools, its calls and any redraw still owed for them are dropped. The
+// caller holds pmu.
+func (e *sessionEntry) resetTurnLocked(start time.Time) {
+	e.turnStart, e.tools, e.step = start, nil, 0
+	e.subAgent, e.subTools, e.subCall = "", nil, 0
+	e.card = turnCard{}
+	if e.redrawTimer != nil {
+		e.redrawTimer.Stop()
+		e.redrawTimer = nil
+	}
+	e.redrawGen++
+	e.redrawAt = time.Time{}
+	e.redrawBackoff, e.clockDone, e.tickDead = 0, false, false
 }
 
 // stopTicker halts the turn's ticker while leaving the progress message in
@@ -1464,6 +1580,32 @@ func (e *sessionEntry) stopTicker() {
 	}
 }
 
+// stopTickerAt is stopTicker for the daemon's own turn boundary, recording
+// whether the boundary says the turn completed. The clock stopping and why it
+// stopped are one step under pmu, because a card is finalised a moment later
+// (settleCard) and a new message can take the slot in between: whoever retires
+// the card then has to know it belongs to a turn that finished, not to one
+// that was given up on (a completed turn's card read "Stopped", caught in
+// review).
+func (e *sessionEntry) stopTickerAt(completed bool) {
+	e.pmu.Lock()
+	stop := e.tickStop
+	e.tickStop = nil
+	e.clockDone = completed
+	e.pmu.Unlock()
+	if stop != nil {
+		close(stop)
+	}
+}
+
+// cardTurn reports whether the turn in flight keeps its calls as a card: it
+// has recorded one. See Router.carded.
+func (e *sessionEntry) cardTurn() bool {
+	e.pmu.Lock()
+	defer e.pmu.Unlock()
+	return e.card.started()
+}
+
 // resumeTurnClock re-dates a stranded placeholder to now and hands back a stop
 // channel for a fresh ticker, so the message left over from the turn that just
 // ended becomes the one timing the turn just starting.
@@ -1474,7 +1616,7 @@ func (e *sessionEntry) stopTicker() {
 // the answering turn stopped it). Without this the next turn inherits a frozen
 // clock — better than the nothing it used to inherit, and still not a clock.
 //
-// ok is false in the two cases that must not be disturbed: no placeholder to
+// ok is false in the cases that must not be disturbed: no placeholder to
 // re-date, and a placeholder whose turn is still being timed. The second is the
 // ordinary path — every turn switchboard injects is dequeued while its own
 // ticker runs — and re-dating there would throw away startProgress's deliberate
@@ -1486,10 +1628,16 @@ func (e *sessionEntry) resumeTurnClock(start time.Time) (stop chan struct{}, ok 
 	if e.progressMsg.ID == "" || e.tickStop != nil {
 		return nil, false
 	}
+	if e.card.holds() {
+		// Not a card that holds calls: re-dating it would redraw it as a bare
+		// clock and take its calls out of the thread. Every boundary that
+		// stops a clock finalises such a card first (settleCard), so this is
+		// a guard on that, not a path.
+		return nil, false
+	}
 	stop = make(chan struct{})
 	e.tickStop = stop
-	e.turnStart, e.tools, e.step = start, nil, 0
-	e.subAgent, e.subTools, e.subCall = "", nil, 0
+	e.resetTurnLocked(start)
 	return stop, true
 }
 
@@ -1498,17 +1646,72 @@ func (e *sessionEntry) resumeTurnClock(start time.Time) (stop chan struct{}, ok 
 // for the ticker it should now run. Any ticker still running for a previous
 // turn is stopped: only the latest message is live.
 func (e *sessionEntry) beginTurn(ref chat.MessageRef, start time.Time) (stale chat.MessageRef, stop chan struct{}) {
+	prev, stop := e.supersede(ref, start)
+	return prev.ref, stop
+}
+
+// supersede is beginTurn, handing back the previous message with the turn
+// state that was drawn into it, so a card among them can be kept rather than
+// deleted (retireStale).
+func (e *sessionEntry) supersede(ref chat.MessageRef, start time.Time) (prev progressTurn, stop chan struct{}) {
 	e.pmu.Lock()
-	stale, prev := e.progressMsg, e.tickStop
+	prev = progressTurn{ref: e.progressMsg, start: e.turnStart, card: e.card, live: e.tickStop != nil, completed: e.clockDone}
+	old := e.tickStop
 	stop = make(chan struct{})
 	e.progressMsg, e.tickStop = ref, stop
-	e.turnStart, e.tools, e.step = start, nil, 0
-	e.subAgent, e.subTools, e.subCall = "", nil, 0
+	e.resetTurnLocked(start)
 	e.pmu.Unlock()
-	if prev != nil {
-		close(prev)
+	if old != nil {
+		close(old)
 	}
-	return stale, stop
+	return prev, stop
+}
+
+// strandProgress installs ref as a placeholder with no clock running: one
+// posted for a turn that is queued and has not begun, which picking the
+// message up re-dates and starts (resumeTurnClock). Dated from now so that
+// anything rendering it meanwhile has a clock to show. false when the slot
+// has been filled since — a turn that began in the meantime brought its own —
+// and the caller deletes what it posted.
+func (e *sessionEntry) strandProgress(ref chat.MessageRef, now time.Time) bool {
+	e.pmu.Lock()
+	defer e.pmu.Unlock()
+	if e.progressMsg.ID != "" {
+		return false
+	}
+	e.progressMsg = ref
+	e.resetTurnLocked(now)
+	return true
+}
+
+// tickerDied is called by a ticker giving up at its deadline. It reports
+// whether stop is still the ticker timing the entry's progress message — so
+// whether the message is this ticker's to act on — and if so notes that the
+// turn now has none.
+func (e *sessionEntry) tickerDied(stop <-chan struct{}) bool {
+	e.pmu.Lock()
+	defer e.pmu.Unlock()
+	if e.tickStop == nil || (<-chan struct{})(e.tickStop) != stop {
+		return false
+	}
+	e.tickDead = true
+	return true
+}
+
+// reviveTicker hands back what a new ticker needs when the turn's own gave up
+// at its deadline and the turn has gone on to draw a card: ok is false unless
+// both are so. A clock with no ticker merely stops. A card with none has
+// nothing to finalise it if the turn's boundary never comes — the deadline
+// that would have was spent while there was no card to settle — so a card is
+// given a ticker, and with it a deadline, of its own.
+func (e *sessionEntry) reviveTicker() (start time.Time, stop chan struct{}, ok bool) {
+	e.pmu.Lock()
+	defer e.pmu.Unlock()
+	if !e.tickDead || e.tickStop == nil || e.progressMsg.ID == "" || !e.card.holds() {
+		return time.Time{}, nil, false
+	}
+	e.tickDead = false
+	return e.turnStart, e.tickStop, true
 }
 
 // replaceProgress swaps a freshly posted placeholder in for the one the turn
@@ -1522,30 +1725,66 @@ func (e *sessionEntry) beginTurn(ref chat.MessageRef, start time.Time) (stale ch
 // a message no reply is going to retire. ok is false when that happened, and
 // the caller deletes what it just posted.
 func (e *sessionEntry) replaceProgress(old, fresh chat.MessageRef) bool {
+	_, ok := e.moveProgress(old, fresh)
+	return ok
+}
+
+// moveProgress is replaceProgress, also saying what the message moved from is
+// now: left is its card as a stretch left behind, if the turn has a card that
+// holds calls at the moment of the swap, and nil if it is a plain clock.
+//
+// At the swap and not before. The caller rendered the old message before it
+// posted the new one, and the turn's first call can land in between: what was
+// a clock when it was rendered is then a card, drawn running, by the time it
+// is to be deleted — and a card that cannot be deleted has to be finished
+// instead (dropCard), which needs this.
+func (e *sessionEntry) moveProgress(old, fresh chat.MessageRef) (left *chat.Activity, ok bool) {
 	e.pmu.Lock()
 	defer e.pmu.Unlock()
 	if old.ID == "" || e.progressMsg != old {
-		return false
+		return nil, false
 	}
 	e.progressMsg = fresh
-	return true
+	if e.card.holds() {
+		left = e.card.segment(time.Since(e.turnStart))
+	}
+	return left, true
 }
 
-// noteActivity records the tools the agent just started — so every later tick
-// keeps showing them instead of dropping back to a bare clock — and returns
-// the message to edit with the line to put in it. ok is false when there is no
-// progress message to render into (stream mode, or a status turn whose
-// placeholder failed to post), and the caller falls back to a standalone
-// notice.
-func (e *sessionEntry) noteActivity(tools []string) (ref chat.MessageRef, text string, ok bool) {
+// noteActivity records the calls the agent just started — so every later tick
+// keeps showing them instead of dropping back to a bare clock. It reports
+// whether there is a progress message to show them in; false (a turn whose
+// placeholder failed to post, or that never had one) and the caller falls back
+// to a standalone notice. The caller redraws: recording and rendering are
+// apart so that every render reads the state as it is when its edit goes out,
+// never a snapshot an edit already sent has overtaken.
+//
+// card says the turn's calls are being kept as a card, and detail what the
+// mode discloses of them (turnCard.add).
+func (e *sessionEntry) noteActivity(calls []daemon.ToolCall, card, detail bool) bool {
 	e.pmu.Lock()
 	defer e.pmu.Unlock()
 	if e.progressMsg.ID == "" || e.turnStart.IsZero() {
-		return chat.MessageRef{}, "", false
+		return false
 	}
-	e.tools, e.step = tools, e.step+1
+	e.tools, e.step = toolNames(calls), e.step+1
 	e.subAgent, e.subTools, e.subCall = "", nil, 0
-	return e.progressMsg, tickText(time.Since(e.turnStart), e.tools, e.step), true
+	if card {
+		e.card.add(calls, detail, time.Now())
+	}
+	return true
+}
+
+// noteCardResults files a frame of results against the turn's card. changed is
+// whether any answered a call it holds; rest is the results that did not,
+// which is all of them when there is no progress message to hold a card.
+func (e *sessionEntry) noteCardResults(results []daemon.ToolResult) (changed bool, rest []daemon.ToolResult) {
+	e.pmu.Lock()
+	defer e.pmu.Unlock()
+	if e.progressMsg.ID == "" || e.turnStart.IsZero() {
+		return false, results
+	}
+	return e.card.file(results, time.Now())
 }
 
 // activityNote is one posted tool-activity notice: the message it went into,
@@ -1737,16 +1976,70 @@ func (e *sessionEntry) applyToolResults(results []daemon.ToolResult) []toolEdit 
 // ok is false once the turn has ended, which is what stops a tick that fired
 // just as the reply landed from resurrecting a deleted placeholder. Indicator
 // mode gets the clock alone — naming tools is what status mode is for.
-func (e *sessionEntry) tickRender(mode ProgressMode) (ref chat.MessageRef, text string, ok bool) {
+//
+// A turn whose calls are kept as a card (Router.carded) renders as the card
+// once it has made one, and the text beside it is the line status mode
+// writes, whichever mode it is: the text is what a notification shows, and
+// what is left if the card is refused. Only such a turn's record holds calls,
+// so the record holding one is the whole test. Before the first call there is
+// no Activity, and the message is the clock it always was.
+func (e *sessionEntry) tickRender(mode ProgressMode) (ref chat.MessageRef, text string, act *chat.Activity, ok bool) {
 	e.pmu.Lock()
 	defer e.pmu.Unlock()
+	return e.renderLocked(mode)
+}
+
+// renderLocked is tickRender for a caller that holds pmu.
+func (e *sessionEntry) renderLocked(mode ProgressMode) (ref chat.MessageRef, text string, act *chat.Activity, ok bool) {
 	if e.progressMsg.ID == "" || e.turnStart.IsZero() {
-		return chat.MessageRef{}, "", false
+		return chat.MessageRef{}, "", nil, false
+	}
+	elapsed := time.Since(e.turnStart)
+	if e.card.holds() {
+		text = subTickText(elapsed, e.tools, e.step, e.subAgent, e.subTools, e.subCall)
+		return e.progressMsg, text, e.card.live(elapsed, mode == ProgressStream), true
 	}
 	if mode != ProgressStatus {
-		return e.progressMsg, tickText(time.Since(e.turnStart), nil, 0), true
+		return e.progressMsg, tickText(elapsed, nil, 0), nil, true
 	}
-	return e.progressMsg, subTickText(time.Since(e.turnStart), e.tools, e.step, e.subAgent, e.subTools, e.subCall), true
+	return e.progressMsg, subTickText(elapsed, e.tools, e.step, e.subAgent, e.subTools, e.subCall), nil, true
+}
+
+// moveRender is tickRender for a message about to be moved: it also renders
+// what the message posted from this render is edited into if it turns out not
+// to be wanted and cannot be deleted (dropCard) — its card as a stretch left
+// behind, every call in it still out. left is nil for a plain clock. What the
+// message being moved from is by then is another matter: see moveProgress.
+func (e *sessionEntry) moveRender(mode ProgressMode) (ref chat.MessageRef, text string, act, left *chat.Activity, ok bool) {
+	e.pmu.Lock()
+	defer e.pmu.Unlock()
+	ref, text, act, ok = e.renderLocked(mode)
+	if ok && act != nil {
+		left = e.card.segment(time.Since(e.turnStart))
+	}
+	return ref, text, act, left, ok
+}
+
+// editRender is tickRender for an edit about to go out: it also notes the
+// time, which is what the card's coalesced redraws are spaced from.
+func (e *sessionEntry) editRender(mode ProgressMode) (ref chat.MessageRef, text string, act *chat.Activity, ok bool) {
+	e.pmu.Lock()
+	defer e.pmu.Unlock()
+	e.redrawAt = time.Now()
+	return e.renderLocked(mode)
+}
+
+// noteEdit records how an edit of the progress message went, for the card's
+// coalesced redraws: a failure doubles how long they stand off, from base up
+// to the ticker's own ceiling, and a success ends the stand-off.
+func (e *sessionEntry) noteEdit(ok bool, base time.Duration) {
+	e.pmu.Lock()
+	defer e.pmu.Unlock()
+	if ok {
+		e.redrawBackoff = 0
+		return
+	}
+	e.redrawBackoff = min(max(e.redrawBackoff, base)*2, progressTickMaxBackoff)
 }
 
 // NewRouter builds a Router. progress selects long-turn feedback (ProgressOff
@@ -2203,23 +2496,37 @@ func clampNotice(s string) string {
 // path has no turn-complete behind it to have stopped it already — and the
 // notice is posted underneath, after which the placeholder is moved back to the
 // bottom so the queued turn's clock is where a reader is looking.
+//
+// Either way a card that holds calls stays in the thread, finalised as
+// stopped: it is what the turn did before it died.
 func (r *Router) failTurn(ctx context.Context, e *sessionEntry, conv, kind, notice string) {
 	if !e.claimFailureNotice() {
 		return
 	}
 	e.endTurn()
 	queued := e.backlogged()
+	// A card that holds calls is the failed turn's record, not a clock to
+	// pass on: it is finalised where it is, and the queued turn is given a
+	// placeholder of its own below the notice.
+	handed := false
 	if queued {
 		e.stopTicker()
+		handed = r.finaliseCard(ctx, e, conv, false)
 	} else {
 		r.failProgress(ctx, e, conv)
 	}
 	r.metrics.recordTurnFailed(kind)
-	if _, err := r.out.Send(ctx, chat.Reply{Conversation: conv, Text: notice, Kind: chat.KindNotice}); err != nil {
+	_, err := r.out.Send(ctx, chat.Reply{Conversation: conv, Text: notice, Kind: chat.KindNotice})
+	if handed {
+		// Whether or not the notice landed: the old message is no longer a
+		// placeholder, so without this the queued turn has none.
+		r.queuePlaceholder(ctx, e, conv)
+	}
+	if err != nil {
 		r.logf.Errorf("relay %s: surface turn failure (%s): %v", conv, kind, err)
 		return
 	}
-	if queued {
+	if queued && !handed {
 		// Nothing was posted below the placeholder unless the Send above
 		// succeeded, and re-anchoring against nothing spends two API calls to
 		// change nothing — or leaves a duplicate if the delete half fails.
@@ -2302,12 +2609,12 @@ func (r *Router) startProgress(ctx context.Context, e *sessionEntry, conv string
 		r.logf.Warnf("progress %s: post: %v", conv, err)
 		return
 	}
-	stale, stop := e.beginTurn(ref, start)
-	if stale.ID != "" {
+	stale, stop := e.supersede(ref, start)
+	if stale.ref.ID != "" {
 		// A previous turn's, left frozen — often by a turn that ended without
 		// an answer, so "stopped" rather than "done" (caught in review).
 		e.emu.Lock()
-		r.retireMessage(ctx, conv, stale, time.Time{}, false)
+		r.retireStale(ctx, conv, stale)
 		e.emu.Unlock()
 	}
 	if r.tickInterval > 0 {
@@ -2353,15 +2660,21 @@ func (r *Router) tick(ctx context.Context, e *sessionEntry, conv string, start t
 			// which reads as never having been heard; a stopped clock at least
 			// says how far the turn got. The next turn in the thread clears it
 			// as stale.
+			//
+			// Unless it is a card that holds calls, which would spin where a
+			// clock merely stops: that is finalised as stopped, and kept.
 			r.logf.Warnf("progress %s: no turn boundary after %s; stopping the clock", conv, formatElapsed(time.Since(start)))
+			if e.tickerDied(stop) {
+				r.settleCard(ctx, e, conv, false)
+			}
 			return
 		case <-timer.C:
 		}
-		ref, text, ok := e.tickRender(r.progressFor(e.channel))
+		ok, err := r.redrawProgress(ctx, e, conv, r.progressFor(e.channel))
 		if !ok {
 			return // the turn ended between the tick firing and this read
 		}
-		if err := r.editProgress(ctx, e, conv, ref, text); err != nil {
+		if err != nil {
 			r.logf.Warnf("progress %s: tick: %v", conv, err)
 			interval = min(interval*2, progressTickMaxBackoff)
 		} else {
@@ -2440,6 +2753,7 @@ func (r *Router) armTurnBackstop(ctx context.Context, e *sessionEntry, conv stri
 		}
 		r.logf.Warnf("relay %s: no turn boundary after %s; giving the turn up", conv, formatElapsed(maxAge))
 		e.stopTicker()
+		r.settleCard(ctx, e, conv, false)
 	}()
 }
 
@@ -2482,41 +2796,748 @@ func (r *Router) failProgress(ctx context.Context, e *sessionEntry, conv string)
 // deleted by its author", reported from the GKE deployment), edited instead
 // into a final line — "✔ Done · 12s", or "✖ Stopped · 12s" — which says
 // something true where the clock was.
+//
+// Unless it is a card that holds calls. That is the turn's record, and it is
+// finalised where it is and kept (retireTaken).
 func (r *Router) retireProgress(ctx context.Context, e *sessionEntry, conv string, done bool) {
 	// Under emu: a tick in flight finishes its edit first, and one after this
 	// finds the message no longer current and leaves it alone.
 	e.emu.Lock()
 	defer e.emu.Unlock()
-	ref, start := e.takeProgressStart()
-	if ref.ID == "" {
+	t := e.takeProgressTurn(false)
+	if t.ref.ID == "" {
 		return
 	}
-	r.retireMessage(ctx, conv, ref, start, done)
+	r.retireTaken(ctx, conv, t, done)
 }
 
-// editProgress edits the progress message to text, if ref is still the
-// entry's current one, ordered against every other editor (emu).
-func (r *Router) editProgress(ctx context.Context, e *sessionEntry, conv string, ref chat.MessageRef, text string) error {
+// retireTaken retires a progress message already taken from its entry. A plain
+// clock says nothing once the turn is over and goes as it always has
+// (retireMessage). A card that holds calls is finalised in place instead and
+// left in the thread: "Done" or "Stopped" over every call the turn made, none
+// of them left running — in stream mode those calls are detail that was
+// permanent before cards, and in either mode they are what the agent ran.
+//
+// A card is never deleted, whatever becomes of the edit that finalises it:
+// the edit is tried again (finishCard), and a card that still cannot be
+// finalised is left as it was last drawn and named in the log. It used to be
+// retired like a clock, which deleted the turn's record because one edit
+// failed (caught in review).
+//
+// The caller holds emu.
+func (r *Router) retireTaken(ctx context.Context, conv string, t progressTurn, done bool) {
+	if t.card.holds() {
+		r.finishCard(ctx, conv, t.ref, t.card.final(time.Since(t.start), done))
+		// The snapshot named this message as a card in flight; it no longer
+		// is one, and a restart must not finalise it a second time.
+		r.markDirty()
+		return
+	}
+	r.retireMessage(ctx, conv, t.ref, t.start, done)
+}
+
+// retireStale retires the progress message a new turn has taken the slot
+// from. A clock is deleted, as before. A card that holds calls is kept: as a
+// finished stretch if its turn was still running — the turn carries on, and
+// what it does next is drawn into the new turn's message, the slot being one
+// per conversation — and, if its clock had already stopped, as done or as
+// stopped according to what stopped it: the daemon's boundary for a turn that
+// completed, or a deadline that gave up on it.
+//
+// The caller holds emu.
+func (r *Router) retireStale(ctx context.Context, conv string, t progressTurn) {
+	if t.card.holds() {
+		act := t.card.final(time.Since(t.start), t.completed)
+		if t.live {
+			act = t.card.segment(time.Since(t.start))
+		}
+		r.finishCard(ctx, conv, t.ref, act)
+		r.markDirty()
+		return
+	}
+	r.retireMessage(ctx, conv, t.ref, time.Time{}, false)
+}
+
+const (
+	// cardFinishAttempts is how many times a card's finalising edit is tried
+	// in all. Small: the edit is decoration on a turn that is already over,
+	// and a platform that refuses it four times is not having a blip.
+	cardFinishAttempts = 4
+
+	// defaultCardRetry is the wait before the second attempt; it doubles for
+	// each one after.
+	defaultCardRetry = 500 * time.Millisecond
+
+	// cardRetryCap is the longest one wait gets, however long a rate limit
+	// asked for: past this the turn's last word has been sitting under a
+	// spinning card long enough to say so in the log instead.
+	cardRetryCap = time.Minute
+
+	// cardFinishGrace bounds the background retries of one card in all.
+	cardFinishGrace = 3 * time.Minute
+
+	// exitCardGrace is how long a shutdown spends finalising the cards still
+	// running (finishCardsAtExit). A few seconds: it runs inside whatever
+	// grace the process was given to stop, with the listeners still to drain.
+	exitCardGrace = 5 * time.Second
+)
+
+// finishReply is the edit that makes a message the finished card act. The
+// text says what the card does, as Reply.Activity promises: a client that
+// cannot draw the card, or a Slack that refuses it, still shows the record
+// rather than a bare line nobody asked to keep.
+func finishReply(conv string, act *chat.Activity) chat.Reply {
+	return chat.Reply{Conversation: conv, Text: cardText(act), Kind: chat.KindActivity, Activity: act}
+}
+
+// finishCard edits a message into the finished card act: the last edit a card
+// gets, after which nothing will touch it again. So it has to land. A card
+// left as it was last drawn is a spinner that never stops, over a turn that is
+// over.
+//
+// One attempt is made here, in line — the caller is usually the relay, with an
+// answer waiting to go out underneath. If it fails, the card is owed the edit
+// from then on (owe): it is in the snapshot until the edit lands, so neither
+// running out of attempts nor the process ending forgets it. The remaining
+// attempts are made in the background, which is safe to do unordered: the
+// message has already been taken out of service, and no other editor has a
+// reference to it.
+func (r *Router) finishCard(ctx context.Context, conv string, ref chat.MessageRef, act *chat.Activity) {
+	reply := finishReply(conv, act)
+	err := r.out.Update(ctx, ref, reply)
+	if err == nil {
+		return
+	}
+	if !retryableEdit(err) {
+		r.logf.Warnf("progress %s: message %s could not be finalised (%v); it is left as it was last drawn, which may be as running",
+			conv, ref.ID, err)
+		return
+	}
+	o := r.owe(conv, ref, act, time.Now())
+	r.fmu.Lock()
+	r.finishing++
+	r.fmu.Unlock()
+	go func() {
+		defer func() {
+			r.fmu.Lock()
+			r.finishing--
+			r.fmu.Unlock()
+		}()
+		// Detached from the caller: the relay's context ends with its
+		// session, and the edit is owed either way.
+		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cardFinishGrace)
+		defer cancel()
+		r.settleOwed(o, r.retryFinish(rctx, conv, ref, reply, err))
+	}()
+}
+
+// finishCardNow is finishCard for a caller with nothing waiting behind it — a
+// restart, a shutdown: every attempt is made before it returns. It returns nil
+// once one has landed, and otherwise how the last one failed.
+func (r *Router) finishCardNow(ctx context.Context, conv string, ref chat.MessageRef, act *chat.Activity) error {
+	reply := finishReply(conv, act)
+	err := r.out.Update(ctx, ref, reply)
+	if err == nil {
+		return nil
+	}
+	return r.retryFinish(ctx, conv, ref, reply, err)
+}
+
+// maxOwedCards bounds the cards owed their last edit at once. It is reached
+// only by a platform that has refused edits across hundreds of turns; past it
+// the oldest is given up, and named in the log.
+const maxOwedCards = 256
+
+// owe records that a card is owed the edit that finalises it, and schedules a
+// write: from here it is in the snapshot until settleOwed takes it out. since
+// is when it first became owed.
+func (r *Router) owe(conv string, ref chat.MessageRef, act *chat.Activity, since time.Time) *owedCard {
+	o := &owedCard{conv: conv, ref: ref, act: act, since: since}
+	r.fmu.Lock()
+	if r.owed == nil {
+		r.owed = make(map[chat.MessageRef]*owedCard)
+	}
+	var dropped *owedCard
+	if _, again := r.owed[ref]; !again && len(r.owed) >= maxOwedCards {
+		for _, c := range r.owed {
+			if dropped == nil || c.since.Before(dropped.since) {
+				dropped = c
+			}
+		}
+		delete(r.owed, dropped.ref)
+	}
+	r.owed[ref] = o
+	r.fmu.Unlock()
+	if dropped != nil {
+		r.logf.Warnf("progress %s: too many cards are owed their last edit; giving up on message %s, which is left as it was last drawn, which may be as running",
+			dropped.conv, dropped.ref.ID)
+	}
+	r.markDirty()
+	return o
+}
+
+// settleOwed records how the attempts at an owed card's edit ended, err being
+// nil if one landed. The card stops being owed when the edit has landed, and
+// when the platform has refused it for good — the message is gone, or is not
+// ours to edit, and asking again on every boot would not change that. Any
+// other failure leaves it owed: the next process tries again (restore), as
+// does this one on its way out (finishCardsAtExit).
+func (r *Router) settleOwed(o *owedCard, err error) {
+	if err != nil && retryableEdit(err) {
+		return
+	}
+	r.fmu.Lock()
+	if r.owed[o.ref] == o {
+		delete(r.owed, o.ref)
+	}
+	r.fmu.Unlock()
+	r.markDirty()
+}
+
+// owedCards lists the cards owed their last edit, oldest first, and by message
+// among those owed at the same moment, so that a snapshot is the same however
+// the map happens to be walked.
+func (r *Router) owedCards() []*owedCard {
+	r.fmu.Lock()
+	out := make([]*owedCard, 0, len(r.owed))
+	for _, o := range r.owed {
+		out = append(out, o)
+	}
+	r.fmu.Unlock()
+	slices.SortFunc(out, func(a, b *owedCard) int {
+		if c := a.since.Compare(b.since); c != 0 {
+			return c
+		}
+		if c := strings.Compare(a.conv, b.conv); c != 0 {
+			return c
+		}
+		return strings.Compare(a.ref.ID, b.ref.ID)
+	})
+	return out
+}
+
+// retryFinish makes the attempts at a finalising edit that follow a failed
+// first one, err being how that one failed. It waits between them, longer each
+// time, and for at least as long as the platform asked if the failure was a
+// rate limit that said (chat.RetryAfter) — answering a rate limit with another
+// edit at once is how it stays one. A failure the platform calls permanent is
+// not retried.
+//
+// If none lands, the card is left as it is — never deleted: it holds the
+// turn's calls, and a record that is stale is worth more than none — and the
+// log names it, so that an operator can find the one message in the thread
+// that may still be drawn as running. It returns nil once an attempt has
+// landed, and otherwise how the last one failed, which is what tells the
+// caller whether the edit is still worth owing (settleOwed).
+func (r *Router) retryFinish(ctx context.Context, conv string, ref chat.MessageRef, reply chat.Reply, err error) error {
+	wait := r.cardRetry
+	if wait <= 0 {
+		wait = defaultCardRetry
+	}
+	for attempt := 1; attempt < cardFinishAttempts && retryableEdit(err); attempt++ {
+		pause := wait
+		if after, ok := chat.RetryAfter(err); ok && after > pause {
+			pause = after
+		}
+		pause = min(pause, cardRetryCap)
+		r.logf.Warnf("progress %s: finalise card %s: %v; trying again in %s", conv, ref.ID, err, pause)
+		timer := time.NewTimer(pause)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			r.logf.Warnf("progress %s: message %s could not be finalised (%v, and no time left to try again); it is left as it was last drawn, which may be as running",
+				conv, ref.ID, err)
+			return err
+		case <-timer.C:
+		}
+		if err = r.out.Update(ctx, ref, reply); err == nil {
+			return nil
+		}
+		wait *= 2
+	}
+	r.logf.Warnf("progress %s: message %s could not be finalised (%v); it is left as it was last drawn, which may be as running",
+		conv, ref.ID, err)
+	return err
+}
+
+// retryableEdit reports whether an edit that failed with err is worth making
+// again: not one the platform has refused for good.
+func retryableEdit(err error) bool {
+	return !errors.Is(err, chat.ErrNotFound) && !errors.Is(err, chat.ErrDenied) && !errors.Is(err, chat.ErrUnsupported)
+}
+
+// finishCardsAtExit finalises every card still running, as the process is
+// about to exit: each conversation's progress message that is a card holding
+// calls is edited to say a restart interrupted it. Without this a shutdown
+// leaves every such card as it was last drawn, and with no state file nothing
+// ever comes back for them: a spinner, for good, in each thread.
+//
+// ctx is the serve context, usually cancelled by now; the edits run detached
+// from it, all conversations at once, inside exitCardGrace in all. A card
+// that is finalised is taken out of service, so the snapshot written after
+// this no longer names it. One that could not be is left named there, with
+// its calls, for the next process to finalise (restore) — and without a state
+// file, in the log.
+func (r *Router) finishCardsAtExit(ctx context.Context) {
+	xctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), exitCardGrace)
+	defer cancel()
+	type live struct {
+		conv string
+		e    *sessionEntry
+	}
+	var entries []live
+	r.mu.Lock()
+	for conv, e := range r.sessions {
+		select {
+		case <-e.ready:
+		default:
+			continue
+		}
+		if e.err == nil {
+			entries = append(entries, live{conv, e})
+		}
+	}
+	r.mu.Unlock()
+	var wg sync.WaitGroup
+	for _, l := range entries {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			r.interruptCard(xctx, l.e, l.conv)
+		}()
+	}
+	wg.Wait()
+	// And the finalising edits of turns that had already ended, still being
+	// retried in the background: give them what is left of the grace.
+	for waiting := true; waiting; {
+		r.fmu.Lock()
+		pending := r.finishing
+		r.fmu.Unlock()
+		if pending == 0 {
+			break
+		}
+		select {
+		case <-xctx.Done():
+			waiting = false
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	// Whatever is still owed its last edit gets one more try, now: a card
+	// that ran out of attempts during an outage long over would otherwise
+	// spin until the next process came up. What is still owed after this is
+	// in the last snapshot, for that process — and named here, since without
+	// a state file there is none.
+	owed := r.owedCards()
+	if xctx.Err() == nil {
+		for _, o := range owed {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				r.settleOwed(o, r.out.Update(xctx, o.ref, finishReply(o.conv, o.act)))
+			}()
+		}
+		wg.Wait()
+	}
+	for _, o := range r.owedCards() {
+		r.logf.Warnf("progress %s: exiting while message %s is still owed its last edit; it is left as it was last drawn, which may be as running", o.conv, o.ref.ID)
+	}
+}
+
+// interruptCard finalises e's progress message as interrupted by a restart, if
+// it is a card that holds calls, and takes it out of service once that has
+// landed. A clock is left alone, as a shutdown always has left it.
+//
+// Taking it out of service takes the placeholder off the entry's record, which
+// was how the next process knew a turn was in flight here. The turn still is —
+// the daemon carries on — so the entry says so itself (leftAtExit), and the
+// record with it (sessionRecord.InFlight).
+func (r *Router) interruptCard(ctx context.Context, e *sessionEntry, conv string) {
+	// Under emu, like every other editor: a redraw in flight lands first,
+	// and none can follow.
 	e.emu.Lock()
 	defer e.emu.Unlock()
-	if e.currentProgress().ID != ref.ID {
-		return nil // retired or replaced while this edit waited
+	e.pmu.Lock()
+	ref, holds := e.progressMsg, e.card.holds()
+	var act *chat.Activity
+	if holds {
+		act = e.card.interrupted()
 	}
-	return r.out.Update(ctx, ref, chat.Reply{Conversation: conv, Text: text, Kind: chat.KindProgress})
+	e.pmu.Unlock()
+	if ref.ID == "" || !holds {
+		return
+	}
+	if r.finishCardNow(ctx, conv, ref, act) != nil {
+		return
+	}
+	// Only if it is still the message that was edited. emu orders editors,
+	// not the slot: a later turn, or a move, puts another message in it
+	// without waiting here, and that one is not this card.
+	if e.takeProgressIf(ref) {
+		e.leftAtExit.Store(e.turnInFlight())
+	}
+}
+
+// finaliseCard finalises the entry's progress message if it is a card that
+// holds calls, reporting whether it was. A clock, or no message, is left
+// exactly as it is.
+func (r *Router) finaliseCard(ctx context.Context, e *sessionEntry, conv string, done bool) bool {
+	e.emu.Lock()
+	defer e.emu.Unlock()
+	t := e.takeProgressTurn(true)
+	if t.ref.ID == "" {
+		return false
+	}
+	r.retireTaken(ctx, conv, t, done)
+	return true
+}
+
+// settleCard is what every boundary that stops a turn's clock without retiring
+// its message does about a card. A clock left behind stops, and says how far
+// the turn got; a card left behind keeps its spinner for good, claiming a turn
+// that is over is still running. So a card that holds calls is finalised at
+// the boundary — the answer, if one is still coming, lands under it and finds
+// nothing left to retire — and a turn queued behind it is given a placeholder
+// of its own, where it would otherwise have inherited this one.
+func (r *Router) settleCard(ctx context.Context, e *sessionEntry, conv string, done bool) {
+	if !r.finaliseCard(ctx, e, conv, done) {
+		return
+	}
+	if e.backlogged() {
+		r.queuePlaceholder(ctx, e, conv)
+	}
+}
+
+// queuePlaceholder posts a fresh placeholder for a turn that is queued behind
+// one whose card has just been finalised. It carries no clock yet: the daemon
+// taking the message up is what starts it (resumeProgress).
+func (r *Router) queuePlaceholder(ctx context.Context, e *sessionEntry, conv string) {
+	ref, err := r.out.Send(ctx, chat.Reply{Conversation: conv, Text: workingText, Kind: chat.KindProgress})
+	r.metrics.recordReply(err)
+	if err != nil {
+		r.logf.Warnf("progress %s: post for the queued turn: %v", conv, err)
+		return
+	}
+	if !e.strandProgress(ref, time.Now()) {
+		if derr := r.out.Delete(ctx, ref); derr != nil {
+			r.logf.Warnf("progress %s: drop unneeded placeholder: %v", conv, derr)
+		}
+	}
+}
+
+// finalLine is what a retired placeholder says where its clock was: "✔ Done ·
+// 12s", or "✖ Stopped · 12s" for a turn that did not finish. start is when the
+// turn began; zero when unknown, and the line carries no time.
+func finalLine(start time.Time, done bool) string {
+	text := markFailed + " Stopped"
+	if done {
+		text = markOK + " Done"
+	}
+	if !start.IsZero() {
+		text += " · " + formatElapsed(time.Since(start))
+	}
+	return text
+}
+
+// redrawProgress renders the progress message from the turn's state as it is
+// now and edits it, ordered against every other editor (emu). ok is false when
+// there is no message to edit — the turn ended, or never had one.
+//
+// The render is inside the lock, not handed in from outside it. A tick that
+// rendered first and edited second could otherwise land after a result's edit
+// that rendered later, and put a line the result had ticked off back to
+// running until the next edit came along. Rendered under emu, the edits go out
+// in order and each shows everything recorded before it.
+//
+// It is the one place a card is edited while its turn runs, and so where one
+// that has grown past what a message should hold rolls over (splitCard).
+func (r *Router) redrawProgress(ctx context.Context, e *sessionEntry, conv string, mode ProgressMode) (ok bool, err error) {
+	e.emu.Lock()
+	defer e.emu.Unlock()
+	ref, text, act, ok := e.editRender(mode)
+	if !ok {
+		return false, nil
+	}
+	if act != nil && stepLines(act.Steps) > r.cardLineLimit() {
+		if split, more := r.splitCard(ctx, e, conv, mode); split {
+			// The continuation was posted as the turn stands, so there is
+			// nothing left to edit — unless a burst left more than one
+			// message's worth, in which case it rolls over again, a bounded
+			// number of times: what is still over after that waits for the
+			// next redraw.
+			for i := 0; more && i < maxRolloversPerRedraw; i++ {
+				if split, more = r.splitCard(ctx, e, conv, mode); !split {
+					break
+				}
+			}
+			return true, nil
+		}
+	}
+	err = r.out.Update(ctx, ref, chat.Reply{Conversation: conv, Text: text, Kind: chat.KindProgress, Activity: act})
+	e.noteEdit(err == nil, r.cardRedrawInterval())
+	return true, err
+}
+
+// maxRolloversPerRedraw bounds how many further messages one redraw may roll a
+// card over into. Each is a post and an edit; a turn that has outrun this many
+// has outrun the platform's rate limit too, and is better caught up over the
+// next few redraws than in one burst of calls.
+const maxRolloversPerRedraw = 4
+
+// requestRedraw asks for the card to be redrawn because a call, a result or a
+// subagent frame changed it. Redraws asked for this way are coalesced: the
+// first goes out at once, and any that follow inside cardRedrawInterval of the
+// last edit become one trailing redraw at the end of it, which renders
+// whatever has been recorded by then. So a burst of frames costs one edit per
+// interval, and the last state is always drawn.
+//
+// ctx must outlive the caller's own work — the trailing redraw runs on it
+// later — so a subagent poller passes the relay's context, not its own.
+func (r *Router) requestRedraw(ctx context.Context, e *sessionEntry, conv string) {
+	e.pmu.Lock()
+	if e.progressMsg.ID == "" || e.turnStart.IsZero() || e.redrawTimer != nil {
+		// Nothing to draw into, or a trailing redraw is already owed and
+		// will show this change too.
+		e.pmu.Unlock()
+		return
+	}
+	// After a failed edit the interval is the stand-off that failure earned
+	// (noteEdit), not the usual one.
+	if wait := max(r.cardRedrawInterval(), e.redrawBackoff) - time.Since(e.redrawAt); wait > 0 {
+		e.redrawGen++
+		gen := e.redrawGen
+		e.redrawTimer = time.AfterFunc(wait, func() { r.trailingRedraw(ctx, e, conv, gen) })
+		e.pmu.Unlock()
+		return
+	}
+	// Claimed here, under the lock, and not left to the render: a second
+	// request arriving before this one has rendered — the relay and a
+	// subagent's poller both ask — then finds the interval already running
+	// and becomes the trailing redraw, rather than a second edit beside it.
+	e.redrawAt = time.Now()
+	e.pmu.Unlock()
+	r.drawCard(ctx, e, conv)
+}
+
+// trailingRedraw is the redraw requestRedraw deferred. gen is the timer's
+// own: a turn that has ended or been replaced since reset it, and whatever
+// that turn owed is not drawn into the next one's message.
+func (r *Router) trailingRedraw(ctx context.Context, e *sessionEntry, conv string, gen uint64) {
+	e.pmu.Lock()
+	if e.redrawGen != gen || e.redrawTimer == nil {
+		e.pmu.Unlock()
+		return
+	}
+	e.redrawTimer = nil
+	e.pmu.Unlock()
+	if ctx.Err() != nil {
+		return
+	}
+	r.drawCard(ctx, e, conv)
+}
+
+// drawCard redraws the progress message for a change to its card. A failed
+// edit is logged and healed by the next, which renders the whole card again —
+// and the next is asked for here, since the change that wanted this one is
+// still undrawn. It comes no sooner than the stand-off the failure earned
+// (noteEdit): as with the ticker, a conversation that is being rate limited
+// must not be answered with more edits at the same rate. The first edit that
+// lands ends the stand-off.
+func (r *Router) drawCard(ctx context.Context, e *sessionEntry, conv string) {
+	ok, err := r.redrawProgress(ctx, e, conv, r.progressFor(e.channel))
+	if !ok || err == nil {
+		return
+	}
+	r.logf.Warnf("progress %s: card: %v", conv, err)
+	r.requestRedraw(ctx, e, conv)
+}
+
+// cardRedrawInterval is the least time between two coalesced redraws.
+func (r *Router) cardRedrawInterval() time.Duration {
+	if r.cardRedraw > 0 {
+		return r.cardRedraw
+	}
+	return defaultCardRedraw
+}
+
+// cardLineLimit is how many lines a card holds before it rolls over.
+func (r *Router) cardLineLimit() int {
+	if r.cardMaxLines > 0 {
+		return r.cardMaxLines
+	}
+	return defaultCardMaxLines
+}
+
+// splitCard freezes the card where it is, as a finished stretch of the turn,
+// and continues the turn in a fresh message below, with the same turn clock.
+// It is how a card rolls over when it has grown too long, and how it makes
+// way for narration: either way the calls already drawn stay where they were
+// drawn, and later ones go to the new message.
+//
+// What is frozen is every call that has returned. A call still running moves
+// to the new message, so the frozen one shows nothing as running and nothing a
+// result may still arrive for is forgotten; a delegation still in flight
+// heads both (turnCard.planFreeze). split is false when there is nothing to
+// freeze, or the platform refused a step — then nothing has changed, and the
+// caller carries on with the card as it was. more says the message the turn
+// continues in is itself over the line limit: one freeze leaves behind no more
+// than a message should hold, and a burst can be more than that.
+//
+// Post first, then freeze, then swap, as reanchorProgress orders its own move
+// and for its reason: the failure this order has is a message posted and taken
+// back, where the other's is a turn left with a frozen card and no live one.
+//
+// The caller holds emu.
+func (r *Router) splitCard(ctx context.Context, e *sessionEntry, conv string, mode ProgressMode) (split, more bool) {
+	limit := r.cardLineLimit()
+	old, plan, frozen, next, unused, ok := e.planSplit(conv, mode, limit)
+	if !ok {
+		return false, false
+	}
+	fresh, err := r.out.Send(ctx, next)
+	r.metrics.recordReply(err)
+	if err != nil {
+		r.logf.Warnf("progress %s: continue card: %v", conv, err)
+		return false, false
+	}
+	if err := r.out.Update(ctx, old, frozen); err != nil {
+		r.logf.Warnf("progress %s: freeze card: %v", conv, err)
+		r.dropCard(ctx, conv, fresh, unused, "drop unused card")
+		return false, false
+	}
+	if !e.commitSplit(old, fresh, plan) {
+		// A later turn claimed the slot while this was in the air. It took
+		// the whole record with it and finalises the old message itself
+		// (retireStale); ours is nobody's.
+		r.dropCard(ctx, conv, fresh, unused, "drop orphaned card")
+		return true, false
+	}
+	// The progress message is a different one now, and the snapshot names
+	// it: left unsaid, a crash before the next thing that dirties the state
+	// would have the next process finalise the frozen message as the card in
+	// flight, and never touch the live one (caught in review).
+	r.markDirty()
+	return true, next.Activity != nil && stepLines(next.Activity.Steps) > limit
+}
+
+// planSplit renders both halves of a split without changing anything: the
+// message to freeze and what it will say, and the reply the turn continues in.
+// unused is what that reply's message is edited into if it turns out not to be
+// wanted and cannot be deleted (dropCard); nil when it carries no card. ok is
+// false with no card, or one with nothing to freeze.
+func (e *sessionEntry) planSplit(conv string, mode ProgressMode, limit int) (old chat.MessageRef, plan *cardFreeze, frozen, next chat.Reply, unused *chat.Activity, ok bool) {
+	e.pmu.Lock()
+	defer e.pmu.Unlock()
+	if e.progressMsg.ID == "" || e.turnStart.IsZero() || !e.card.holds() {
+		return chat.MessageRef{}, nil, chat.Reply{}, chat.Reply{}, nil, false
+	}
+	elapsed := time.Since(e.turnStart)
+	plan, ok = e.card.planFreeze(elapsed, limit)
+	if !ok {
+		return chat.MessageRef{}, nil, chat.Reply{}, chat.Reply{}, nil, false
+	}
+	frozen = chat.Reply{Conversation: conv, Text: cardText(plan.act), Kind: chat.KindActivity, Activity: plan.act}
+	next = chat.Reply{
+		Conversation: conv,
+		Text:         subTickText(elapsed, e.tools, e.step, e.subAgent, e.subTools, e.subCall),
+		Kind:         chat.KindProgress,
+	}
+	if rest := e.card.rest(plan); rest.holds() {
+		next.Activity = rest.live(elapsed, mode == ProgressStream)
+		unused = rest.segment(elapsed)
+	} else if mode != ProgressStatus {
+		// No call carried over: the new message is a plain clock until the
+		// next one, in the words its mode gives a clock.
+		next.Text = tickText(elapsed, nil, 0)
+	}
+	return e.progressMsg, plan, frozen, next, unused, true
+}
+
+// dropCard deletes a progress message that is no longer wanted: one posted
+// for a move or a split that then did not happen, or the one a move left
+// behind. finished is what the message is edited into if it cannot be
+// deleted; nil for a message that is a plain clock.
+//
+// The edit is what matters. A clock that cannot be deleted stops where it is,
+// as it always has, and is litter. A card that cannot be deleted was posted
+// running and nothing will ever edit it again, so it would spin for good —
+// the one thing a card must never do. So it is finished instead: its lines
+// read as left behind, which is what they are, since the turn carries on in
+// another message. If that edit fails too the log names the message, so an
+// operator can find it, and the card is owed the edit (owe): it is tried again
+// as the process exits, and by the next one.
+func (r *Router) dropCard(ctx context.Context, conv string, ref chat.MessageRef, finished *chat.Activity, what string) {
+	derr := r.out.Delete(ctx, ref)
+	if derr == nil {
+		return
+	}
+	r.logf.Warnf("progress %s: %s: %v", conv, what, derr)
+	if finished == nil {
+		return
+	}
+	err := r.out.Update(ctx, ref, chat.Reply{Conversation: conv, Text: cardText(finished), Kind: chat.KindActivity, Activity: finished})
+	if err == nil {
+		r.logf.Warnf("progress %s: message %s could not be deleted; finished it in place instead", conv, ref.ID)
+		return
+	}
+	r.logf.Warnf("progress %s: message %s could be neither deleted (%v) nor finished (%v); it is left drawn as running",
+		conv, ref.ID, derr, err)
+	if retryableEdit(err) {
+		r.owe(conv, ref, finished, time.Now())
+	}
+}
+
+// commitSplit makes a split the platform has taken the turn's state: the
+// frozen calls leave the record and fresh becomes the progress message.
+// Compare-and-swap on old, as replaceProgress is and for its reason.
+func (e *sessionEntry) commitSplit(old, fresh chat.MessageRef, plan *cardFreeze) bool {
+	e.pmu.Lock()
+	defer e.pmu.Unlock()
+	if old.ID == "" || e.progressMsg != old {
+		return false
+	}
+	e.card.commitFreeze(plan)
+	e.progressMsg = fresh
+	e.redrawAt = time.Now() // fresh was posted as the turn stands: that is a draw
+	return true
+}
+
+// drawsActivity reports whether the adapter renders Reply.Activity.
+func (r *Router) drawsActivity() bool {
+	d, ok := r.out.(chat.DrawsActivity)
+	return ok && d.DrawsActivity()
+}
+
+// cardMode reports whether a turn's tool activity in mode is drawn as a card:
+// one message, edited in place for the whole turn and kept when it ends (see
+// card.go). It is the one test for that — everything a card does differently
+// asks here — so which modes draw a card is this line and nothing else.
+//
+// It decides how a turn starts. Once a turn has a card it keeps it: see
+// carded.
+func (r *Router) cardMode(mode ProgressMode) bool {
+	return (mode == ProgressStatus || mode == ProgressStream) && r.drawsActivity()
+}
+
+// carded reports whether e's turn in flight keeps its calls as a card, which
+// is what every path that feeds or draws one asks. A turn starts as cardMode
+// says. A turn that has recorded a call on its card stays a card turn to its
+// end, whatever cardMode says later: the adapter may have had a card refused
+// since (DrawsActivity turns false), or the channel's mode may have been
+// changed, and a record that stopped being fed half way would still be kept
+// when the turn ended, saying "Done · 1 call" over a turn that made three
+// (caught in review). So its calls, results and subagent frames go on being
+// recorded, nothing is posted beside it, and where the adapter no longer
+// draws the card the text that goes with it is what shows. The next turn
+// starts from cardMode again.
+func (r *Router) carded(e *sessionEntry, mode ProgressMode) bool {
+	return e.cardTurn() || r.cardMode(mode)
 }
 
 // retireMessage deletes a placeholder, or finalises it where deleting leaves a
 // trace. start is when its turn began; zero when unknown.
 func (r *Router) retireMessage(ctx context.Context, conv string, ref chat.MessageRef, start time.Time, done bool) {
 	if t, ok := r.out.(chat.DeleteLeavesTrace); ok && t.DeleteLeavesTrace() {
-		text := markFailed + " Stopped"
-		if done {
-			text = markOK + " Done"
-		}
-		if !start.IsZero() {
-			text += " · " + formatElapsed(time.Since(start))
-		}
-		if err := r.out.Update(ctx, ref, chat.Reply{Conversation: conv, Text: text, Kind: chat.KindActivity}); err != nil {
+		if err := r.out.Update(ctx, ref, chat.Reply{Conversation: conv, Text: finalLine(start, done), Kind: chat.KindActivity}); err != nil {
 			r.logf.Warnf("progress %s: finalise: %v", conv, err)
 		}
 		return
@@ -2605,6 +3626,11 @@ func (r *Router) deliverText(ctx context.Context, e *sessionEntry, conv, text st
 		e.endTurn()
 		r.clearProgress(ctx, e, conv)
 	}
+	// An answer with a message queued behind it keeps the placeholder for the
+	// queued turn. Not a card that holds calls: that is this turn's record,
+	// finalised where it is before the answer goes out under it, and the
+	// queued turn gets a fresh placeholder below the answer.
+	handed := ended && !final && r.finaliseCard(ctx, e, conv, true)
 	if !r.settingsFor(e.channel).showUsage {
 		usage = nil
 	}
@@ -2626,6 +3652,11 @@ func (r *Router) deliverText(ctx context.Context, e *sessionEntry, conv, text st
 	}
 	if final || (!e.turnInFlight() && !e.backlogged()) {
 		return
+	}
+	if handed {
+		// Whether or not the answer landed: the card is no longer a
+		// placeholder, so without this the queued turn has none.
+		r.queuePlaceholder(ctx, e, conv)
 	}
 	if e.turnInFlight() {
 		// The turn was left running on the strength of a boundary that has not
@@ -2649,8 +3680,11 @@ func (r *Router) deliverText(ctx context.Context, e *sessionEntry, conv, text st
 	if ended || hasCalls {
 		// A backlogged answer (#42) or narration paired with tool calls in the
 		// same frame: the clock belongs below this text now, with nothing to
-		// wait for.
-		r.reanchorProgress(ctx, e, conv)
+		// wait for. A placeholder just posted for the queued turn is there
+		// already.
+		if !handed {
+			r.reanchorProgress(ctx, e, conv)
+		}
 		return
 	}
 	r.scheduleReanchor(ctx, e, conv)
@@ -2722,32 +3756,57 @@ func (r *Router) reanchorProgress(ctx context.Context, e *sessionEntry, conv str
 	if !mode.clocked() {
 		return // off never posted one
 	}
+	if r.carded(e, mode) {
+		// A card that holds calls is not moved: it is frozen where it is, as
+		// the stretch of the turn before whatever was just posted, and the
+		// turn carries on in a fresh card below with the same clock. Moving
+		// it would take calls a reader has seen out of where they saw them.
+		// One with nothing finished to leave behind moves whole, below.
+		e.emu.Lock()
+		split, _ := r.splitCard(ctx, e, conv, mode)
+		e.emu.Unlock()
+		if split {
+			return
+		}
+	}
 	if !r.deletesCleanly() {
 		// Moving the clock is a post and a delete, and where a delete leaves
 		// a trace every move would leave one in the thread. It stays put.
 		return
 	}
-	old, text, ok := e.tickRender(mode)
+	old, text, act, posted, ok := e.moveRender(mode)
 	if !ok {
 		return // no placeholder outstanding: nothing to move
 	}
-	fresh, err := r.out.Send(ctx, chat.Reply{Conversation: conv, Text: text, Kind: chat.KindProgress})
+	fresh, err := r.out.Send(ctx, chat.Reply{Conversation: conv, Text: text, Kind: chat.KindProgress, Activity: act})
 	r.metrics.recordReply(err)
 	if err != nil {
 		r.logf.Warnf("progress %s: re-anchor: %v", conv, err)
 		return // the old one is still live and still ticking
 	}
-	if !e.replaceProgress(old, fresh) {
+	// What the old message is, is asked at the swap and not taken from the
+	// render above: the turn's first call can have landed while the new one
+	// was being posted, and drawn the clock that was rendered as a running
+	// card (moveProgress).
+	left, ok := e.moveProgress(old, fresh)
+	if !ok {
 		// A later turn claimed the slot while this was in the air. Ours is
 		// nobody's, so take it back out rather than leave an orphan ticking.
-		if derr := r.out.Delete(ctx, fresh); derr != nil {
-			r.logf.Warnf("progress %s: drop orphaned re-anchor: %v", conv, derr)
-		}
+		r.dropCard(ctx, conv, fresh, posted, "drop orphaned re-anchor")
 		return
 	}
-	if derr := r.out.Delete(ctx, old); derr != nil {
-		r.logf.Warnf("progress %s: clear re-anchored: %v", conv, derr)
+	r.markDirty() // the snapshot names the progress message, and it has moved
+	if left == nil {
+		r.dropCard(ctx, conv, old, nil, "clear re-anchored")
+		return
 	}
+	// The old message is a card, and until a moment ago it was the one being
+	// edited. Under emu, so that a redraw which rendered into it before the
+	// swap has landed by now: were it to land after the edit that finishes a
+	// card that could not be deleted, it would set it spinning again.
+	e.emu.Lock()
+	r.dropCard(ctx, conv, old, left, "clear re-anchored")
+	e.emu.Unlock()
 }
 
 // postActivity surfaces the tools the agent is running (stream and status
@@ -2760,10 +3819,25 @@ func (r *Router) reanchorProgress(ctx context.Context, e *sessionEntry, conv str
 // and if they disagreed the wording and the card icon would flip back and
 // forth every fifteen seconds. A standalone notice is still KindActivity,
 // where the distinction earns its icon.
+//
+// In card mode both modes go to the one message: the calls are recorded on the
+// turn's card and the card is redrawn, and stream posts no notice of its own —
+// the placeholder is the card. A turn with no placeholder has no card, and
+// falls through to the notice either mode would have posted without one.
 func (r *Router) postActivity(ctx context.Context, e *sessionEntry, conv string, mode ProgressMode, calls []daemon.ToolCall) {
-	if mode == ProgressStatus {
-		if ref, text, ok := e.noteActivity(toolNames(calls)); ok {
-			if err := r.editProgress(ctx, e, conv, ref, text); err != nil {
+	card := r.carded(e, mode)
+	if card || mode == ProgressStatus {
+		if e.noteActivity(calls, card, mode == ProgressStream) {
+			if card {
+				// A turn whose ticker gave up before its first call gets
+				// another now that there is a card for it to settle.
+				if start, stop, ok := e.reviveTicker(); ok && r.tickInterval > 0 {
+					go r.tick(ctx, e, conv, start, stop)
+				}
+				r.requestRedraw(ctx, e, conv)
+				return
+			}
+			if _, err := r.redrawProgress(ctx, e, conv, mode); err != nil {
 				r.logf.Warnf("relay %s: status activity: %v", conv, err)
 			}
 			return
@@ -2896,6 +3970,20 @@ func (r *Router) postToolResults(ctx context.Context, e *sessionEntry, conv stri
 			// that later render would draw this call as still running.
 			r.logf.Warnf("relay %s: tool result: %v", conv, err)
 		}
+	}
+}
+
+// cardToolResults files a frame of results against the turn's card and asks
+// for it to be redrawn. A result the card is not waiting for changes nothing
+// and edits nothing — except in stream mode, where a notice posted while the
+// turn had no card may be: those results go on to postToolResults.
+func (r *Router) cardToolResults(ctx context.Context, e *sessionEntry, conv string, mode ProgressMode, results []daemon.ToolResult) {
+	changed, rest := e.noteCardResults(results)
+	if changed {
+		r.requestRedraw(ctx, e, conv)
+	}
+	if mode == ProgressStream && len(rest) > 0 {
+		r.postToolResults(ctx, e, conv, rest)
 	}
 }
 
@@ -3138,9 +4226,18 @@ func (r *Router) reviveLocked(ctx context.Context, conv, channel string, rec ses
 		go func() {
 			pctx, cancel := platformContext(ctx)
 			defer cancel()
+			ref := chat.MessageRef{Conversation: conv, ID: rec.Placeholder}
+			// A card is never taken down. One a restart left is finalised
+			// by restore, which strips it from the record before any revive
+			// sees it; this is for a record that reaches here with one some
+			// other way.
+			if rec.Card != nil {
+				r.finishOwed(ctx, r.owe(conv, ref, rec.Card.interrupted(), time.Now()))
+				return
+			}
 			// Its turn was cut off by the restart: stopped, as far as this
 			// placeholder can honestly say.
-			r.retireMessage(pctx, conv, chat.MessageRef{Conversation: conv, ID: rec.Placeholder}, time.Time{}, false)
+			r.retireMessage(pctx, conv, ref, time.Time{}, false)
 		}()
 	}
 	return e
@@ -3350,8 +4447,12 @@ func (r *Router) relay(ctx context.Context, conv string, e *sessionEntry, owner 
 				// lie that grows. Fires once per conversational turn even
 				// when that turn made tool calls (confirmed live), so a
 				// tool-using turn is not cut short.
-				e.stopTicker()
+				e.stopTickerAt(true)
 				r.retireSpokenPlaceholder(ctx, e, conv)
+				// A clock left for the answer to retire merely stops; a card
+				// left that way keeps spinning. It is finalised here, and the
+				// answer lands under it.
+				r.settleCard(ctx, e, conv, true)
 				// Nobody is waiting on the daemon any more, whether or not
 				// this turn had anything to say. Without this, a turn that
 				// ended with no relayable text — interrupted, empty, or an
@@ -3518,9 +4619,17 @@ func (r *Router) relay(ctx context.Context, conv string, e *sessionEntry, owner 
 					// after the next turn was marked in flight, retiring its
 					// ticker early. A per-turn message identity is the fix, and
 					// is #42.
-					e.stopTicker()
+					completed := !e.signalsEnd.Load()
+					e.stopTickerAt(completed)
 					e.endTurn()
 					r.retireSpokenPlaceholder(ctx, e, conv)
+					// As at turn-complete, a card is not left spinning. But
+					// this is a turn that ended with no turn-complete: from a
+					// daemon that sends one, that is a turn that did not
+					// succeed — interrupted, or failed in a way nothing
+					// classified — and its card says stopped. A daemon that
+					// sends none ends every turn this way.
+					r.settleCard(ctx, e, conv, completed)
 				}
 				return nil
 			}
@@ -3569,20 +4678,38 @@ func (r *Router) relay(ctx context.Context, conv string, e *sessionEntry, owner 
 			// ToolResults even if the mode changed mid-turn so their pollers
 			// retire promptly.
 			mode := r.progressFor(e.channel)
-			if (mode == ProgressStream || mode == ProgressStatus || e.hasSubagentWatches()) && reply.Seq > e.noticed.Load() {
+			card := r.carded(e, mode)
+			if (mode == ProgressStream || mode == ProgressStatus || card || e.hasSubagentWatches()) && reply.Seq > e.noticed.Load() {
+				// Tool results ride the same event, under the "user" role the
+				// daemon gives anything the model did not author (#36). Stream
+				// mode ticks them off the notice that announced the call. In
+				// card mode they are filed against the turn's card instead,
+				// status mode's included — which is the only place status
+				// shows a result, so for an adapter that draws no card a
+				// status turn does not read them: it would be a parse, a
+				// watermark advance and an edit that changes nothing. A live
+				// subagent watch reads them whatever the mode, since a parent
+				// result is what retires its poller. A turn that has a card
+				// keeps feeding it whatever the mode or the adapter has
+				// become since (carded).
 				var results []daemon.ToolResult
-				if mode == ProgressStream || e.hasSubagentWatches() {
+				if mode == ProgressStream || card || e.hasSubagentWatches() {
 					results = daemon.ToolResults(ev.Data)
 				}
 				if len(results) > 0 {
 					r.finishSubagentsOnResults(ctx, conv, e, results)
-					if mode == ProgressStream {
+					switch {
+					case card:
+						e.noticed.Store(reply.Seq)
+						r.markDirty()
+						r.cardToolResults(ctx, e, conv, mode, results)
+					case mode == ProgressStream:
 						e.noticed.Store(reply.Seq)
 						r.markDirty()
 						r.postToolResults(ctx, e, conv, results)
 					}
 				}
-				if hasCalls && (mode == ProgressStream || mode == ProgressStatus) {
+				if hasCalls && (mode == ProgressStream || mode == ProgressStatus || card) {
 					e.noticed.Store(reply.Seq)
 					r.markDirty()
 					r.postActivity(ctx, e, conv, mode, calls)

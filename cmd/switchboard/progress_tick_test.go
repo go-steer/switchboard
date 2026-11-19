@@ -75,23 +75,28 @@ func TestTickText(t *testing.T) {
 func TestTickRenderScopesDetailToMode(t *testing.T) {
 	e := &sessionEntry{}
 	e.beginTurn(chat.MessageRef{ID: "ts1"}, time.Now().Add(-90*time.Second))
-	if _, _, ok := e.noteActivity([]string{"bash"}); !ok {
+	if !e.noteActivity([]daemon.ToolCall{{Name: "bash", Arg: "kubectl get pods"}}, false, false) {
 		t.Fatal("noteActivity on a live turn reported no message to edit")
 	}
 
-	_, status, ok := e.tickRender(ProgressStatus)
+	_, status, statusAct, ok := e.tickRender(ProgressStatus)
 	if !ok {
 		t.Fatal("tickRender(status) on a live turn = !ok")
 	}
 	if !strings.Contains(status, "1m30s") || !strings.Contains(status, "running `bash` (step 1)") {
 		t.Errorf("status tick = %q, want the clock and the tool", status)
 	}
-	_, indicator, ok := e.tickRender(ProgressIndicator)
+	_, indicator, indicatorAct, ok := e.tickRender(ProgressIndicator)
 	if !ok {
 		t.Fatal("tickRender(indicator) on a live turn = !ok")
 	}
 	if want := "⏳ Working… 1m30s"; indicator != want {
 		t.Errorf("indicator tick = %q, want %q", indicator, want)
+	}
+	// Outside card mode neither carries an Activity: the message is the line
+	// and nothing else, as it was before cards.
+	if statusAct != nil || indicatorAct != nil {
+		t.Errorf("activity outside card mode: status %+v, indicator %+v, want none", statusAct, indicatorAct)
 	}
 }
 
@@ -104,10 +109,10 @@ func TestTickRenderAfterTurnEnds(t *testing.T) {
 	if ref := e.takeProgress(); ref.ID != "ts1" {
 		t.Fatalf("takeProgress = %q, want ts1", ref.ID)
 	}
-	if _, _, ok := e.tickRender(ProgressStatus); ok {
+	if _, _, _, ok := e.tickRender(ProgressStatus); ok {
 		t.Error("tickRender after the turn ended = ok, want the tick dropped")
 	}
-	if _, _, ok := e.noteActivity([]string{"bash"}); ok {
+	if e.noteActivity([]daemon.ToolCall{{Name: "bash"}}, true, false) {
 		t.Error("noteActivity after the turn ended = ok, want a fallback notice instead")
 	}
 	// Retiring twice — clearProgress on a turn whose ticker already stopped —

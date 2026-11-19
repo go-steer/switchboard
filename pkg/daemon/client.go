@@ -1033,13 +1033,20 @@ var identityArgs = [][]string{
 }
 
 // noiseArgs never identify a call: how its output is shaped, which page of it,
-// or an internal handle on an earlier result (retrieve_raw's call_id). The
-// fallback skips them, so a call with nothing better shows no argument rather
-// than "TABLE" or "call_4216138" (reported from the GKE deployment).
+// an internal handle on an earlier result (retrieve_raw's call_id), or a
+// switch on what a delegation is handed (include_input). The fallback skips
+// them, so a call with nothing better shows no argument rather than "TABLE" or
+// "call_4216138" (reported from the GKE deployment).
+//
+// include_input is here because it sorts ahead of the argument that matters:
+// core-agent's delegation tools take {"include_input": true, "request": "…"},
+// and the first scalar by name made every delegation read "true" (seen live).
+// Skipped, the fallback reaches the request.
 var noiseArgs = map[string]bool{
 	"outputFormat": true, "output_format": true, "format": true,
 	"pageToken": true, "page_token": true,
 	"call_id": true, "callId": true,
+	"include_input": true, "includeInput": true,
 }
 
 // summariseArg picks one argument out of a tool call and renders it as a

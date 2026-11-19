@@ -192,7 +192,7 @@ func (r *Router) markTaskDeleted(ctx context.Context, task, reason string) {
 		}
 		if e.task == task {
 			rec := e.record()
-			rec.Placeholder = "" // finalised below
+			rec.Placeholder, rec.Card, rec.InFlight = "", nil, false // finalised below
 			r.dormant[conv] = rec
 			delete(r.sessions, conv)
 			stopped = append(stopped, stoppedEntry{conv, e})

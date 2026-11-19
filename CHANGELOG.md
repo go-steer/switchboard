@@ -6,6 +6,30 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Slack draws a turn's tool activity as one `task_card`, kept when the turn
+  ends** (#180). In `status` and `stream` modes on Slack, once a turn calls a
+  tool, the progress placeholder becomes a single `task_card` edited in place
+  (coalesced to at most one redraw every 3s, with backoff on errors) and kept
+  above the answer as **Done · 40s · 12 calls** (or **Stopped**, or
+  **Interrupted by a restart · N calls** across shutdown/restore). Subagent
+  inner calls (`_fallback`, `propose-change`, `spawn_agent`) nest under the
+  parent call that delegated to them; calls with no result in a frozen segment
+  render with a neutral `–` mark (`N unfinished`). `status` keeps tool names
+  and verdicts only; `stream` adds each call's argument summary, duration
+  (including `<0.1s`), and a live rolling 5-line `rich_text` window beneath the
+  folded card while the turn runs. Cards roll over cleanly at 400 lines, split
+  around mid-turn narration, and latch back to plain text on `invalid_blocks`
+  without extra scopes or manifest changes. Google Chat is unchanged.
+  `chat.Reply.Activity`, `chat.DrawsActivity`, and `chat.RetryAfter` provide
+  the provider-neutral seam.
+
+### Fixed
+
+- **Delegation argument summaries skip `include_input` / `includeInput`** so
+  subagent calls show the start of `request` instead of `true`.
+
 ## [v0.11.0] — 2026-11-18
 
 Long subagent delegations (`_fallback`, `propose-change`, and synchronously
