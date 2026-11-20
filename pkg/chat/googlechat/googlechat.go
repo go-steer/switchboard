@@ -68,6 +68,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -910,14 +911,83 @@ func classify(err error) error {
 
 // platformErr wraps a Chat failure with its classification, if it has one. The
 // result reads exactly like err (no sentinel noise in the log line) but
-// errors.Is finds chat.ErrNotFound / chat.ErrDenied through it.
+// errors.Is finds chat.ErrNotFound / chat.ErrDenied through it, and
+// chat.RetryAfter finds any delay Chat sent on a rate-limited response.
 func platformErr(err error) error {
-	class := classify(err)
-	if class == nil {
-		return err
+	if class := classify(err); class != nil {
+		return classifiedError{err: err, class: class}
 	}
-	return classifiedError{err: err, class: class}
+	if after, ok := retryAfterOf(err, time.Now()); ok {
+		return rateLimitedError{err: err, after: after}
+	}
+	return err
 }
+
+// maxRetryAfterHeader bounds an integer Retry-After value so a pathological
+// header cannot overflow time.Duration. Callers apply their own retry cap too.
+const maxRetryAfterHeader = 24 * time.Hour
+
+// retryAfterOf extracts a positive retry delay from a Google API error: either
+// an HTTP Retry-After header (delta-seconds or HTTP-date) or a
+// google.rpc.RetryInfo entry in the JSON error's details list.
+func retryAfterOf(err error, now time.Time) (time.Duration, bool) {
+	var ae *googleapi.Error
+	if !errors.As(err, &ae) {
+		return 0, false
+	}
+	if d, ok := parseRetryAfterHeader(ae.Header.Get("Retry-After"), now); ok {
+		return d, true
+	}
+	for _, item := range ae.Details {
+		m, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if t, _ := m["@type"].(string); t != "type.googleapis.com/google.rpc.RetryInfo" {
+			continue
+		}
+		if raw, _ := m["retryDelay"].(string); raw != "" {
+			if d, derr := time.ParseDuration(raw); derr == nil && d > 0 {
+				return min(d, maxRetryAfterHeader), true
+			}
+		}
+	}
+	return 0, false
+}
+
+func parseRetryAfterHeader(v string, now time.Time) (time.Duration, bool) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0, false
+	}
+	if secs, err := strconv.ParseInt(v, 10, 64); err == nil {
+		if secs <= 0 {
+			return 0, false
+		}
+		maxSecs := int64(maxRetryAfterHeader / time.Second)
+		if secs > maxSecs {
+			return maxRetryAfterHeader, true
+		}
+		return time.Duration(secs) * time.Second, true
+	}
+	if at, err := http.ParseTime(v); err == nil {
+		if d := at.Sub(now); d > 0 {
+			return min(d, maxRetryAfterHeader), true
+		}
+	}
+	return 0, false
+}
+
+// rateLimitedError carries a rate-limited call's error and the delay Chat
+// asked for (Retry-After or google.rpc.RetryInfo), for chat.RetryAfter.
+type rateLimitedError struct {
+	err   error
+	after time.Duration
+}
+
+func (e rateLimitedError) Error() string             { return e.err.Error() }
+func (e rateLimitedError) Unwrap() error             { return e.err }
+func (e rateLimitedError) RetryAfter() time.Duration { return e.after }
 
 // classifiedError carries a platform error and its neutral classification.
 type classifiedError struct {

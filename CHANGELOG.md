@@ -62,6 +62,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Failed `agent <name>` thread starts no longer leave `"Message deleted by its
+  author"` tombstones on Google Chat.** When opening the agent's session fails
+  after posting the thread starter, `startAgentThread` now edits the starter in
+  place into the failure notice on `DeleteLeavesTrace` platforms instead of
+  deleting it and posting a second message.
+- **Google Chat rate-limit errors surface `Retry-After` and
+  `google.rpc.RetryInfo` delays through `chat.RetryAfter`,** matching the Slack
+  adapter so card-finalisation retries honour server-supplied backoff windows.
 - **Google Chat `stream`-mode tool activity no longer trips the 1-write/sec
   per-space quota** (#107). Coalescing a turn's tool calls and subagent inner
   calls into one in-place `cardsV2` card (at most one edit every 3s) replaces

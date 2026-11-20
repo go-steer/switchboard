@@ -267,6 +267,177 @@ func TestAFailedStartTakesTheStarterDown(t *testing.T) {
 	waitFor(t, func() bool { return containsRefID(fake.deletedRefs(), "ts1") }, "the starter was not taken down")
 }
 
+type traceThreadingSender struct {
+	slackThreadingSender
+	failUpdate error
+}
+
+func (traceThreadingSender) DeleteLeavesTrace() bool { return true }
+
+func (s traceThreadingSender) Update(ctx context.Context, ref chat.MessageRef, r chat.Reply) error {
+	if s.failUpdate != nil {
+		return s.failUpdate
+	}
+	return s.slackThreadingSender.Update(ctx, ref, r)
+}
+
+// Where deleting leaves a tombstone (Google Chat's "Message deleted by its
+// author"), a failed start edits the starter in place into the failure notice
+// rather than deleting it and posting a second message — falling back to a
+// separate notice only if that edit fails.
+func TestAFailedStartEditsTheStarterInPlaceWhereDeletesShow(t *testing.T) {
+	broken := stubDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	})
+
+	t.Run("session failure edits starter in place without Delete", func(t *testing.T) {
+		fake := &fakeSender{replies: make(chan chat.Reply, 8)}
+		r := NewRouter(nil, traceThreadingSender{slackThreadingSender: slackThreadingSender{fake}}, ProgressOff, nil, nil)
+		set, _ := newAgentSet("a", &agent{name: "a", daemon: broken}, &agent{name: "b", display: "Infra agent", daemon: broken})
+		r.setAgents(set)
+
+		if err := r.startAgentThread(context.Background(), agentCmd("C1:77", "C1", "b hello"), set.byName["b"], "hello"); err == nil {
+			t.Fatal("startAgentThread succeeded against a daemon that refuses sessions")
+		}
+		if starter := recvReply(t, fake.replies); starter.Conversation != "C1" {
+			t.Errorf("starter = %+v, want it in the channel", starter)
+		}
+		if got := fake.deletedRefs(); len(got) != 0 {
+			t.Fatalf("Delete called on %v where DeleteLeavesTrace is true", got)
+		}
+		edits := fake.updatedCalls()
+		if len(edits) != 1 || edits[0].ref.ID != "ts1" || edits[0].reply.Kind != chat.KindNotice ||
+			!strings.Contains(edits[0].text, "Could not start a conversation with Infra agent") {
+			t.Fatalf("edits = %+v, want starter ts1 edited into KindNotice failure", edits)
+		}
+		select {
+		case extra := <-fake.replies:
+			t.Errorf("unexpected second Send %+v after starter was edited in place", extra)
+		default:
+		}
+	})
+
+	t.Run("fallback Send when in-place Update fails", func(t *testing.T) {
+		fake := &fakeSender{replies: make(chan chat.Reply, 8)}
+		out := traceThreadingSender{
+			slackThreadingSender: slackThreadingSender{fake},
+			failUpdate:           fmt.Errorf("patch failed"),
+		}
+		r := NewRouter(nil, out, ProgressOff, nil, nil)
+		set, _ := newAgentSet("a", &agent{name: "a", daemon: broken}, &agent{name: "b", display: "Infra agent", daemon: broken})
+		r.setAgents(set)
+
+		if err := r.startAgentThread(context.Background(), agentCmd("C1:77", "C1", "b hello"), set.byName["b"], "hello"); err == nil {
+			t.Fatal("startAgentThread succeeded against a daemon that refuses sessions")
+		}
+		recvReply(t, fake.replies) // starter
+		if got := fake.deletedRefs(); len(got) != 0 {
+			t.Fatalf("Delete called on %v where DeleteLeavesTrace is true", got)
+		}
+		notice := recvReply(t, fake.replies)
+		if !strings.Contains(notice.Text, "Could not start a conversation with Infra agent") {
+			t.Errorf("fallback notice = %+v, want failure notice posted", notice)
+		}
+	})
+
+	t.Run("unthreaded starter reply edits in place without Delete", func(t *testing.T) {
+		for _, emptyConv := range []bool{false, true} {
+			fake := &fakeSender{replies: make(chan chat.Reply, 8)}
+			var out sender = traceSender{fake}
+			if emptyConv {
+				out = traceLandsIn{fakeSender: fake, conv: ""}
+			}
+			r := NewRouter(nil, out, ProgressOff, nil, nil)
+			set, _ := newAgentSet("a", &agent{name: "a", daemon: broken}, &agent{name: "b", display: "Infra agent", daemon: broken})
+			r.setAgents(set)
+
+			if err := r.startAgentThread(context.Background(), agentCmd("C1:77", "C1", "b hello"), set.byName["b"], "hello"); err == nil {
+				t.Fatalf("emptyConv=%t: startAgentThread succeeded when starter landed in no thread", emptyConv)
+			}
+			recvReply(t, fake.replies) // starter
+			if got := fake.deletedRefs(); len(got) != 0 {
+				t.Fatalf("emptyConv=%t: Delete called on %v where DeleteLeavesTrace is true", emptyConv, got)
+			}
+			edits := fake.updatedCalls()
+			if len(edits) != 1 || edits[0].ref.ID != "ts1" || edits[0].ref.Conversation != "C1" ||
+				!strings.Contains(edits[0].text, "Could not start a conversation with Infra agent") {
+				t.Fatalf("emptyConv=%t: edits = %+v, want starter edited in normalized conversation C1", emptyConv, edits)
+			}
+			select {
+			case extra := <-fake.replies:
+				t.Errorf("emptyConv=%t: unexpected second Send %+v after starter was edited in place", emptyConv, extra)
+			default:
+			}
+		}
+	})
+
+	t.Run("failed or pre-occupied personal ax starter releases owner pre-claim", func(t *testing.T) {
+		f := newAXFixture(t)
+		withScope(t, f, axScopeOwner)
+		f.server.mu.Lock()
+		f.server.failAll = true
+		f.server.mu.Unlock()
+
+		shared := newRecordingDaemon(t, "s-shared")
+		fake := &fakeSender{replies: make(chan chat.Reply, 8)}
+		r := NewRouter(nil, traceThreadingSender{slackThreadingSender: slackThreadingSender{fake}}, ProgressOff, nil, nil)
+		personal := f.r.agents().byName["triage"]
+		set, err := newAgentSet("general",
+			&agent{name: "general", display: "General", daemon: shared.client},
+			personal,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.setAgents(set)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		// 1. Failed personal starter edits starter in place AND clears owners[C1:ts1]
+		// so a colleague replying in that live Chat thread reaches the default
+		// shared agent instead of being refused as not_owner.
+		cmd := chat.Command{Name: "agent", Channel: "C1", Caller: "alice@x.com", Conversation: "C1:77", Args: []string{"triage", "check"}, Text: "triage check"}
+		if err := r.startAgentThread(ctx, cmd, personal, "check"); err == nil {
+			t.Fatal("startAgentThread succeeded when ax-server is down")
+		}
+		recvReply(t, fake.replies) // starter (edited in place to failure notice)
+		if owner, ok := r.ownerOf("C1:ts1"); ok {
+			t.Fatalf("leaked owner %q on failed personal starter thread C1:ts1", owner)
+		}
+		if err := r.Handle(ctx, chat.Message{Conversation: "C1:ts1", Channel: "C1", Caller: "bob@x.com", Text: "anyone?"}); err != nil {
+			t.Fatalf("colleague reply on failed starter thread failed: %v", err)
+		}
+		waitCount(t, &shared.injects, 1, "colleague turn routed to default shared agent")
+
+		// 2. If a personal starter lands on a thread already belonging to shared
+		// agent general, it must not lock general's thread to cmd.Caller.
+		if err := r.Handle(ctx, chat.Message{Conversation: "C1:9", Channel: "C1", Caller: "bob@x.com", Text: "shared thread"}); err != nil {
+			t.Fatal(err)
+		}
+		waitCount(t, &shared.injects, 2, "bob's shared thread turn")
+		r.out = traceLandsIn{fakeSender: fake, conv: "C1:9"}
+		if err := r.startAgentThread(ctx, cmd, personal, "take over"); err != nil {
+			t.Fatal(err)
+		}
+		if owner, ok := r.ownerOf("C1:9"); ok {
+			t.Fatalf("personal starter on existing shared thread C1:9 locked owner to %q", owner)
+		}
+	})
+}
+
+type traceLandsIn struct {
+	*fakeSender
+	conv string
+}
+
+func (traceLandsIn) DeleteLeavesTrace() bool { return true }
+
+func (l traceLandsIn) Send(ctx context.Context, r chat.Reply) (chat.MessageRef, error) {
+	ref, err := l.fakeSender.Send(ctx, r)
+	ref.Conversation = l.conv
+	return ref, err
+}
+
 // A thread already on another agent when the session is opened — a message
 // that got there first — is said so, not answered by the wrong agent under the
 // chosen one's name (caught in review).
