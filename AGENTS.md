@@ -109,18 +109,25 @@ Conventions worth knowing at agent prompt time:
 
 ## Current state
 
-**Slack MVP.** `serve` boots the Slack adapter (Socket Mode) and the session
-router: an app-mention in a thread drives a core-agent session and the agent's
-reply lands back in the same thread, with multi-turn continuity per thread.
-**Google Chat.** The `googlechat` adapter pulls events from Pub/Sub and speaks
-both the Chat-API interaction-events dialect and the Workspace add-on dialect,
-detected per event; replies render as Chat text and, when `--googlechat-cards`
-allows, `cardsV2` (see `docs/DESIGN.md` §3.3).
+**Slack.** `serve` boots the Slack adapter (Socket Mode) and the session router:
+an app-mention in a thread drives a core-agent (or mast / ax) session and the
+agent's reply lands back in the same thread, with multi-turn continuity per
+thread, Block Kit approval prompts, `/agent` modal picker, and one-`task_card`-per-turn
+tool and subagent activity in `status` and `stream` modes.
+**Google Chat.** The `googlechat` adapter pulls events from Pub/Sub by default
+(or serves a verified HTTPS interaction endpoint under `--googlechat-ingress
+http` for interactive approval buttons, Broad-grant confirmations, and the
+`/agent` dialog picker) and speaks both the Chat-API interaction-events dialect
+and the Workspace add-on dialect, detected per event; replies render as Chat
+text and, when `--googlechat-cards` allows, `cardsV2` — including one in-place
+activity card per turn in `status` and `stream` modes (see `docs/DESIGN.md`
+§3.3–3.4).
 
-Interactive hardening (long turns, backpressure, SSE reconnect) is largely in
-place (see `docs/DESIGN.md` §4). An optional outbound ingress
-(`--ingress-addr`, Slack only) lets another service post a message with no
-inbound event to reply to, then edit it in place or append to it
-(`docs/DESIGN.md` §3.1). Frictionless thread replies
-(continuing without re-mentioning) are not wired yet — the MVP engages on
-app-mentions only.
+Interactive hardening (long turns, backpressure, SSE reconnect, `--state-dir`
+durable session and card recovery) is in place on both platforms (see
+`docs/DESIGN.md` §4). An optional outbound ingress (`--ingress-addr`, Slack and
+Google Chat) lets another service post a message with no inbound event to reply
+to, edit it in place or append to it, and optionally bind a session
+(`docs/DESIGN.md` §3.1). Frictionless Slack thread replies (continuing without
+re-mentioning) are not wired yet — Slack engages on app-mentions and slash
+commands.

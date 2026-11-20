@@ -37,26 +37,27 @@ check a card before anyone tries it for real.
 
 Worth looking at specifically:
 
-- `ack-with-values.json` — the escaped `&lt;off|…&gt;` in the `decoratedText`.
-  Chat accepts only `<b> <i> <s> <a> <br>` there, so the angle brackets in the
-  command's argument list have to arrive escaped. The values are in the ack the
-  router wrote, not added by the card: no card carries a button row any more
-  (#28), and `ack-plain.json` is the other ack — the one confirming a change,
-  which names nothing.
+- `ack-with-values.json` — the escaped `&lt;off|…&gt;` inside `<tt>…</tt>` in
+  the `decoratedText`. Chat accepts only `<b> <i> <s> <a> <tt> <br>` there, so
+  the angle brackets in the command's argument list have to arrive escaped. The
+  values are in the ack the router wrote, not added by the card: over Pub/Sub
+  no card carries a button row (#28), and `ack-plain.json` is the other ack —
+  the one confirming a change, which names nothing.
 - `answer.json` — the only card using `textSyntax: MARKDOWN`. Checked in the
   Card Builder on 2026-08-17: `[label](url)` renders as a live hyperlink, and a
   fenced block renders as monospace with its interior newlines and indentation
   intact. That is what lets `answerCard` pass a model turn's own markup
   through instead of translating it to HTML first — so a diff here that turns
   a link literal is a regression worth chasing, not a rendering quirk.
-- `welcome.json` — the first thing anyone installing the app will see. It is
-  also where a card's markup stops short of the text path's: `toCardHTML`
-  passes backticks through verbatim, because a card has no monospace style to
-  map them onto, so the `` `progress <off|…>` `` in the second line renders as
-  literal backticks around plain text. The same is true of `ack-with-values`,
-  and it has not been checked in the Card Builder — worth a look next time
-  someone has it open, and worth fixing in the renderer rather than the
-  wording if it reads badly.
+- `welcome.json` — the first thing anyone installing the app will see.
+  `toCardHTML` wraps inline `` `code` `` spans in `<tt>…</tt>` (measured live
+  on `DecoratedText`, 2026-10-04, where `<tt>` renders monospace while `<code>`
+  does not), so `` `progress <off|…>` `` renders in monospace without literal
+  backticks.
+- `activity-*.json` — the two-shape activity card (`Collapsible: false` while
+  running, `Collapsible: true` with `UncollapsibleWidgetsCount: 1` once
+  settled), keeping nested subagent calls behind a client-side expander with
+  zero callback controls.
 
 ## B. Event replay
 

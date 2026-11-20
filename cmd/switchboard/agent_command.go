@@ -119,30 +119,40 @@ func (r *Router) startAgentThread(ctx context.Context, cmd chat.Command, a *agen
 		return fmt.Errorf("post the starter: %w", err)
 	}
 	if ref.Conversation == "" || ref.Conversation == cmd.Channel {
-		r.tellAgentFailure(ctx, cmd.Channel, a)
+		r.retireFailedStarter(ctx, cmd.Channel, ref, a)
 		return fmt.Errorf("the starter landed in no thread (%q)", ref.Conversation)
 	}
 	conv, starter := ref.Conversation, ref
+	claimedOwner := false
 	if a.ax != nil && a.ax.scope == axScopeOwner && cmd.Caller != "" {
-		// Claimed the moment the thread exists, so a reply racing the
+		// Claimed the moment a fresh thread exists, so a reply racing the
 		// session cannot make someone else its owner (caught in review).
 		r.mu.Lock()
-		r.claimOwnerLocked(conv, cmd.Caller)
+		_, hasOwner := r.owners[conv]
+		_, hasLive := r.sessions[conv]
+		_, hasDorm := r.dormant[conv]
+		_, hasBind := r.bindings[conv]
+		if !hasOwner && !hasLive && !hasDorm && !hasBind {
+			claimedOwner = r.claimOwnerLocked(conv, cmd.Caller)
+		}
 		r.mu.Unlock()
 	}
 	e, err := r.sessionAs(ctx, conv, cmd.Channel, cmd.Caller, a.name)
 	if err != nil {
+		if claimedOwner {
+			r.releaseUnboundOwner(conv)
+		}
 		// Nothing behind it: take the starter down rather than leave a
 		// conversation in the channel that cannot be answered.
-		if derr := r.out.Delete(ctx, starter); derr != nil {
-			r.logf.Warnf("agent %s: delete the starter: %v", conv, derr)
-		}
-		r.tellAgentFailure(ctx, cmd.Channel, a)
+		r.retireFailedStarter(ctx, cmd.Channel, starter, a)
 		return err
 	}
 	// sessionAs returns an existing conversation as it is: a message that got
 	// here first may have opened it on another agent (caught in review).
 	if cur := r.agents().resolve(e.agent); cur != a.name {
+		if claimedOwner {
+			r.releaseUnboundOwner(conv)
+		}
 		notice := fmt.Sprintf("This thread talks to %s. To talk to %s, start a new thread with `agent %s <prompt>`.",
 			r.agentLabel(cur), a.label(), a.name)
 		if err := r.surfaceNotice(ctx, conv, notice); err != nil {
@@ -181,12 +191,70 @@ func starterText(a *agent, mention, prompt string) string {
 	return text
 }
 
+func agentFailureText(a *agent) string {
+	return fmt.Sprintf("Could not start a conversation with %s. Check the logs or contact an admin.", a.label())
+}
+
 // tellAgentFailure says, where it can, that a conversation could not start.
 func (r *Router) tellAgentFailure(ctx context.Context, conv string, a *agent) {
-	notice := fmt.Sprintf("Could not start a conversation with %s. Check the logs or contact an admin.", a.label())
-	if err := r.surfaceNotice(ctx, conv, notice); err != nil {
+	if err := r.surfaceNotice(ctx, conv, agentFailureText(a)); err != nil {
 		r.logf.Warnf("agent %s: %v", conv, err)
 	}
+}
+
+// releaseUnboundOwner drops a starter pre-claim on conv once opening the
+// starter's session failed (or found another agent already there), unless a
+// concurrent message has meanwhile established a personal session on conv.
+func (r *Router) releaseUnboundOwner(conv string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	set := r.agents()
+	if e, ok := r.sessions[conv]; ok {
+		if ag, ok := set.lookup(set.resolve(e.agent)); ok && ag.ax != nil && ag.ax.scope == axScopeOwner {
+			return
+		}
+	}
+	if rec, ok := r.dormant[conv]; ok {
+		if ag, ok := set.lookup(set.resolve(rec.Agent)); ok && ag.ax != nil && ag.ax.scope == axScopeOwner {
+			return
+		}
+	}
+	if _, ok := r.owners[conv]; ok {
+		delete(r.owners, conv)
+		r.markDirty()
+	}
+}
+
+// retireFailedStarter clears a starter message whose session could not be
+// opened, and tells the channel. Where deleting leaves a tombstone (Google
+// Chat), the starter is edited in place into the failure notice instead,
+// falling back to a separate post only if that edit fails.
+func (r *Router) retireFailedStarter(ctx context.Context, channel string, starter chat.MessageRef, a *agent) {
+	if starter.Conversation == "" {
+		starter.Conversation = channel
+	}
+	where := starter.Conversation
+	if !r.deletesCleanly() {
+		if starter.ID != "" {
+			err := r.out.Update(ctx, starter, chat.Reply{
+				Conversation: where,
+				Text:         agentFailureText(a),
+				Kind:         chat.KindNotice,
+			})
+			if err == nil {
+				return
+			}
+			r.logf.Warnf("agent %s: update the starter: %v", where, err)
+		}
+		r.tellAgentFailure(ctx, channel, a)
+		return
+	}
+	if starter.ID != "" {
+		if derr := r.out.Delete(ctx, starter); derr != nil {
+			r.logf.Warnf("agent %s: delete the starter: %v", where, derr)
+		}
+	}
+	r.tellAgentFailure(ctx, channel, a)
 }
 
 // The router is the directory a picker reads (a Chat dialog, a Slack modal).
