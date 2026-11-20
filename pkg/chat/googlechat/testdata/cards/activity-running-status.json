@@ -1,0 +1,19 @@
+{
+  "sections": [
+    {
+      "widgets": [
+        {
+          "decoratedText": {
+            "startIcon": {
+              "materialIcon": {
+                "name": "hourglass_top"
+              }
+            },
+            "text": "\u003cb\u003eWorking… 18s · 3 calls · _fallback › grep\u003c/b\u003e",
+            "wrapText": true
+          }
+        }
+      ]
+    }
+  ]
+}

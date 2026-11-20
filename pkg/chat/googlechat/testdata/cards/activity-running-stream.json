@@ -1,0 +1,24 @@
+{
+  "sections": [
+    {
+      "widgets": [
+        {
+          "decoratedText": {
+            "startIcon": {
+              "materialIcon": {
+                "name": "hourglass_top"
+              }
+            },
+            "text": "\u003cb\u003eWorking… 18s · 4 calls · _fallback › grep\u003c/b\u003e",
+            "wrapText": true
+          }
+        },
+        {
+          "textParagraph": {
+            "text": "• ✔︎ \u003cb\u003ebash\u003c/b\u003e  2.3s  \u003ctt\u003ekubectl get pods -A\u003c/tt\u003e\u003cbr\u003e• ▸ \u003cb\u003e_fallback\u003c/b\u003e · 2 calls  \u003ctt\u003echeck billing\u003c/tt\u003e\u003cbr\u003e• ✔︎ \u003cb\u003eread_file\u003c/b\u003e  0.4s  \u003ctt\u003edeploy/billing.yaml\u003c/tt\u003e\u003cbr\u003e• ▸ \u003cb\u003egrep\u003c/b\u003e  \u003ctt\u003ememory \u0026lt;limit\u0026gt; \u0026amp; requests\u003c/tt\u003e"
+          }
+        }
+      ]
+    }
+  ]
+}

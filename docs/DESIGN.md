@@ -589,7 +589,7 @@ it), and `Recent` lines to display unfolded while a turn runs. `Reply.Text`
 still says the whole thing in the router's markup, so an adapter that ignores
 `Activity` loses nothing.
 
-Three optional capabilities work the same way — an adapter type-asserts for them
+Four optional capabilities work the same way — an adapter type-asserts for them
 and degrades if they are absent:
 
 - `chat.TextFitter` — does this text fit one message on this platform?
@@ -601,12 +601,18 @@ and degrades if they are absent:
   before anyone has run anything — so a handler that does not report them
   leaves that message with nothing to name.
 - `chat.DrawsActivity` — does this adapter render `Reply.Activity` natively?
-  When true (Slack, as one `task_card` per turn), the router tracks the turn's
-  calls and subagent calls in one card edited in place and kept when the turn
-  ends instead of posting separate per-frame notices. When false (Google Chat,
-  or Slack from the next turn after an `invalid_blocks` refusal trips the
-  adapter's latch — a turn already in flight finishes its single-message record
-  as text), the router runs its plain-text progress and notice paths unchanged.
+  When true (Slack, as one `task_card` per turn; Google Chat under
+  `--googlechat-cards rich` and `status`, as one single-section `cardsV2` card
+  per turn), the router tracks the turn's calls and subagent calls in one card
+  edited in place and kept when the turn ends instead of posting separate
+  per-frame notices. When false (Google Chat under `--googlechat-cards off`, or
+  either adapter from the next turn after a card rejection trips its latch — a
+  turn already in flight finishes its single-message record as text), the router
+  runs its plain-text progress and notice paths unchanged.
+- `chat.ActivityLineLimit` — how many lines one activity card should hold before
+  the router freezes it and rolls over to a continuation message (60 on Google
+  Chat, keeping dense subagent `stream` cards comfortably below Chat's 32 KB
+  message ceiling; absent on Slack, which uses the router's 400-line default).
 
 ### 3.3 Google Chat: dialects, Pub/Sub, and cards
 
@@ -642,9 +648,17 @@ no-public-ingress, distroless posture. Two costs come with it:
 - **Whole-message patches.** Updating a card means `messages.patch` on the
   hosting message with a field mask covering both `text` and `cardsV2`, so a
   message cannot end up carrying a stale card beside new text. This is the live
-  path for the progress placeholder, which is edited in place as a turn runs.
-  Delivery may be retried, so a patch is written to be idempotent — the same
-  event twice leaves the card in the same end state.
+  path for the progress placeholder and the turn's activity card, edited in
+  place as a turn runs. Delivery may be retried, so a patch is written to be
+  idempotent — the same event twice leaves the card in the same end state. A
+  `GoogleAppsCardV1Section` with `Collapsible: true` and
+  `UncollapsibleWidgetsCount: 1` expands client-side with zero callback events,
+  so it works over Pub/Sub and HTTP alike; however, Chat's web client resets an
+  expanded collapsible section back to collapsed on every `messages.patch`, even
+  when card, section, and widget identifiers are fixed (measured live,
+  2026-11-20). Activity cards therefore render uncollapsed while `StepRunning`
+  (title alone in `status`, title plus `Recent` in `stream`) and turn
+  `Collapsible: true` on once settled, when patches to that message have ended.
 
 **The callback-button limit belongs to the add-on framework, not to Pub/Sub.**
 The legacy Chat-API dialect delivers `CARD_CLICKED` over the same transport —
@@ -949,8 +963,8 @@ record is switchboard's own).
 
 What is written is a snapshot, not a log: per conversation its session, the
 identity its relay subscribes as, whether it was adopted, its two delivery
-watermarks, when it last had traffic, any in-flight placeholder (and, for a
-Slack activity card, its steps — including `stream` mode's redacted argument
+watermarks, when it last had traffic, any in-flight placeholder (and, for an
+activity card, its steps — including `stream` mode's redacted argument
 summaries — plus an `in_flight` marker when graceful shutdown already finalised
 the card for an `ax` task turn); plus the ingress bindings, the runtime
 progress overrides, and a bounded `owed` list (up to 256 cards, aged out at 30
@@ -1008,8 +1022,8 @@ from `conversations.replies` once the history scopes are granted; the adapter's
 own verified re-send found the existing message and posted nothing. The questions still on screen
 are carried across, so the revived prompt watcher does not ask them again; a
 plain clock placeholder a turn had up is taken down, its ticker having died
-with the process, while an in-flight Slack activity card is finalised in place
-as `Interrupted by a restart · N calls` (and any owed card edits are retried
+with the process, while an in-flight activity card is finalised in place as
+`Interrupted by a restart · N calls` (and any owed card edits are retried
 independently of session revival); and a stale adopted session is re-measured
 from its head, as adoption
 is. A dormant record is the conversation's session as surely as a live entry

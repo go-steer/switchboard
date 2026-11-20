@@ -542,9 +542,15 @@ func decisionBody(markdown string) []*chatv1.GoogleAppsCardV1Widget {
 
 // clampRunes bounds s to n runes, never splitting one.
 func clampRunes(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
 	r := []rune(s)
 	if len(r) <= n {
 		return s
+	}
+	if n == 1 {
+		return string(r[:1])
 	}
 	return string(r[:n-1]) + "…"
 }
