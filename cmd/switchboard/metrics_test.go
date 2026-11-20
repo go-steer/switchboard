@@ -26,9 +26,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
 	"github.com/go-steer/switchboard/pkg/chat"
 	"github.com/go-steer/switchboard/pkg/daemon"
-	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 // TestMetricsRecordNilSafe verifies the record helpers are no-ops on a nil

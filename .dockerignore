@@ -3,6 +3,7 @@
 .git
 .github
 .claude
+.worktrees
 .dockerignore
 Dockerfile
 docs/

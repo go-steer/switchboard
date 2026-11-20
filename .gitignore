@@ -4,6 +4,7 @@
 # + the required review-gate CI check, not committed harness settings).
 CLAUDE.md
 .claude/
+.worktrees/
 
 # Go build artifacts
 /switchboard
