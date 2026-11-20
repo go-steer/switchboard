@@ -28,6 +28,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Google Chat draws a turn's tool activity as one `cardsV2` card, kept when
+  the turn ends** (#107). Under `--googlechat-cards rich` (the default) and
+  `status`, `status` and `stream` turns edit a single `cardsV2` card in place
+  (coalesced to at most one redraw every 3s, with backoff on errors) instead of
+  posting a message per tool frame. Because Google Chat's web client collapses
+  any expanded `Collapsible` section on `messages.patch`, the card stays
+  uncollapsed while running (title alone in `status`; title plus the rolling
+  5-line `Recent` window in `stream`) and sets `Collapsible: true`
+  (`UncollapsibleWidgetsCount: 1`) on the finalising edit so the kept record
+  folds to one line with the full nested subagent history under the chevron.
+  Cards roll over at 60 lines (`chat.ActivityLineLimit`), elide excess lines
+  in-card on unsplit bursts rather than clamping to 4 KB text, never call
+  `Delete` (avoiding `"Message deleted by its author"` tombstones, with
+  background retries on transient 429s), and latch back to plain text on HTTP
+  400/413 card rejections or under `--googlechat-cards off`.
 - **Slack draws a turn's tool activity as one `task_card`, kept when the turn
   ends** (#180). In `status` and `stream` modes on Slack, once a turn calls a
   tool, the progress placeholder becomes a single `task_card` edited in place
@@ -41,12 +56,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (including `<0.1s`), and a live rolling 5-line `rich_text` window beneath the
   folded card while the turn runs. Cards roll over cleanly at 400 lines, split
   around mid-turn narration, and latch back to plain text on `invalid_blocks`
-  without extra scopes or manifest changes. Google Chat is unchanged.
-  `chat.Reply.Activity`, `chat.DrawsActivity`, and `chat.RetryAfter` provide
-  the provider-neutral seam.
+  without extra scopes or manifest changes. `chat.Reply.Activity`,
+  `chat.DrawsActivity`, and `chat.RetryAfter` provide the provider-neutral
+  seam.
 
 ### Fixed
 
+- **Google Chat `stream`-mode tool activity no longer trips the 1-write/sec
+  per-space quota** (#107). Coalescing a turn's tool calls and subagent inner
+  calls into one in-place `cardsV2` card (at most one edit every 3s) replaces
+  the per-frame notice posts and per-result edits under `--googlechat-cards
+  rich` and `status`.
 - **Delegation argument summaries skip `include_input` / `includeInput`** so
   subagent calls show the start of `request` instead of `true`.
 

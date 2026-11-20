@@ -1,0 +1,26 @@
+{
+  "sections": [
+    {
+      "collapsible": true,
+      "uncollapsibleWidgetsCount": 1,
+      "widgets": [
+        {
+          "decoratedText": {
+            "startIcon": {
+              "materialIcon": {
+                "name": "check_circle"
+              }
+            },
+            "text": "\u003cb\u003eDone · 40s · 5 calls (1 failed)\u003c/b\u003e",
+            "wrapText": true
+          }
+        },
+        {
+          "textParagraph": {
+            "text": "• ✔︎ \u003cb\u003ebash\u003c/b\u003e  2.3s  \u003ctt\u003ekubectl get pods -A\u003c/tt\u003e\u003cbr\u003e• ✔︎ \u003cb\u003e_fallback\u003c/b\u003e · 2 calls  18s  \u003ctt\u003echeck billing\u003c/tt\u003e\u003cbr\u003e    ◦ ✔︎ \u003cb\u003eread_file\u003c/b\u003e  0.4s  \u003ctt\u003edeploy/billing.yaml\u003c/tt\u003e\u003cbr\u003e    ◦ ✔︎ \u003cb\u003egrep\u003c/b\u003e  \u0026lt;0.1s  \u003ctt\u003ememory \u0026lt;limit\u0026gt; \u0026amp; requests\u003c/tt\u003e\u003cbr\u003e• ✖︎ \u003cb\u003ebash (exit 2)\u003c/b\u003e  1.1s  \u003ctt\u003ekubectl rollout status deploy/billing\u003c/tt\u003e"
+          }
+        }
+      ]
+    }
+  ]
+}

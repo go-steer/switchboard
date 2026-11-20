@@ -151,6 +151,52 @@ func TestCardsGolden(t *testing.T) {
 			Model: "gemini-3.7-flash", TokensIn: 5000, TokensOut: 1,
 			CostUSD: 0.0037537, Latency: 3142 * time.Millisecond,
 		}), 0},
+		// R2-B activity cards: uncollapsed while running (title alone in status
+		// mode, title + rolling Recent window in stream mode), then folded to 1
+		// uncollapsible title line with the full nested history behind the
+		// section's client-side expander once settled.
+		{"activity-running-status", activityCard(&chat.Activity{
+			Title:  "Working… 18s · 3 calls · _fallback › grep",
+			Status: chat.StepRunning,
+			Steps: []chat.Step{
+				{Title: "bash", Status: chat.StepDone},
+				{Title: "_fallback", Status: chat.StepRunning, Calls: 1, Steps: []chat.Step{
+					{Title: "grep", Status: chat.StepRunning},
+				}},
+			},
+		}), 1},
+		{"activity-running-stream", activityCard(&chat.Activity{
+			Title:  "Working… 18s · 4 calls · _fallback › grep",
+			Status: chat.StepRunning,
+			Recent: []chat.Step{
+				{Title: "bash", Status: chat.StepDone, Note: "2.3s", Code: "kubectl get pods -A"},
+				{Title: "_fallback", Status: chat.StepRunning, Calls: 2, Code: "check billing"},
+				{Title: "read_file", Status: chat.StepDone, Note: "0.4s", Code: "deploy/billing.yaml"},
+				{Title: "grep", Status: chat.StepRunning, Code: "memory <limit> & requests"},
+			},
+		}), 2},
+		{"activity-settled", activityCard(&chat.Activity{
+			Title:  "Done · 40s · 5 calls (1 failed)",
+			Status: chat.StepDone,
+			Steps: []chat.Step{
+				{Title: "bash", Status: chat.StepDone, Note: "2.3s", Code: "kubectl get pods -A"},
+				{Title: "_fallback", Status: chat.StepDone, Calls: 2, Note: "18s", Code: "check billing", Steps: []chat.Step{
+					{Title: "read_file", Status: chat.StepDone, Note: "0.4s", Code: "deploy/billing.yaml"},
+					{Title: "grep", Status: chat.StepDone, Note: "<0.1s", Code: "memory <limit> & requests"},
+				}},
+				{Title: "bash (exit 2)", Status: chat.StepFailed, Note: "1.1s", Code: "kubectl rollout status deploy/billing"},
+			},
+		}), 2},
+		{"activity-stopped", activityCard(&chat.Activity{
+			Title:  "Interrupted by a restart · 3 calls",
+			Status: chat.StepFailed,
+			Steps: []chat.Step{
+				{Title: "bash", Status: chat.StepDone, Note: "2.3s", Code: "kubectl get pods -A"},
+				{Title: "_fallback", Status: chat.StepUnfinished, Calls: 1, Code: "check billing", Steps: []chat.Step{
+					{Title: "grep", Status: chat.StepUnfinished, Code: "memory"},
+				}},
+			},
+		}), 2},
 	}
 
 	dir := filepath.Join("testdata", "cards")

@@ -3218,9 +3218,7 @@ func (r *Router) queuePlaceholder(ctx context.Context, e *sessionEntry, conv str
 		return
 	}
 	if !e.strandProgress(ref, time.Now()) {
-		if derr := r.out.Delete(ctx, ref); derr != nil {
-			r.logf.Warnf("progress %s: drop unneeded placeholder: %v", conv, derr)
-		}
+		r.dropCard(ctx, conv, ref, nil, "drop unneeded placeholder")
 	}
 }
 
@@ -3236,6 +3234,17 @@ func finalLine(start time.Time, done bool) string {
 		text += " · " + formatElapsed(time.Since(start))
 	}
 	return text
+}
+
+func finalActivity(start time.Time, done bool) *chat.Activity {
+	title, status := "Stopped", chat.StepFailed
+	if done {
+		title, status = "Done", chat.StepDone
+	}
+	if !start.IsZero() {
+		title += " · " + formatElapsed(time.Since(start))
+	}
+	return &chat.Activity{Title: title, Status: status}
 }
 
 // redrawProgress renders the progress message from the turn's state as it is
@@ -3364,6 +3373,9 @@ func (r *Router) cardLineLimit() int {
 	if r.cardMaxLines > 0 {
 		return r.cardMaxLines
 	}
+	if l, ok := r.out.(chat.ActivityLineLimit); ok && l.MaxActivityLines() > 0 {
+		return l.MaxActivityLines()
+	}
 	return defaultCardMaxLines
 }
 
@@ -3455,17 +3467,27 @@ func (e *sessionEntry) planSplit(conv string, mode ProgressMode, limit int) (old
 // dropCard deletes a progress message that is no longer wanted: one posted
 // for a move or a split that then did not happen, or the one a move left
 // behind. finished is what the message is edited into if it cannot be
-// deleted; nil for a message that is a plain clock.
+// deleted (or on a platform where deleting leaves a tombstone); nil for a
+// message that is a plain clock.
 //
 // The edit is what matters. A clock that cannot be deleted stops where it is,
-// as it always has, and is litter. A card that cannot be deleted was posted
-// running and nothing will ever edit it again, so it would spin for good —
-// the one thing a card must never do. So it is finished instead: its lines
-// read as left behind, which is what they are, since the turn carries on in
-// another message. If that edit fails too the log names the message, so an
-// operator can find it, and the card is owed the edit (owe): it is tried again
-// as the process exits, and by the next one.
+// as it always has, and is litter (where deleting leaves a trace, it is
+// finalised in place instead of turning into a tombstone). A card that cannot
+// be deleted was posted running and nothing will ever edit it again, so it
+// would spin for good — the one thing a card must never do. So it is finished
+// instead: its lines read as left behind, which is what they are, since the
+// turn carries on in another message. If that edit fails too the log names the
+// message, so an operator can find it, and the card is owed the edit (owe): it
+// is tried again as the process exits, and by the next one.
 func (r *Router) dropCard(ctx context.Context, conv string, ref chat.MessageRef, finished *chat.Activity, what string) {
+	if !r.deletesCleanly() {
+		if finished == nil {
+			r.retireMessage(ctx, conv, ref, time.Time{}, false)
+			return
+		}
+		r.finishCard(ctx, conv, ref, finished)
+		return
+	}
 	derr := r.out.Delete(ctx, ref)
 	if derr == nil {
 		return
@@ -3474,7 +3496,7 @@ func (r *Router) dropCard(ctx context.Context, conv string, ref chat.MessageRef,
 	if finished == nil {
 		return
 	}
-	err := r.out.Update(ctx, ref, chat.Reply{Conversation: conv, Text: cardText(finished), Kind: chat.KindActivity, Activity: finished})
+	err := r.out.Update(ctx, ref, finishReply(conv, finished))
 	if err == nil {
 		r.logf.Warnf("progress %s: message %s could not be deleted; finished it in place instead", conv, ref.ID)
 		return
@@ -3536,10 +3558,31 @@ func (r *Router) carded(e *sessionEntry, mode ProgressMode) bool {
 // retireMessage deletes a placeholder, or finalises it where deleting leaves a
 // trace. start is when its turn began; zero when unknown.
 func (r *Router) retireMessage(ctx context.Context, conv string, ref chat.MessageRef, start time.Time, done bool) {
-	if t, ok := r.out.(chat.DeleteLeavesTrace); ok && t.DeleteLeavesTrace() {
-		if err := r.out.Update(ctx, ref, chat.Reply{Conversation: conv, Text: finalLine(start, done), Kind: chat.KindActivity}); err != nil {
-			r.logf.Warnf("progress %s: finalise: %v", conv, err)
+	if !r.deletesCleanly() {
+		act := finalActivity(start, done)
+		reply := chat.Reply{Conversation: conv, Text: cardText(act), Kind: chat.KindActivity}
+		err := r.out.Update(ctx, ref, reply)
+		if err == nil {
+			return
 		}
+		if !retryableEdit(err) {
+			r.logf.Warnf("progress %s: finalise: %v", conv, err)
+			return
+		}
+		o := r.owe(conv, ref, act, time.Now())
+		r.fmu.Lock()
+		r.finishing++
+		r.fmu.Unlock()
+		go func() {
+			defer func() {
+				r.fmu.Lock()
+				r.finishing--
+				r.fmu.Unlock()
+			}()
+			rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cardFinishGrace)
+			defer cancel()
+			r.settleOwed(o, r.retryFinish(rctx, conv, ref, reply, err))
+		}()
 		return
 	}
 	if err := r.out.Delete(ctx, ref); err != nil {

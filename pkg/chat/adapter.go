@@ -465,6 +465,14 @@ type DrawsActivity interface {
 	DrawsActivity() bool
 }
 
+// ActivityLineLimit is an optional Adapter capability for an adapter that
+// implements DrawsActivity: the most lines one activity card should hold
+// before the router freezes it and continues in a new message. Zero or
+// unimplemented uses the router's default.
+type ActivityLineLimit interface {
+	MaxActivityLines() int
+}
+
 // AgentChoice is one agent a picker offers (#140).
 type AgentChoice struct {
 	// Name is what the `agent` command takes.

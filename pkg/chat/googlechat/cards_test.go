@@ -130,6 +130,26 @@ func TestGatewayCardsCarryNothingClickable(t *testing.T) {
 	cards := map[string]*chatv1.GoogleAppsCardV1Card{
 		"progress":                gatewayCard(chat.KindProgress, "Working…"),
 		"activity":                gatewayCard(chat.KindActivity, "Running `bash`"),
+		"activity-running-status": activityCard(&chat.Activity{Title: "Working… 10s · 2 calls · bash", Status: chat.StepRunning}),
+		"activity-running-stream": activityCard(&chat.Activity{
+			Title:  "Working… 10s · 2 calls · grep",
+			Status: chat.StepRunning,
+			Recent: []chat.Step{
+				{Title: "bash", Status: chat.StepDone, Note: "1.2s", Code: "kubectl get pods -A"},
+				{Title: "grep", Status: chat.StepRunning, Code: "memory"},
+			},
+		}),
+		"activity-settled": activityCard(&chat.Activity{
+			Title:  "Done · 40s · 5 calls (1 failed)",
+			Status: chat.StepDone,
+			Steps: []chat.Step{
+				{Title: "bash", Status: chat.StepDone, Note: "2.3s", Code: "kubectl get pods -A"},
+				{Title: "_fallback", Status: chat.StepDone, Calls: 2, Note: "18s", Code: "check billing", Steps: []chat.Step{
+					{Title: "read_file", Status: chat.StepDone, Note: "0.4s", Code: "deploy/billing.yaml"},
+					{Title: "grep (exit 1)", Status: chat.StepFailed, Note: "0.2s", Code: "oom"},
+				}},
+			},
+		}),
 		"notice":                  gatewayCard(chat.KindNotice, "That turn didn't go through."),
 		"ack":                     gatewayCard(chat.KindAck, "Progress mode is *off*."),
 		"welcome":                 welcomeCard([]string{"off", "indicator", "status", "stream"}, ""),

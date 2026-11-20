@@ -3275,3 +3275,371 @@ func TestShutdownDoesNotClearAMessageItDidNotFinalise(t *testing.T) {
 		t.Errorf("the record names %q, want the later turn's placeholder", rec.Placeholder)
 	}
 }
+
+// traceCardFake models Google Chat's capability set: it draws Activity, leaves
+// a visible tombstone if Delete is ever called, and caps activity cards at
+// maxLines via chat.ActivityLineLimit.
+type traceCardFake struct {
+	*cardFake
+	maxLines int
+	deletes  atomic.Int32
+}
+
+func (f *traceCardFake) DeleteLeavesTrace() bool { return true }
+func (f *traceCardFake) MaxActivityLines() int   { return f.maxLines }
+func (f *traceCardFake) Delete(ctx context.Context, ref chat.MessageRef) error {
+	f.deletes.Add(1)
+	return f.cardFake.Delete(ctx, ref)
+}
+
+func traceCardFed(t *testing.T, mode ProgressMode, maxLines int) (*Router, *traceCardFake, cardFeed, context.Context) {
+	t.Helper()
+	r, base, feed, ctx := cardFed(t, mode)
+	tf := &traceCardFake{cardFake: base, maxLines: maxLines}
+	r.out = tf
+	return r, tf, feed, ctx
+}
+
+func traceCardUnit(t *testing.T, mode ProgressMode, maxLines int) (*Router, *traceCardFake, *sessionEntry, context.Context) {
+	t.Helper()
+	r, base, e, ctx := cardUnit(t, mode)
+	tf := &traceCardFake{cardFake: base, maxLines: maxLines}
+	r.out = tf
+	return r, tf, e, ctx
+}
+
+// An adapter implementing chat.ActivityLineLimit sets its own rollover cap
+// without touching router.cardMaxLines: 10 distinct calls on a 4-line adapter
+// roll over at 4 lines rather than waiting for defaultCardMaxLines (400).
+func TestAdapterActivityLineLimitCapsRollover(t *testing.T) {
+	r, tf, feed, ctx := traceCardFed(t, ProgressStream, 4)
+	if r.cardMaxLines != 0 {
+		t.Fatalf("router.cardMaxLines = %d, want 0 so the adapter capability drives rollover", r.cardMaxLines)
+	}
+	if got := r.cardLineLimit(); got != 4 {
+		t.Fatalf("cardLineLimit() = %d, want 4 from MaxActivityLines()", got)
+	}
+
+	// Precedence check: explicit router override still wins; zero falls back to default.
+	rZero := NewRouter(nil, &traceCardFake{cardFake: newCardFake(), maxLines: 0}, ProgressStream, nil, nil)
+	if got := rZero.cardLineLimit(); got != defaultCardMaxLines {
+		t.Fatalf("zero MaxActivityLines: cardLineLimit() = %d, want %d", got, defaultCardMaxLines)
+	}
+	rOverride := NewRouter(nil, &traceCardFake{cardFake: newCardFake(), maxLines: 100}, ProgressStream, nil, nil)
+	rOverride.cardMaxLines = 2
+	if got := rOverride.cardLineLimit(); got != 2 {
+		t.Fatalf("explicit router.cardMaxLines: cardLineLimit() = %d, want 2", got)
+	}
+
+	ask(t, r, ctx, tf.cardFake)
+	const n = 10
+	seq := 1
+	for i := 0; i < n; i++ {
+		name := fmt.Sprintf("tool_%02d", i)
+		feed.sendAgent(callEvent(seq, name, name, fmt.Sprintf("arg-%02d", i)))
+		seq++
+		feed.sendAgent(resultEvent(seq, name, name))
+		seq++
+		if i%4 == 3 {
+			want := name
+			waitFor(t, func() bool {
+				for _, m := range tf.thread() {
+					if m.Activity != nil && strings.Contains(titles(m.Activity.Steps), want) {
+						return true
+					}
+				}
+				return false
+			}, "call "+want+" was never drawn")
+		}
+	}
+	feed.sendAgent(textEvent(seq, "done"))
+	feed.sendLifecycle(daemon.EventTurnComplete, turnDone)
+	waitPosted(t, tf.cardFake, "done")
+	waitFor(t, func() bool {
+		for _, m := range tf.thread() {
+			if m.Activity != nil && strings.HasPrefix(m.Activity.Title, "Done · ") {
+				return true
+			}
+		}
+		return false
+	}, "final card never settled")
+
+	if got := tf.deletes.Load(); got != 0 {
+		t.Errorf("Delete called %d times during rollover, want 0", got)
+	}
+	var cards []chat.Reply
+	for _, m := range tf.thread() {
+		if m.Activity != nil {
+			cards = append(cards, m)
+		}
+	}
+	if len(cards) < 3 {
+		t.Fatalf("10 calls with MaxActivityLines=4 produced %d cards, want >= 3", len(cards))
+	}
+	for i, c := range cards {
+		if lines := stepLines(c.Activity.Steps); lines > 4 {
+			t.Errorf("card %d holds %d lines, want <= 4", i, lines)
+		}
+	}
+	if spin := tf.spinning(); len(spin) != 0 {
+		t.Errorf("spinning messages left behind: %v", spin)
+	}
+}
+
+// Where DeleteLeavesTrace() is true (Google Chat, where Delete succeeds and
+// leaves a permanent "Message deleted by its author" tombstone), Delete must
+// never be called on any card-mode path: no-tool turns, tool turns, narration
+// splits, rollovers, failed freezes in splitCard, pre-empted splitCard swaps,
+// or raced queuePlaceholder posts.
+func TestDeleteLeavesTraceNeverCallsDeleteInCardMode(t *testing.T) {
+	t.Run("no-tool turn finalises placeholder in place", func(t *testing.T) {
+		r, tf, feed, ctx := traceCardFed(t, ProgressStream, 4)
+		clock := ask(t, r, ctx, tf.cardFake)
+		feed.sendAgent(textEvent(1, "plain answer"))
+		feed.sendLifecycle(daemon.EventTurnComplete, turnDone)
+		waitPosted(t, tf.cardFake, "plain answer")
+		done := waitCard(t, tf.cardFake, clock, "finalised Done line", func(rep chat.Reply) bool {
+			return rep.Kind == chat.KindActivity && strings.HasPrefix(rep.Text, markOK+" Done")
+		})
+		if done.Activity != nil {
+			t.Errorf("no-tool final placeholder got Activity %+v, want plain final line", done.Activity)
+		}
+		if got := tf.deletes.Load(); got != 0 {
+			t.Errorf("Delete called %d times on no-tool turn, want 0", got)
+		}
+	})
+
+	t.Run("tool turn keeps settled card", func(t *testing.T) {
+		r, tf, feed, ctx := traceCardFed(t, ProgressStream, 4)
+		card := ask(t, r, ctx, tf.cardFake)
+		feed.sendAgent(callEvent(1, "a", "bash", "ls"))
+		feed.sendAgent(resultEvent(2, "a", "bash"))
+		feed.sendAgent(textEvent(3, "tool answer"))
+		feed.sendLifecycle(daemon.EventTurnComplete, turnDone)
+		waitPosted(t, tf.cardFake, "tool answer")
+		kept := waitCard(t, tf.cardFake, card, "settled card", hasTitle(`^Done · \d+s · 1 call$`))
+		if kept.Activity.Status != chat.StepDone {
+			t.Errorf("kept card status = %s, want done", kept.Activity.Status)
+		}
+		if got := tf.deletes.Load(); got != 0 {
+			t.Errorf("Delete called %d times on tool turn, want 0", got)
+		}
+	})
+
+	t.Run("narration both unsplit and split never deletes", func(t *testing.T) {
+		r, tf, feed, ctx := traceCardFed(t, ProgressStream, 4)
+		r.reanchorDelay = 0
+		first := ask(t, r, ctx, tf.cardFake)
+
+		// Unfinished call only: nothing to freeze, and !deletesCleanly() leaves
+		// the card where it is instead of post+delete moving it.
+		feed.sendAgent(callEvent(1, "a", "bash", "one"))
+		waitCard(t, tf.cardFake, first, "first running call", hasTitle(` · 1 call · bash$`))
+		feed.sendAgent(textEvent(2, "checking first"))
+		waitPosted(t, tf.cardFake, "checking first")
+
+		// Now finish call a, start call b, and narrate again -> splitCard runs!
+		feed.sendAgent(resultEvent(3, "a", "bash"))
+		feed.sendAgent(callEvent(4, "b", "read", "two"))
+		waitCard(t, tf.cardFake, first, "finished a and running b", func(rep chat.Reply) bool {
+			return rep.Activity != nil && len(rep.Activity.Steps) == 2 && rep.Activity.Steps[0].Status == chat.StepDone
+		})
+		feed.sendAgent(textEvent(5, "checking second"))
+		waitPosted(t, tf.cardFake, "checking second")
+		waitCard(t, tf.cardFake, first, "frozen first card", hasTitle(`^1 call · \d+s$`))
+
+		feed.sendAgent(resultEvent(6, "b", "read"))
+		feed.sendAgent(textEvent(7, "all clear"))
+		feed.sendLifecycle(daemon.EventTurnComplete, turnDone)
+		waitPosted(t, tf.cardFake, "all clear")
+		waitFor(t, func() bool { return len(tf.spinning()) == 0 }, "a card remained spinning")
+		if got := tf.deletes.Load(); got != 0 {
+			t.Errorf("Delete called %d times across narration splits, want 0", got)
+		}
+	})
+
+	t.Run("failed freeze in splitCard edits unused card or clock in place without Delete", func(t *testing.T) {
+		// Case A: unused != nil (running call carried into fresh), both when
+		// the finishing edit on fresh lands and when it fails (owing the edit).
+		for _, failUnusedEdit := range []bool{false, true} {
+			r, tf, e, ctx := traceCardUnit(t, ProgressStream, 2)
+			first := begin(t, r, ctx, tf.cardFake, e, cardConv)
+			e.noteActivity([]daemon.ToolCall{toolCall("a", "bash", "one"), toolCall("b", "read", "two")}, true, true)
+			e.noteCardResults([]daemon.ToolResult{{ID: "a", Name: "bash"}, {ID: "b", Name: "read"}})
+			e.noteActivity([]daemon.ToolCall{toolCall("c", "write", "three")}, true, true)
+
+			tf.setHooks(func(ref chat.MessageRef, rep chat.Reply) error {
+				if ref.ID == first && rep.Activity != nil && rep.Activity.Status == chat.StepDone {
+					return errors.New("freeze failed")
+				}
+				if failUnusedEdit && ref.ID != first {
+					return errors.New("unused edit failed")
+				}
+				return nil
+			}, nil)
+
+			e.emu.Lock()
+			split, _ := r.splitCard(ctx, e, cardConv, ProgressStream)
+			e.emu.Unlock()
+			if split {
+				t.Fatal("splitCard reported split=true when freeze failed")
+			}
+			if got := tf.deletes.Load(); got != 0 {
+				t.Fatalf("failUnusedEdit=%t: Delete called %d times, want 0", failUnusedEdit, got)
+			}
+			ids := tf.ids()
+			if len(ids) != 2 {
+				t.Fatalf("posted messages = %v, want [first, fresh]", ids)
+			}
+			fresh := ids[1]
+			if failUnusedEdit {
+				if owed := r.snapshot().Owed; len(owed) != 1 || owed[0].Message != fresh {
+					t.Errorf("owed = %+v, want fresh (%s) owed its finishing edit", owed, fresh)
+				}
+			} else {
+				got, ok := tf.now(fresh)
+				if !ok || got.Activity == nil || got.Activity.Status != chat.StepDone || got.Activity.Steps[0].Status != chat.StepUnfinished {
+					t.Errorf("unused card = %+v, want finished segment with unfinished call", got)
+				}
+			}
+		}
+
+		// Case B: unused == nil (no running call carried into fresh; fresh was
+		// posted as a plain clock). Failed freeze retires fresh in place to
+		// Stopped instead of calling Delete.
+		r, tf, e, ctx := traceCardUnit(t, ProgressStream, 4)
+		first := begin(t, r, ctx, tf.cardFake, e, cardConv)
+		e.noteActivity([]daemon.ToolCall{toolCall("a", "bash", "one")}, true, true)
+		e.noteCardResults([]daemon.ToolResult{{ID: "a", Name: "bash"}})
+		tf.setHooks(func(ref chat.MessageRef, _ chat.Reply) error {
+			if ref.ID == first {
+				return errors.New("freeze failed")
+			}
+			return nil
+		}, nil)
+
+		e.emu.Lock()
+		split, _ := r.splitCard(ctx, e, cardConv, ProgressStream)
+		e.emu.Unlock()
+		if split {
+			t.Fatal("splitCard reported split=true when freeze failed")
+		}
+		if got := tf.deletes.Load(); got != 0 {
+			t.Fatalf("unused==nil: Delete called %d times, want 0", got)
+		}
+		fresh := tf.ids()[1]
+		if got, ok := tf.now(fresh); !ok || got.Kind != chat.KindActivity || !strings.HasPrefix(got.Text, markFailed+" Stopped") {
+			t.Errorf("unused clock = %+v (standing=%t), want finalised Stopped line", got, ok)
+		}
+	})
+
+	t.Run("pre-empted splitCard and raced queuePlaceholder never call Delete", func(t *testing.T) {
+		for _, carryRunning := range []bool{true, false} {
+			r, tf, e, ctx := traceCardUnit(t, ProgressStream, 2)
+			card := begin(t, r, ctx, tf.cardFake, e, cardConv)
+			e.noteActivity([]daemon.ToolCall{toolCall("a", "bash", "one")}, true, true)
+			e.noteCardResults([]daemon.ToolResult{{ID: "a", Name: "bash"}})
+			if carryRunning {
+				e.noteActivity([]daemon.ToolCall{toolCall("b", "read", "two")}, true, true)
+			}
+
+			later := chat.MessageRef{Conversation: cardConv, ID: "later"}
+			took := false
+			tf.setHooks(func(ref chat.MessageRef, rep chat.Reply) error {
+				if ref.ID == card && !took && rep.Activity != nil && rep.Activity.Status == chat.StepDone {
+					took = true
+					e.supersede(later, time.Now())
+				}
+				return nil
+			}, nil)
+
+			e.emu.Lock()
+			r.splitCard(ctx, e, cardConv, ProgressStream)
+			e.emu.Unlock()
+
+			if !took {
+				t.Fatalf("carryRunning=%t: split never made freezing edit", carryRunning)
+			}
+			if got := tf.deletes.Load(); got != 0 {
+				t.Fatalf("carryRunning=%t: Delete called %d times on pre-empted split, want 0", carryRunning, got)
+			}
+			fresh := tf.ids()[1]
+			got, ok := tf.now(fresh)
+			if !ok {
+				t.Fatalf("carryRunning=%t: orphaned message missing", carryRunning)
+			}
+			if carryRunning {
+				if got.Activity == nil || got.Activity.Status != chat.StepDone || anyRunning(got.Activity.Steps) {
+					t.Errorf("orphaned card = %+v, want finished segment with nothing running", got.Activity)
+				}
+			} else if got.Kind != chat.KindActivity || !strings.HasPrefix(got.Text, markFailed+" Stopped") {
+				t.Errorf("orphaned clock = %+v, want Stopped final line", got)
+			}
+		}
+
+		// Raced queuePlaceholder: slot already filled before strandProgress runs.
+		r, tf, e, ctx := traceCardUnit(t, ProgressStream, 4)
+		_ = begin(t, r, ctx, tf.cardFake, e, cardConv) // fills progressMsg slot
+		r.queuePlaceholder(ctx, e, cardConv)
+		if got := tf.deletes.Load(); got != 0 {
+			t.Fatalf("raced queuePlaceholder called Delete %d times, want 0", got)
+		}
+		raced := tf.ids()[1]
+		if got, ok := tf.now(raced); !ok || got.Kind != chat.KindActivity || !strings.HasPrefix(got.Text, markFailed+" Stopped") {
+			t.Errorf("raced placeholder = %+v, want Stopped final line", got)
+		}
+	})
+
+	t.Run("correlated 429 on splitCard freeze and dropCard retries until settled", func(t *testing.T) {
+		for _, carryRunning := range []bool{true, false} {
+			r, tf, e, ctx := traceCardUnit(t, ProgressStream, 2)
+			r.cardRetry = 10 * time.Millisecond
+			first := begin(t, r, ctx, tf.cardFake, e, cardConv)
+			e.noteActivity([]daemon.ToolCall{toolCall("a", "bash", "one")}, true, true)
+			e.noteCardResults([]daemon.ToolResult{{ID: "a", Name: "bash"}})
+			if carryRunning {
+				e.noteActivity([]daemon.ToolCall{toolCall("b", "read", "two")}, true, true)
+			}
+
+			var rateLimited atomic.Bool
+			rateLimited.Store(true)
+			tf.setHooks(func(chat.MessageRef, chat.Reply) error {
+				if rateLimited.Load() {
+					return errors.New("429 per-space write quota")
+				}
+				return nil
+			}, nil)
+
+			e.emu.Lock()
+			split, _ := r.splitCard(ctx, e, cardConv, ProgressStream)
+			e.emu.Unlock()
+			if split {
+				t.Fatalf("carryRunning=%t: splitCard succeeded under 429", carryRunning)
+			}
+			fresh := tf.ids()[1]
+			if owed := r.snapshot().Owed; len(owed) != 1 || owed[0].Message != fresh {
+				t.Fatalf("carryRunning=%t: owed immediately after 429 = %+v, want [%s]", carryRunning, owed, fresh)
+			}
+
+			// Once the 1-second 429 window clears, background retryFinish settles
+			// fresh without waiting for process exit and removes it from Owed.
+			rateLimited.Store(false)
+			waitFor(t, func() bool {
+				got, ok := tf.now(fresh)
+				if !ok {
+					return false
+				}
+				if carryRunning {
+					return got.Activity != nil && got.Activity.Status == chat.StepDone && !anyRunning(got.Activity.Steps)
+				}
+				return got.Kind == chat.KindActivity && strings.HasPrefix(got.Text, markFailed+" Stopped")
+			}, fmt.Sprintf("carryRunning=%t: fresh %s never settled after 429 cleared", carryRunning, fresh))
+			waitFor(t, func() bool { return len(r.snapshot().Owed) == 0 },
+				fmt.Sprintf("carryRunning=%t: Owed not cleared after background retry landed", carryRunning))
+			if got := tf.deletes.Load(); got != 0 {
+				t.Errorf("carryRunning=%t: Delete called %d times, want 0", carryRunning, got)
+			}
+			_ = first
+		}
+	})
+}

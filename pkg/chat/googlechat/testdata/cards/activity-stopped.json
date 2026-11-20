@@ -1,0 +1,26 @@
+{
+  "sections": [
+    {
+      "collapsible": true,
+      "uncollapsibleWidgetsCount": 1,
+      "widgets": [
+        {
+          "decoratedText": {
+            "startIcon": {
+              "materialIcon": {
+                "name": "cancel"
+              }
+            },
+            "text": "\u003cb\u003eInterrupted by a restart · 3 calls\u003c/b\u003e",
+            "wrapText": true
+          }
+        },
+        {
+          "textParagraph": {
+            "text": "• ✔︎ \u003cb\u003ebash\u003c/b\u003e  2.3s  \u003ctt\u003ekubectl get pods -A\u003c/tt\u003e\u003cbr\u003e• – \u003cb\u003e_fallback\u003c/b\u003e · 1 call  \u003ctt\u003echeck billing\u003c/tt\u003e\u003cbr\u003e    ◦ – \u003cb\u003egrep\u003c/b\u003e  \u003ctt\u003ememory\u003c/tt\u003e"
+          }
+        }
+      ]
+    }
+  ]
+}

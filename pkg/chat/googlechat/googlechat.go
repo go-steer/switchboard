@@ -190,6 +190,11 @@ type Adapter struct {
 	// for a deployment that did not configure one. See actionURL.
 	learnedURL atomic.Pointer[string]
 
+	// noActivityCards latches once Chat rejects an activity card (400/413),
+	// so later ticks and turns draw tool activity as plain text without
+	// spending a rejected write on every edit.
+	noActivityCards atomic.Bool
+
 	// clickWait overrides clickBudget; zero means the default. A test seam.
 	clickWait time.Duration
 }
@@ -560,7 +565,7 @@ func choicesOf(h chat.Handler, name string) []string {
 // goes as Chat text split across as many in-thread posts as it needs so nothing
 // is truncated. An empty reply posts nothing.
 func (a *Adapter) Send(ctx context.Context, r chat.Reply) (chat.MessageRef, error) {
-	return a.postKeyed(ctx, r.Conversation, a.cardFor(r), replyText(r), r.Key)
+	return a.postReply(ctx, r.Conversation, a.cardFor(r), replyText(r), r.Key, r.Activity != nil)
 }
 
 // requestID turns a reply's key, and which of its messages this is, into a
@@ -603,7 +608,16 @@ func replyText(r chat.Reply) string {
 
 // cardFor picks the card that renders this reply, or nil for the text path.
 func (a *Adapter) cardFor(r chat.Reply) *chatv1.GoogleAppsCardV1Card {
-	if a.cards == CardsOff || strings.TrimSpace(r.Text) == "" {
+	if a.cards == CardsOff {
+		return nil
+	}
+	if r.Activity != nil {
+		if a.noActivityCards.Load() {
+			return nil
+		}
+		return activityCard(r.Activity)
+	}
+	if strings.TrimSpace(r.Text) == "" {
 		return nil
 	}
 	if r.Kind == chat.KindAnswer {
@@ -668,6 +682,10 @@ func (a *Adapter) post(ctx context.Context, conv string, card *chatv1.GoogleApps
 // creates carries a request ID derived from the key and the message's place in
 // the reply, so the same reply posted again creates nothing new.
 func (a *Adapter) postKeyed(ctx context.Context, conv string, card *chatv1.GoogleAppsCardV1Card, text, key string) (chat.MessageRef, error) {
+	return a.postReply(ctx, conv, card, text, key, false)
+}
+
+func (a *Adapter) postReply(ctx context.Context, conv string, card *chatv1.GoogleAppsCardV1Card, text, key string, isActivity bool) (chat.MessageRef, error) {
 	space, thread, ok := splitConversation(conv)
 	if !ok {
 		return chat.MessageRef{}, fmt.Errorf("googlechat: malformed conversation key %q", conv)
@@ -695,7 +713,11 @@ func (a *Adapter) postKeyed(ctx context.Context, conv string, card *chatv1.Googl
 		if !isCardRejection(err) {
 			return chat.MessageRef{}, fmt.Errorf("googlechat: post card to %s: %w", conv, platformErr(err))
 		}
-		a.logf.Warnf("googlechat: card rejected for %s (%v); retrying as text", conv, err)
+		if isActivity {
+			a.refuseActivityCards(conv, err)
+		} else {
+			a.logf.Warnf("googlechat: card rejected for %s (%v); retrying as text", conv, err)
+		}
 	}
 	if text == "" {
 		return chat.MessageRef{}, nil
@@ -739,12 +761,20 @@ func (a *Adapter) Update(ctx context.Context, ref chat.MessageRef, r chat.Reply)
 	if ref.ID == "" {
 		return nil
 	}
-	return a.rewrite(ctx, ref.ID, a.cardFor(r), replyText(r))
+	where := ref.Conversation
+	if where == "" {
+		where = ref.ID
+	}
+	return a.rewriteCard(ctx, ref.ID, where, a.cardFor(r), replyText(r), r.Activity != nil)
 }
 
 // rewrite patches one message to the given card or text, falling back to text
 // when Chat rejects the card.
 func (a *Adapter) rewrite(ctx context.Context, name string, card *chatv1.GoogleAppsCardV1Card, text string) error {
+	return a.rewriteCard(ctx, name, name, card, text, false)
+}
+
+func (a *Adapter) rewriteCard(ctx context.Context, name, where string, card *chatv1.GoogleAppsCardV1Card, text string, isActivity bool) error {
 	text = strings.TrimSpace(text)
 	whole := len(text) <= chatTextLimit
 	text = clamp(text, chatTextLimit)
@@ -767,15 +797,23 @@ func (a *Adapter) rewrite(ctx context.Context, name string, card *chatv1.GoogleA
 		if !isCardRejection(err) {
 			return fmt.Errorf("googlechat: update %s: %w", name, platformErr(err))
 		}
-		if !whole {
-			// The card held more than one text message can. Clamping it into
-			// one would overwrite the message with a cut-off copy — on an
-			// answer whose card was rejected at Send, the head of the text
-			// already split across the messages after it; on an ingress
-			// timeline, a silent truncation. Leave the message as it is.
-			return fmt.Errorf("googlechat: update %s: card rejected and the text does not fit one message: %w", name, platformErr(err))
+		if isActivity {
+			// An activity card is always one in-place progress message, never
+			// the head of a chunked answer or an ingress timeline: clamping
+			// its text fallback into one message is strictly better than
+			// leaving a running card stuck in the thread.
+			a.refuseActivityCards(where, err)
+		} else {
+			if !whole {
+				// The card held more than one text message can. Clamping it into
+				// one would overwrite the message with a cut-off copy — on an
+				// answer whose card was rejected at Send, the head of the text
+				// already split across the messages after it; on an ingress
+				// timeline, a silent truncation. Leave the message as it is.
+				return fmt.Errorf("googlechat: update %s: card rejected and the text does not fit one message: %w", name, platformErr(err))
+			}
+			a.logf.Warnf("googlechat: card rejected updating %s (%v); retrying as text", name, err)
 		}
-		a.logf.Warnf("googlechat: card rejected updating %s (%v); retrying as text", name, err)
 	}
 	if err := a.msg.patch(ctx, name, &chatv1.Message{Text: text}, patchMask); err != nil {
 		return fmt.Errorf("googlechat: update %s: %w", name, platformErr(err))
