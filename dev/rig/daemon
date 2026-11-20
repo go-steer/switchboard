@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# The rig's core-agent daemon: dev/demo/daemon with the machine's rig.env
+# filled in. Arguments are passed to dev/demo/daemon after the rig's own, so
+# a repeated flag wins: dev/rig/daemon --permissions ask, --model echo.
+set -euo pipefail
+source "$(dirname "$0")/lib.sh"
+
+bin="$(rig_bin core-agent)"
+rig_token
+
+# Vertex resolves its project and location from the environment.
+# gemini-3.7-flash is served from the global location only; a regional one
+# answers 404 model_not_found, which reads like a typo in the model name.
+[[ -z ${RIG_VERTEX_PROJECT:-} ]] || export GOOGLE_CLOUD_PROJECT="$RIG_VERTEX_PROJECT"
+[[ -z ${RIG_VERTEX_LOCATION:-} ]] || export GOOGLE_CLOUD_LOCATION="$RIG_VERTEX_LOCATION"
+
+workdir="$RIG_STATE/daemon"
+mkdir -p "$workdir"
+
+# Copied on every start, so a rebuild of core-agent brings its persona
+# along. RIG_PERSONA names a different file; RIG_PERSONA=none runs bare.
+persona="${RIG_PERSONA:-$RIG_STATE/core-agent.AGENTS.md}"
+if [[ $persona == none ]]; then
+  rm -f "$workdir/AGENTS.md"
+elif [[ -f $persona ]]; then
+  cp "$persona" "$workdir/AGENTS.md"
+else
+  rm -f "$workdir/AGENTS.md"
+  echo "rig: no persona at $persona; the daemon runs without one" >&2
+fi
+
+# RIG_PROVIDER belongs to RIG_MODEL. When the model that will actually run
+# is echo (from rig.env, or a --model echo override) and no --provider is
+# given on the command line, leave it off, so dev/demo/daemon picks the
+# echo provider instead of running Vertex for a model called echo.
+model="${RIG_MODEL:-echo}"
+provider_arg=0
+prev=""
+for a in "$@"; do
+  [[ $prev != --model ]] || model="$a"
+  [[ $a != --provider ]] || provider_arg=1
+  prev="$a"
+done
+
+args=(
+  --bin "$bin"
+  --workdir "$workdir"
+  --port "$RIG_DAEMON_PORT"
+  --model "${RIG_MODEL:-echo}"
+  --permissions "${RIG_PERMISSIONS:-yolo}"
+)
+if [[ -n ${RIG_PROVIDER:-} && $model != echo ]] && ((!provider_arg)); then
+  args+=(--provider "$RIG_PROVIDER")
+fi
+# shellcheck disable=SC2206 # a space-separated list, split on purpose
+callers=(${RIG_CALLERS:-})
+for c in ${callers+"${callers[@]}"}; do
+  args+=(--caller "$c")
+done
+
+rig_log daemon
+exec "$rig_repo/dev/demo/daemon" "${args[@]}" "$@"

@@ -6,6 +6,26 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`dev/rig`, the live test rig, in the repo.** Scripts to build and run a
+  core-agent daemon with the Slack and Google Chat gateways against the real
+  apps (Chat over Pub/Sub, or over HTTP through a cloudflared tunnel), from
+  any machine, one at a time. Config and secrets live in
+  `~/.config/switchboard-rig`, binaries, token, session database and logs in
+  `~/.local/state/switchboard-rig`; nothing secret is in the checkout.
+  `dev/rig/README.md` covers setting up a machine, moving the rig between
+  machines, and handing the Chat app back. It complements
+  `dev/demo/slack-rig` (the shipmind workload on Slack) and ignores the
+  `RIG_*` variables that one reads from the shell.
+- **`dev/demo/daemon --permissions MODE`.** Any mode but the default `yolo`
+  also turns off core-agent's built-in allow list, so approvals can be
+  tested end to end.
+- **`verify-no-secrets` presubmit.** Fails on anything shaped like a private
+  key or a live Slack (including rotating and refresh forms), Google API or
+  GitHub (classic or fine-grained) token, in tracked files and in
+  untracked ones git is not ignoring.
+
 ### Changed
 
 - **Slack draws a turn's tool activity as one `task_card`, kept when the turn

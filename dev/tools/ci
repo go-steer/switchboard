@@ -25,6 +25,7 @@ presubmits="$root/dev/ci/presubmits"
 # Fast-fail order: cheapest / most-likely-to-fail first.
 checks=(
   verify-go-format
+  verify-no-secrets
   vet
   build
   test-unit

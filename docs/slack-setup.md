@@ -177,7 +177,10 @@ For end-to-end live testing against a real subagent workload (building
 `core-agent` at its latest tag, importing a `shipmind` SRE bundle over the
 hosted read-only GKE MCP server on Vertex, and running `switchboard` with rich
 blocks, task cards, and usage footers), use `dev/demo/slack-rig` (`--help` for
-options and env overrides).
+options and env overrides). For the platform surface on both Slack and Google
+Chat against core-agent `main`, from any machine, use
+[`dev/rig`](../dev/rig/README.md). Only one rig may run on a Slack app at a time:
+Socket Mode splits events between every connection.
 
 ## Demo script
 
