@@ -22,6 +22,19 @@ set -euo pipefail
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 presubmits="$root/dev/ci/presubmits"
 
+# Align with go.mod's Go toolchain when the host's default `go` is a newer
+# minor release (matching actions/setup-go's go-version-file in CI).
+host_minor="$(go env GOVERSION 2>/dev/null | sed -nE 's/^go1\.([0-9]+).*/\1/p' || true)"
+gomod_ver="$(awk '/^go 1\.[0-9]+/ {print $2; exit}' "$root/go.mod" || true)"
+gomod_minor="$(sed -nE 's/^1\.([0-9]+).*/\1/p' <<<"$gomod_ver")"
+if [[ -z "${GOTOOLCHAIN:-}" && -n "$host_minor" && -n "$gomod_minor" ]] && (( gomod_minor < host_minor )) && [[ "$gomod_ver" == *.*.* ]]; then
+  export GOTOOLCHAIN="go${gomod_ver}+auto"
+  goroot="$(go env GOROOT 2>/dev/null || true)"
+  if [[ -n "$goroot" && -x "$goroot/bin/go" ]]; then
+    export PATH="$goroot/bin:$PATH"
+  fi
+fi
+
 # Fast-fail order: cheapest / most-likely-to-fail first.
 checks=(
   verify-go-format
@@ -38,5 +51,8 @@ for c in "${checks[@]}"; do
   echo "=== $c ==="
   "$presubmits/$c"
 done
+
+echo "=== lint-go ==="
+"$root/dev/tools/lint-go"
 
 echo "=== all presubmits passed ==="
